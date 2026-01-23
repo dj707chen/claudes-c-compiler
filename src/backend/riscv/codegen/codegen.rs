@@ -134,7 +134,7 @@ impl RiscvCodegen {
         match ty {
             IrType::I8 | IrType::U8 => "sb",
             IrType::I16 | IrType::U16 => "sh",
-            IrType::I32 | IrType::U32 => "sw",
+            IrType::I32 | IrType::U32 | IrType::F32 => "sw",
             _ => "sd",
         }
     }
@@ -146,7 +146,7 @@ impl RiscvCodegen {
             IrType::I16 => "lh",
             IrType::U16 => "lhu",
             IrType::I32 => "lw",
-            IrType::U32 => "lwu",
+            IrType::U32 | IrType::F32 => "lwu",
             _ => "ld",
         }
     }

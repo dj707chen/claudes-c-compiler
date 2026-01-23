@@ -594,6 +594,23 @@ impl Lowerer {
                         return ret_ty;
                     }
                 }
+                // For indirect calls (function pointers), determine return type from CType
+                if let Some(ctype) = self.get_expr_ctype(func) {
+                    match &ctype {
+                        CType::Pointer(inner) => match inner.as_ref() {
+                            CType::Function(ft) => return IrType::from_ctype(&ft.return_type),
+                            CType::Pointer(ret) => match ret.as_ref() {
+                                CType::Float => return IrType::F32,
+                                CType::Double => return IrType::F64,
+                                _ => {}
+                            },
+                            CType::Float => return IrType::F32,
+                            CType::Double => return IrType::F64,
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                }
                 return IrType::I64;
             }
             _ => {}

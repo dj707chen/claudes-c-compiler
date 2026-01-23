@@ -884,24 +884,118 @@ impl Lowerer {
 
         let total_size = layout.size;
         let mut bytes = vec![0u8; total_size];
-
-        // Track current field index for positional (non-designated) initializers
-        let mut current_field_idx = 0usize;
-
-        for item in items {
-            let field_idx = self.resolve_struct_init_field_idx(item, layout, current_field_idx);
-            if field_idx >= layout.fields.len() { break; }
-            let field_layout = &layout.fields[field_idx];
-            let field_offset = field_layout.offset;
-
-            self.write_init_item_to_bytes(&mut bytes, field_offset, &item.init, &field_layout.ty);
-
-            current_field_idx = field_idx + 1;
-        }
+        self.fill_struct_global_bytes(items, layout, &mut bytes, 0);
 
         // Emit as array of I8 (byte) constants
         let values: Vec<IrConst> = bytes.iter().map(|&b| IrConst::I8(b as i8)).collect();
         GlobalInit::Array(values)
+    }
+
+    /// Recursively fill byte buffer for struct global initialization.
+    /// Returns the number of initializer items consumed.
+    fn fill_struct_global_bytes(
+        &self,
+        items: &[InitializerItem],
+        layout: &StructLayout,
+        bytes: &mut [u8],
+        base_offset: usize,
+    ) -> usize {
+        let mut item_idx = 0usize;
+        let mut current_field_idx = 0usize;
+
+        while item_idx < items.len() && current_field_idx < layout.fields.len() {
+            let item = &items[item_idx];
+
+            // Determine which field this initializer targets
+            let field_idx = if let Some(Designator::Field(ref name)) = item.designators.first() {
+                layout.fields.iter().position(|f| f.name == *name).unwrap_or(current_field_idx)
+            } else {
+                let mut idx = current_field_idx;
+                while idx < layout.fields.len() && layout.fields[idx].name.is_empty() {
+                    idx += 1;
+                }
+                idx
+            };
+
+            if field_idx >= layout.fields.len() { break; }
+            let field_layout = &layout.fields[field_idx];
+            let field_offset = base_offset + field_layout.offset;
+
+            match &field_layout.ty {
+                CType::Struct(st) => {
+                    let sub_layout = StructLayout::for_struct(&st.fields);
+                    match &item.init {
+                        Initializer::List(sub_items) => {
+                            // Nested braces: recursively fill inner struct
+                            self.fill_struct_global_bytes(sub_items, &sub_layout, bytes, field_offset);
+                            item_idx += 1;
+                        }
+                        Initializer::Expr(_) => {
+                            // Flat init: consume items for inner struct
+                            let consumed = self.fill_struct_global_bytes(&items[item_idx..], &sub_layout, bytes, field_offset);
+                            item_idx += consumed;
+                        }
+                    }
+                }
+                CType::Union(st) => {
+                    let sub_layout = StructLayout::for_union(&st.fields);
+                    match &item.init {
+                        Initializer::List(sub_items) => {
+                            self.fill_struct_global_bytes(sub_items, &sub_layout, bytes, field_offset);
+                            item_idx += 1;
+                        }
+                        Initializer::Expr(_) => {
+                            let consumed = self.fill_struct_global_bytes(&items[item_idx..], &sub_layout, bytes, field_offset);
+                            item_idx += consumed;
+                        }
+                    }
+                }
+                CType::Array(elem_ty, Some(arr_size)) => {
+                    let elem_size = elem_ty.size();
+                    let elem_ir_ty = IrType::from_ctype(elem_ty);
+                    match &item.init {
+                        Initializer::List(sub_items) => {
+                            for (ai, sub_item) in sub_items.iter().enumerate() {
+                                if ai >= *arr_size { break; }
+                                let elem_offset = field_offset + ai * elem_size;
+                                if let Initializer::Expr(expr) = &sub_item.init {
+                                    let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                                    self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
+                                }
+                            }
+                            item_idx += 1;
+                        }
+                        Initializer::Expr(expr) => {
+                            let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                            let field_ir_ty = IrType::from_ctype(&field_layout.ty);
+                            self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
+                            item_idx += 1;
+                        }
+                    }
+                }
+                _ => {
+                    // Scalar field
+                    let field_ir_ty = IrType::from_ctype(&field_layout.ty);
+                    let val = match &item.init {
+                        Initializer::Expr(expr) => {
+                            self.eval_const_expr(expr).unwrap_or(IrConst::I64(0))
+                        }
+                        Initializer::List(sub_items) => {
+                            // Scalar with braces: int x = {5};
+                            if let Some(first) = sub_items.first() {
+                                if let Initializer::Expr(expr) = &first.init {
+                                    self.eval_const_expr(expr).unwrap_or(IrConst::I64(0))
+                                } else { IrConst::I64(0) }
+                            } else { IrConst::I64(0) }
+                        }
+                    };
+                    self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
+                    item_idx += 1;
+                }
+            }
+            current_field_idx = field_idx + 1;
+        }
+        item_idx
     }
 
     /// Lower a struct global init that contains address expressions.

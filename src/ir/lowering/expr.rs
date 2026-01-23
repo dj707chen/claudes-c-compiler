@@ -463,6 +463,13 @@ impl Lowerer {
             None
         };
 
+        // Pre-determine variadic status for argument promotion decisions
+        let pre_call_variadic = if let Expr::Identifier(name, _) = func {
+            self.is_function_variadic(name)
+        } else {
+            false
+        };
+
         let mut arg_types = Vec::with_capacity(args.len());
         let arg_vals: Vec<Operand> = args.iter().enumerate().map(|(i, a)| {
             let val = self.lower_expr(a);
@@ -476,8 +483,9 @@ impl Lowerer {
                     return self.emit_implicit_cast(val, arg_ty, param_ty);
                 }
             }
-            // Default promotion: float -> double for variadic args
-            if arg_ty == IrType::F32 {
+            // Default promotion: float -> double for variadic args or when param types are known.
+            // For non-variadic function pointer calls without param type info, preserve F32.
+            if arg_ty == IrType::F32 && (pre_call_variadic || param_types.is_some()) {
                 arg_types.push(IrType::F64);
                 return self.emit_implicit_cast(val, IrType::F32, IrType::F64);
             }
@@ -498,6 +506,9 @@ impl Lowerer {
         arg_types: Vec<IrType>,
         is_variadic: bool,
     ) -> IrType {
+        // Determine indirect call return type from function pointer CType info
+        let indirect_ret_ty = self.get_func_ptr_return_ir_type(func);
+
         match func {
             Expr::Identifier(name, _) => {
                 let is_local_fptr = self.locals.contains_key(name)
@@ -513,9 +524,9 @@ impl Lowerer {
                     let ret_ty = self.function_ptr_return_types.get(name).copied().unwrap_or(IrType::I64);
                     self.emit(Instruction::CallIndirect {
                         dest: Some(dest), func_ptr: Operand::Value(ptr_val),
-                        args: arg_vals, arg_types, return_type: ret_ty, is_variadic,
+                        args: arg_vals, arg_types, return_type: indirect_ret_ty, is_variadic,
                     });
-                    ret_ty
+                    indirect_ret_ty
                 } else if is_global_fptr {
                     let addr = self.fresh_value();
                     self.emit(Instruction::GlobalAddr { dest: addr, name: name.clone() });
@@ -524,9 +535,9 @@ impl Lowerer {
                     let ret_ty = self.function_ptr_return_types.get(name).copied().unwrap_or(IrType::I64);
                     self.emit(Instruction::CallIndirect {
                         dest: Some(dest), func_ptr: Operand::Value(ptr_val),
-                        args: arg_vals, arg_types, return_type: ret_ty, is_variadic,
+                        args: arg_vals, arg_types, return_type: indirect_ret_ty, is_variadic,
                     });
-                    ret_ty
+                    indirect_ret_ty
                 } else {
                     // Direct call - look up return type
                     let ret_ty = self.function_return_types.get(name).copied().unwrap_or(IrType::I64);
@@ -542,18 +553,18 @@ impl Lowerer {
                 let func_ptr = self.lower_expr(inner);
                 self.emit(Instruction::CallIndirect {
                     dest: Some(dest), func_ptr, args: arg_vals, arg_types,
-                    return_type: IrType::I64, is_variadic: false,
+                    return_type: indirect_ret_ty, is_variadic: false,
                 });
-                IrType::I64
+                indirect_ret_ty
             }
             _ => {
                 // General expression as callee (e.g., array[i](...), struct.fptr(...))
                 let func_ptr = self.lower_expr(func);
                 self.emit(Instruction::CallIndirect {
                     dest: Some(dest), func_ptr, args: arg_vals, arg_types,
-                    return_type: IrType::I64, is_variadic: false,
+                    return_type: indirect_ret_ty, is_variadic: false,
                 });
-                IrType::I64
+                indirect_ret_ty
             }
         }
     }
@@ -1356,5 +1367,47 @@ impl Lowerer {
             | "fscanf" | "dprintf" | "vprintf" | "vfprintf" | "vsprintf" | "vsnprintf"
             | "syslog" | "err" | "errx" | "warn" | "warnx" | "asprintf" | "vasprintf"
             | "open" | "fcntl" | "ioctl" | "execl" | "execlp" | "execle")
+    }
+
+    /// Determine the return type of a function pointer expression for indirect calls.
+    /// Falls back to I64 if the type cannot be determined.
+    fn get_func_ptr_return_ir_type(&self, func_expr: &Expr) -> IrType {
+        // Try to get the CType of the function expression
+        if let Some(ctype) = self.get_expr_ctype(func_expr) {
+            return Self::extract_return_type_from_ctype(&ctype);
+        }
+        // For Deref expressions, check the inner expression's type
+        if let Expr::Deref(inner, _) = func_expr {
+            if let Some(ctype) = self.get_expr_ctype(inner) {
+                return Self::extract_return_type_from_ctype(&ctype);
+            }
+        }
+        IrType::I64
+    }
+
+    fn extract_return_type_from_ctype(ctype: &CType) -> IrType {
+        match ctype {
+            CType::Pointer(inner) => {
+                match inner.as_ref() {
+                    CType::Function(ft) => IrType::from_ctype(&ft.return_type),
+                    // Function pointer declared as (*fp)(params) produces
+                    // Pointer(Pointer(ReturnType)) from build_full_ctype.
+                    // Peel one more layer to get to the return type.
+                    CType::Pointer(ret) => {
+                        match ret.as_ref() {
+                            CType::Float => IrType::F32,
+                            CType::Double => IrType::F64,
+                            _ => IrType::I64,
+                        }
+                    }
+                    // For Pointer(ReturnType) from param type_spec encoding
+                    CType::Float => IrType::F32,
+                    CType::Double => IrType::F64,
+                    _ => IrType::I64,
+                }
+            }
+            CType::Function(ft) => IrType::from_ctype(&ft.return_type),
+            _ => IrType::I64,
+        }
     }
 }
