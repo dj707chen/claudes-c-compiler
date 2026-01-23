@@ -1,0 +1,17 @@
+Fix trailing _Complex type specifier parsing
+
+The parser currently ignores _Complex when it appears AFTER the base type
+(e.g., "float _Complex", "double _Complex", "long double _Complex").
+This is the order used by glibc's complex.h header, so practically all
+complex.h functions (crealf, cimagf, creal, cimag, etc.) have their
+parameter types parsed as plain float/double instead of complex types.
+
+This fix will:
+1. Update the parser to properly set has_complex when _Complex appears
+   after float/double/long in type specifier parsing
+2. Ensure "float _Complex", "double _Complex", "long double _Complex"
+   all produce the correct ComplexFloat/ComplexDouble/ComplexLongDouble types
+3. Also handle "int _Complex" (which is a GCC extension, = _Complex double)
+
+This should unlock a large number of complex number test failures since
+most of them use complex.h which declares functions with "float _Complex" style.
