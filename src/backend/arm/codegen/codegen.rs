@@ -1,505 +1,194 @@
-use std::collections::{HashMap, HashSet};
 use crate::ir::ir::*;
 use crate::common::types::IrType;
-use crate::backend::common::{self, AsmOutput, PtrDirective};
+use crate::backend::common::PtrDirective;
+use crate::backend::codegen_shared::*;
 
-/// AArch64 code generator. Produces assembly text from IR.
+/// AArch64 code generator. Implements the ArchCodegen trait for the shared framework.
+/// Uses AAPCS64 calling convention with stack-based allocation.
 pub struct ArmCodegen {
-    out: AsmOutput,
-    stack_offset: i64,
-    value_locations: HashMap<u32, i64>, // value -> stack offset from sp
-    /// Track which Values are allocas (their stack slot IS the data, not a pointer to data).
-    alloca_values: HashSet<u32>,
+    state: CodegenState,
+    /// Frame size for the current function (needed for epilogue in terminators).
+    current_frame_size: i64,
 }
 
 impl ArmCodegen {
     pub fn new() -> Self {
         Self {
-            out: AsmOutput::new(),
-            stack_offset: 0,
-            value_locations: HashMap::new(),
-            alloca_values: HashSet::new(),
+            state: CodegenState::new(),
+            current_frame_size: 0,
         }
     }
 
     pub fn generate(mut self, module: &IrModule) -> String {
-        // Emit data sections using shared code
-        common::emit_data_sections(&mut self.out, module, PtrDirective::Xword);
-
-        // Text section
-        self.out.emit(".section .text");
-        for func in &module.functions {
-            if !func.is_declaration {
-                self.generate_function(func);
-            }
-        }
-
-        self.out.buf
+        generate_module(&mut self, module)
     }
 
-    fn emit(&mut self, s: &str) {
-        self.out.emit(s);
-    }
+    // --- AArch64 large-offset helpers ---
 
     /// Emit a large immediate subtraction from sp. For values > 4095, uses x16 as scratch.
     fn emit_sub_sp(&mut self, n: i64) {
-        if n == 0 {
-            return;
-        }
+        if n == 0 { return; }
         if n <= 4095 {
-            self.emit(&format!("    sub sp, sp, #{}", n));
+            self.state.emit(&format!("    sub sp, sp, #{}", n));
         } else if n <= 65535 {
-            // Use mov imm16 + sub
-            self.emit(&format!("    mov x16, #{}", n));
-            self.emit("    sub sp, sp, x16");
+            self.state.emit(&format!("    mov x16, #{}", n));
+            self.state.emit("    sub sp, sp, x16");
         } else {
-            // Use movz + movk for larger values
-            self.emit(&format!("    movz x16, #{}",  n & 0xFFFF));
+            self.state.emit(&format!("    movz x16, #{}", n & 0xFFFF));
             if (n >> 16) & 0xFFFF != 0 {
-                self.emit(&format!("    movk x16, #{}, lsl #16", (n >> 16) & 0xFFFF));
+                self.state.emit(&format!("    movk x16, #{}, lsl #16", (n >> 16) & 0xFFFF));
             }
             if (n >> 32) & 0xFFFF != 0 {
-                self.emit(&format!("    movk x16, #{}, lsl #32", (n >> 32) & 0xFFFF));
+                self.state.emit(&format!("    movk x16, #{}, lsl #32", (n >> 32) & 0xFFFF));
             }
-            self.emit("    sub sp, sp, x16");
+            self.state.emit("    sub sp, sp, x16");
         }
     }
 
-    /// Emit a large immediate addition to sp. For values > 4095, uses x16 as scratch.
+    /// Emit a large immediate addition to sp.
     fn emit_add_sp(&mut self, n: i64) {
-        if n == 0 {
-            return;
-        }
+        if n == 0 { return; }
         if n <= 4095 {
-            self.emit(&format!("    add sp, sp, #{}", n));
+            self.state.emit(&format!("    add sp, sp, #{}", n));
         } else if n <= 65535 {
-            self.emit(&format!("    mov x16, #{}", n));
-            self.emit("    add sp, sp, x16");
+            self.state.emit(&format!("    mov x16, #{}", n));
+            self.state.emit("    add sp, sp, x16");
         } else {
-            self.emit(&format!("    movz x16, #{}", n & 0xFFFF));
+            self.state.emit(&format!("    movz x16, #{}", n & 0xFFFF));
             if (n >> 16) & 0xFFFF != 0 {
-                self.emit(&format!("    movk x16, #{}, lsl #16", (n >> 16) & 0xFFFF));
+                self.state.emit(&format!("    movk x16, #{}, lsl #16", (n >> 16) & 0xFFFF));
             }
             if (n >> 32) & 0xFFFF != 0 {
-                self.emit(&format!("    movk x16, #{}, lsl #32", (n >> 32) & 0xFFFF));
+                self.state.emit(&format!("    movk x16, #{}, lsl #32", (n >> 32) & 0xFFFF));
             }
-            self.emit("    add sp, sp, x16");
+            self.state.emit("    add sp, sp, x16");
         }
     }
 
-    /// Emit store to [sp, #offset], handling large offsets via x16 scratch register.
-    /// `instr` should be "str", "strb", "strh", etc.
+    /// Emit store to [sp, #offset], handling large offsets via x16.
     fn emit_store_to_sp(&mut self, reg: &str, offset: i64, instr: &str) {
         if offset >= 0 && offset <= 32760 {
-            // Within unsigned offset range for most instructions
-            self.emit(&format!("    {} {}, [sp, #{}]", instr, reg, offset));
+            self.state.emit(&format!("    {} {}, [sp, #{}]", instr, reg, offset));
         } else {
-            // Large offset: compute address in x16
-            if offset <= 65535 {
-                self.emit(&format!("    mov x16, #{}", offset));
-            } else {
-                self.emit(&format!("    movz x16, #{}", offset & 0xFFFF));
-                if (offset >> 16) & 0xFFFF != 0 {
-                    self.emit(&format!("    movk x16, #{}, lsl #16", (offset >> 16) & 0xFFFF));
-                }
-            }
-            self.emit("    add x16, sp, x16");
-            self.emit(&format!("    {} {}, [x16]", instr, reg));
+            self.load_large_imm("x16", offset);
+            self.state.emit("    add x16, sp, x16");
+            self.state.emit(&format!("    {} {}, [x16]", instr, reg));
         }
     }
 
-    /// Emit load from [sp, #offset], handling large offsets via x16 scratch register.
-    /// `instr` should be "ldr", "ldrb", "ldrh", "ldrsb", "ldrsh", "ldrsw", etc.
+    /// Emit load from [sp, #offset], handling large offsets via x16.
     fn emit_load_from_sp(&mut self, reg: &str, offset: i64, instr: &str) {
         if offset >= 0 && offset <= 32760 {
-            self.emit(&format!("    {} {}, [sp, #{}]", instr, reg, offset));
+            self.state.emit(&format!("    {} {}, [sp, #{}]", instr, reg, offset));
         } else {
-            if offset <= 65535 {
-                self.emit(&format!("    mov x16, #{}", offset));
-            } else {
-                self.emit(&format!("    movz x16, #{}", offset & 0xFFFF));
-                if (offset >> 16) & 0xFFFF != 0 {
-                    self.emit(&format!("    movk x16, #{}, lsl #16", (offset >> 16) & 0xFFFF));
-                }
-            }
-            self.emit("    add x16, sp, x16");
-            self.emit(&format!("    {} {}, [x16]", instr, reg));
+            self.load_large_imm("x16", offset);
+            self.state.emit("    add x16, sp, x16");
+            self.state.emit(&format!("    {} {}, [x16]", instr, reg));
         }
     }
 
     /// Emit `add dest, sp, #offset` handling large offsets.
     fn emit_add_sp_offset(&mut self, dest: &str, offset: i64) {
         if offset >= 0 && offset <= 4095 {
-            self.emit(&format!("    add {}, sp, #{}", dest, offset));
+            self.state.emit(&format!("    add {}, sp, #{}", dest, offset));
         } else {
-            if offset <= 65535 {
-                self.emit(&format!("    mov x16, #{}", offset));
-            } else {
-                self.emit(&format!("    movz x16, #{}", offset & 0xFFFF));
-                if (offset >> 16) & 0xFFFF != 0 {
-                    self.emit(&format!("    movk x16, #{}, lsl #16", (offset >> 16) & 0xFFFF));
-                }
+            self.load_large_imm("x16", offset);
+            self.state.emit(&format!("    add {}, sp, x16", dest));
+        }
+    }
+
+    /// Load a large immediate into a register.
+    fn load_large_imm(&mut self, reg: &str, val: i64) {
+        if val <= 65535 {
+            self.state.emit(&format!("    mov {}, #{}", reg, val));
+        } else {
+            self.state.emit(&format!("    movz {}, #{}", reg, val & 0xFFFF));
+            if (val >> 16) & 0xFFFF != 0 {
+                self.state.emit(&format!("    movk {}, #{}, lsl #16", reg, (val >> 16) & 0xFFFF));
             }
-            self.emit(&format!("    add {}, sp, x16", dest));
         }
     }
 
     /// Emit function prologue: allocate stack and save fp/lr.
-    /// For small frames (<=504 bytes), uses combined stp with pre-index.
-    /// For larger frames, uses separate sub + stp.
-    /// Layout: fp/lr saved at [sp, #0] and [sp, #8], locals from [sp, #16] upward.
-    fn emit_prologue(&mut self, frame_size: i64) {
+    fn emit_prologue_arm(&mut self, frame_size: i64) {
         if frame_size > 0 && frame_size <= 504 {
-            // Small frame: use pre-indexed stp (offset in [-512, 504], multiple of 8)
-            self.emit(&format!("    stp x29, x30, [sp, #-{}]!", frame_size));
+            self.state.emit(&format!("    stp x29, x30, [sp, #-{}]!", frame_size));
         } else {
-            // Large frame: allocate stack space, then save fp/lr at bottom of frame
             self.emit_sub_sp(frame_size);
-            self.emit("    stp x29, x30, [sp]");
+            self.state.emit("    stp x29, x30, [sp]");
         }
-        self.emit("    mov x29, sp");
+        self.state.emit("    mov x29, sp");
     }
 
     /// Emit function epilogue: restore fp/lr and deallocate stack.
-    fn emit_epilogue(&mut self, frame_size: i64) {
+    fn emit_epilogue_arm(&mut self, frame_size: i64) {
         if frame_size > 0 && frame_size <= 504 {
-            // Small frame: use post-indexed ldp
-            self.emit(&format!("    ldp x29, x30, [sp], #{}", frame_size));
+            self.state.emit(&format!("    ldp x29, x30, [sp], #{}", frame_size));
         } else {
-            // Large frame: restore fp/lr, then deallocate
-            self.emit("    ldp x29, x30, [sp]");
+            self.state.emit("    ldp x29, x30, [sp]");
             self.emit_add_sp(frame_size);
         }
     }
 
-    fn generate_function(&mut self, func: &IrFunction) {
-        self.stack_offset = 0;
-        self.value_locations.clear();
-        self.alloca_values.clear();
-
-        self.emit(&format!(".globl {}", func.name));
-        self.emit(&format!(".type {}, %function", func.name));
-        self.emit(&format!("{}:", func.name));
-
-        // Calculate stack space
-        let stack_space = self.calculate_stack_space(func);
-        let aligned_space = ((stack_space + 15) & !15) + 16; // +16 for fp/lr
-
-        // Prologue: save fp, lr and allocate stack
-        self.emit_prologue(aligned_space);
-
-        // Store parameters (x0-x7 for first 8 args)
-        let arg_regs = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
-        for (i, param) in func.params.iter().enumerate() {
-            if i < 8 && !param.name.is_empty() {
-                self.store_param(func, i, &arg_regs);
-            }
-        }
-
-        // Generate code for each basic block
-        for block in &func.blocks {
-            if block.label != "entry" {
-                self.emit(&format!("{}:", block.label));
-            }
-            for inst in &block.instructions {
-                self.generate_instruction(inst);
-            }
-            self.generate_terminator(&block.terminator, aligned_space);
-        }
-
-        self.emit(&format!(".size {}, .-{}", func.name, func.name));
-        self.emit("");
-    }
-
-    fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
-        let mut space: i64 = 16; // start after fp/lr save area
-        for block in &func.blocks {
-            for inst in &block.instructions {
-                if let Some(dest) = common::instruction_dest(inst) {
-                    let size = if let Instruction::Alloca { size, dest: alloca_dest, .. } = inst {
-                        self.alloca_values.insert(alloca_dest.0);
-                        ((*size as i64 + 7) & !7).max(8)
-                    } else {
-                        8
-                    };
-                    self.value_locations.insert(dest.0, space);
-                    space += size;
-                }
-            }
-        }
-        space
-    }
-
-    fn store_param(&mut self, func: &IrFunction, arg_idx: usize, arg_regs: &[&str]) {
-        if let Some(block) = func.blocks.first() {
-            let alloca_idx = block.instructions.iter()
-                .filter(|i| matches!(i, Instruction::Alloca { .. }))
-                .nth(arg_idx);
-            if let Some(Instruction::Alloca { dest, ty, .. }) = alloca_idx {
-                if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    let store_instr = Self::str_for_type(*ty);
-                    let reg = Self::reg_for_type(arg_regs[arg_idx], *ty);
-                    self.emit_store_to_sp(reg, offset, store_instr);
-                }
-            }
-        }
-    }
-
-    fn generate_instruction(&mut self, inst: &Instruction) {
-        match inst {
-            Instruction::Alloca { .. } => {}
-            Instruction::Store { val, ptr, ty } => {
-                self.operand_to_x0(val);
-                if let Some(&offset) = self.value_locations.get(&ptr.0) {
-                    if self.alloca_values.contains(&ptr.0) {
-                        let store_instr = Self::str_for_type(*ty);
-                        let reg = Self::reg_for_type("x0", *ty);
-                        self.emit_store_to_sp(reg, offset, store_instr);
-                    } else {
-                        // ptr is a computed address (e.g., from GEP).
-                        // Load the pointer, then store through it.
-                        self.emit("    mov x1, x0"); // save value
-                        self.emit_load_from_sp("x2", offset, "ldr"); // load pointer
-                        let store_instr = Self::str_for_type(*ty);
-                        let reg = Self::reg_for_type("x1", *ty);
-                        self.emit(&format!("    {} {}, [x2]", store_instr, reg));
+    /// Load an operand into x0.
+    fn operand_to_x0(&mut self, op: &Operand) {
+        match op {
+            Operand::Const(c) => {
+                match c {
+                    IrConst::I8(v) => self.state.emit(&format!("    mov x0, #{}", v)),
+                    IrConst::I16(v) => self.state.emit(&format!("    mov x0, #{}", v)),
+                    IrConst::I32(v) => {
+                        if *v >= 0 && *v <= 65535 {
+                            self.state.emit(&format!("    mov x0, #{}", v));
+                        } else if *v < 0 && *v >= -65536 {
+                            self.state.emit(&format!("    mov x0, #{}", v));
+                        } else {
+                            self.state.emit(&format!("    mov x0, #{}", *v as u32 & 0xffff));
+                            self.state.emit(&format!("    movk x0, #{}, lsl #16", (*v as u32 >> 16) & 0xffff));
+                        }
                     }
+                    IrConst::I64(v) => {
+                        if *v >= 0 && *v <= 65535 {
+                            self.state.emit(&format!("    mov x0, #{}", v));
+                        } else if *v < 0 && *v >= -65536 {
+                            self.state.emit(&format!("    mov x0, #{}", v));
+                        } else {
+                            self.state.emit(&format!("    mov x0, #{}", *v as u64 & 0xffff));
+                            if (*v as u64 >> 16) & 0xffff != 0 {
+                                self.state.emit(&format!("    movk x0, #{}, lsl #16", (*v as u64 >> 16) & 0xffff));
+                            }
+                            if (*v as u64 >> 32) & 0xffff != 0 {
+                                self.state.emit(&format!("    movk x0, #{}, lsl #32", (*v as u64 >> 32) & 0xffff));
+                            }
+                            if (*v as u64 >> 48) & 0xffff != 0 {
+                                self.state.emit(&format!("    movk x0, #{}, lsl #48", (*v as u64 >> 48) & 0xffff));
+                            }
+                        }
+                    }
+                    IrConst::F32(_) | IrConst::F64(_) => {
+                        self.state.emit("    mov x0, #0");
+                    }
+                    IrConst::Zero => self.state.emit("    mov x0, #0"),
                 }
             }
-            Instruction::Load { dest, ptr, ty } => {
-                if let Some(&ptr_off) = self.value_locations.get(&ptr.0) {
-                    let load_instr = Self::ldr_for_type(*ty);
-                    let dest_reg = Self::load_dest_reg(*ty);
-                    if self.alloca_values.contains(&ptr.0) {
-                        self.emit_load_from_sp(dest_reg, ptr_off, load_instr);
+            Operand::Value(v) => {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    if self.state.is_alloca(v.0) {
+                        self.emit_add_sp_offset("x0", slot.0);
                     } else {
-                        // ptr is a computed address. Load the pointer, then deref.
-                        self.emit_load_from_sp("x0", ptr_off, "ldr"); // load pointer
-                        // Use x1 as temp to hold the address since x0 might be overwritten
-                        self.emit("    mov x1, x0");
-                        self.emit(&format!("    {} {}, [x1]", load_instr, dest_reg));
-                    }
-                    if let Some(&dest_off) = self.value_locations.get(&dest.0) {
-                        self.emit_store_to_sp("x0", dest_off, "str");
-                    }
-                }
-            }
-            Instruction::BinOp { dest, op, lhs, rhs, ty } => {
-                self.operand_to_x0(lhs);
-                self.emit("    mov x1, x0");
-                self.operand_to_x0(rhs);
-                self.emit("    mov x2, x0");
-
-                // Use 32-bit (w-register) operations for I32/U32 types
-                let use_32bit = *ty == IrType::I32 || *ty == IrType::U32;
-                let is_unsigned = ty.is_unsigned();
-
-                if use_32bit {
-                    match op {
-                        IrBinOp::Add => {
-                            self.emit("    add w0, w1, w2");
-                            if !is_unsigned { self.emit("    sxtw x0, w0"); }
-                        }
-                        IrBinOp::Sub => {
-                            self.emit("    sub w0, w1, w2");
-                            if !is_unsigned { self.emit("    sxtw x0, w0"); }
-                        }
-                        IrBinOp::Mul => {
-                            self.emit("    mul w0, w1, w2");
-                            if !is_unsigned { self.emit("    sxtw x0, w0"); }
-                        }
-                        IrBinOp::SDiv => {
-                            self.emit("    sdiv w0, w1, w2");
-                            self.emit("    sxtw x0, w0");
-                        }
-                        IrBinOp::UDiv => {
-                            self.emit("    udiv w0, w1, w2");
-                            // w-register result is already zero-extended in x0
-                        }
-                        IrBinOp::SRem => {
-                            self.emit("    sdiv w3, w1, w2");
-                            self.emit("    msub w0, w3, w2, w1");
-                            self.emit("    sxtw x0, w0");
-                        }
-                        IrBinOp::URem => {
-                            self.emit("    udiv w3, w1, w2");
-                            self.emit("    msub w0, w3, w2, w1");
-                            // w-register result is already zero-extended in x0
-                        }
-                        IrBinOp::And => self.emit("    and w0, w1, w2"),
-                        IrBinOp::Or => self.emit("    orr w0, w1, w2"),
-                        IrBinOp::Xor => self.emit("    eor w0, w1, w2"),
-                        IrBinOp::Shl => self.emit("    lsl w0, w1, w2"),
-                        IrBinOp::AShr => self.emit("    asr w0, w1, w2"),
-                        IrBinOp::LShr => self.emit("    lsr w0, w1, w2"),
+                        self.emit_load_from_sp("x0", slot.0, "ldr");
                     }
                 } else {
-                    match op {
-                        IrBinOp::Add => self.emit("    add x0, x1, x2"),
-                        IrBinOp::Sub => self.emit("    sub x0, x1, x2"),
-                        IrBinOp::Mul => self.emit("    mul x0, x1, x2"),
-                        IrBinOp::SDiv => self.emit("    sdiv x0, x1, x2"),
-                        IrBinOp::UDiv => self.emit("    udiv x0, x1, x2"),
-                        IrBinOp::SRem => {
-                            self.emit("    sdiv x3, x1, x2");
-                            self.emit("    msub x0, x3, x2, x1");
-                        }
-                        IrBinOp::URem => {
-                            self.emit("    udiv x3, x1, x2");
-                            self.emit("    msub x0, x3, x2, x1");
-                        }
-                        IrBinOp::And => self.emit("    and x0, x1, x2"),
-                        IrBinOp::Or => self.emit("    orr x0, x1, x2"),
-                        IrBinOp::Xor => self.emit("    eor x0, x1, x2"),
-                        IrBinOp::Shl => self.emit("    lsl x0, x1, x2"),
-                        IrBinOp::AShr => self.emit("    asr x0, x1, x2"),
-                        IrBinOp::LShr => self.emit("    lsr x0, x1, x2"),
-                    }
-                }
-
-                if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit_store_to_sp("x0", offset, "str");
-                }
-            }
-            Instruction::UnaryOp { dest, op, src, .. } => {
-                self.operand_to_x0(src);
-                match op {
-                    IrUnaryOp::Neg => self.emit("    neg x0, x0"),
-                    IrUnaryOp::Not => self.emit("    mvn x0, x0"),
-                }
-                if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit_store_to_sp("x0", offset, "str");
-                }
-            }
-            Instruction::Cmp { dest, op, lhs, rhs, ty } => {
-                self.operand_to_x0(lhs);
-                self.emit("    mov x1, x0");
-                self.operand_to_x0(rhs);
-                // Use 32-bit compare for I32/U32 to match C semantics
-                let use_32bit = *ty == IrType::I32 || *ty == IrType::U32
-                    || *ty == IrType::I8 || *ty == IrType::U8
-                    || *ty == IrType::I16 || *ty == IrType::U16;
-                if use_32bit {
-                    self.emit("    cmp w1, w0");
-                } else {
-                    self.emit("    cmp x1, x0");
-                }
-
-                let cond = match op {
-                    IrCmpOp::Eq => "eq",
-                    IrCmpOp::Ne => "ne",
-                    IrCmpOp::Slt => "lt",
-                    IrCmpOp::Sle => "le",
-                    IrCmpOp::Sgt => "gt",
-                    IrCmpOp::Sge => "ge",
-                    IrCmpOp::Ult => "lo",
-                    IrCmpOp::Ule => "ls",
-                    IrCmpOp::Ugt => "hi",
-                    IrCmpOp::Uge => "hs",
-                };
-                self.emit(&format!("    cset x0, {}", cond));
-
-                if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit_store_to_sp("x0", offset, "str");
-                }
-            }
-            Instruction::Call { dest, func, args, .. } => {
-                self.emit_call(args, Some(func), None, *dest);
-            }
-            Instruction::CallIndirect { dest, func_ptr, args, .. } => {
-                self.emit_call(args, None, Some(func_ptr), *dest);
-            }
-            Instruction::GlobalAddr { dest, name } => {
-                self.emit(&format!("    adrp x0, {}", name));
-                self.emit(&format!("    add x0, x0, :lo12:{}", name));
-                if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit_store_to_sp("x0", offset, "str");
-                }
-            }
-            Instruction::Copy { dest, src } => {
-                self.operand_to_x0(src);
-                if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit_store_to_sp("x0", offset, "str");
-                }
-            }
-            Instruction::Cast { dest, src, from_ty, to_ty } => {
-                self.operand_to_x0(src);
-                self.emit_cast(*from_ty, *to_ty);
-                if let Some(&offset) = self.value_locations.get(&dest.0) {
-                    self.emit_store_to_sp("x0", offset, "str");
-                }
-            }
-            Instruction::GetElementPtr { dest, base, offset, .. } => {
-                if let Some(&base_off) = self.value_locations.get(&base.0) {
-                    if self.alloca_values.contains(&base.0) {
-                        // Alloca: compute address as sp + base_off
-                        self.emit_add_sp_offset("x1", base_off);
-                    } else {
-                        // Non-alloca: load the pointer value
-                        self.emit_load_from_sp("x1", base_off, "ldr");
-                    }
-                }
-                self.operand_to_x0(offset);
-                self.emit("    add x0, x1, x0");
-                if let Some(&dest_off) = self.value_locations.get(&dest.0) {
-                    self.emit_store_to_sp("x0", dest_off, "str");
+                    self.state.emit("    mov x0, #0");
                 }
             }
         }
     }
 
-    /// Emit a function call (direct or indirect). Handles AArch64 calling convention.
-    fn emit_call(&mut self, args: &[Operand], direct_name: Option<&str>, func_ptr: Option<&Operand>, dest: Option<Value>) {
-        let arg_regs = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
-        let tmp_regs = ["x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16"];
-        let num_args = args.len().min(8);
-
-        // Load all args into temp registers first (to avoid clobbering)
-        for (i, arg) in args.iter().enumerate().take(num_args) {
-            self.operand_to_x0(arg);
-            self.emit(&format!("    mov {}, x0", tmp_regs[i]));
-        }
-        // Move from temps to arg registers
-        for i in 0..num_args {
-            self.emit(&format!("    mov {}, {}", arg_regs[i], tmp_regs[i]));
-        }
-
-        if let Some(name) = direct_name {
-            self.emit(&format!("    bl {}", name));
-        } else if let Some(ptr) = func_ptr {
-            self.operand_to_x0(ptr);
-            self.emit("    mov x17, x0");
-            self.emit("    blr x17");
-        }
-
-        if let Some(dest) = dest {
-            if let Some(&offset) = self.value_locations.get(&dest.0) {
-                self.emit_store_to_sp("x0", offset, "str");
-            }
-        }
-    }
-
-    fn generate_terminator(&mut self, term: &Terminator, frame_size: i64) {
-        match term {
-            Terminator::Return(val) => {
-                if let Some(val) = val {
-                    self.operand_to_x0(val);
-                }
-                // Epilogue: restore fp/lr and deallocate stack
-                self.emit_epilogue(frame_size);
-                self.emit("    ret");
-            }
-            Terminator::Branch(label) => {
-                self.emit(&format!("    b {}", label));
-            }
-            Terminator::CondBranch { cond, true_label, false_label } => {
-                self.operand_to_x0(cond);
-                self.emit(&format!("    cbnz x0, {}", true_label));
-                self.emit(&format!("    b {}", false_label));
-            }
-            Terminator::Unreachable => {
-                self.emit("    brk #0");
-            }
+    /// Store x0 to a value's stack slot.
+    fn store_x0_to(&mut self, dest: &Value) {
+        if let Some(slot) = self.state.get_slot(dest.0) {
+            self.emit_store_to_sp("x0", slot.0, "str");
         }
     }
 
@@ -531,8 +220,6 @@ impl ArmCodegen {
     }
 
     /// Get the appropriate register name for a given base and type.
-    /// On AArch64, wN is the 32-bit alias of xN.
-    /// For byte/halfword/word stores, strb/strh/str use w-registers.
     fn reg_for_type(base: &str, ty: IrType) -> &'static str {
         let use_w = matches!(ty,
             IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 |
@@ -547,17 +234,13 @@ impl ArmCodegen {
             "x5" => if use_w { "w5" } else { "x5" },
             "x6" => if use_w { "w6" } else { "x6" },
             "x7" => if use_w { "w7" } else { "x7" },
-            _ => "x0", // fallback
+            _ => "x0",
         }
     }
 
     /// Emit a type cast instruction sequence for AArch64.
-    fn emit_cast(&mut self, from_ty: IrType, to_ty: IrType) {
-        // Same type: no cast needed
-        if from_ty == to_ty {
-            return;
-        }
-        // Same size integers: just reinterpret signedness
+    fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
+        if from_ty == to_ty { return; }
         if from_ty.size() == to_ty.size() && from_ty.is_integer() && to_ty.is_integer() {
             return;
         }
@@ -566,89 +249,298 @@ impl ArmCodegen {
         let to_size = to_ty.size();
 
         if to_size > from_size {
-            // Widening cast
             if from_ty.is_unsigned() {
-                // Zero-extend for unsigned types
                 match from_ty {
-                    IrType::U8 => { self.emit("    and x0, x0, #0xff"); }
-                    IrType::U16 => { self.emit("    and x0, x0, #0xffff"); }
-                    IrType::U32 => { self.emit("    mov w0, w0"); } // implicit zero-extend
+                    IrType::U8 => self.state.emit("    and x0, x0, #0xff"),
+                    IrType::U16 => self.state.emit("    and x0, x0, #0xffff"),
+                    IrType::U32 => self.state.emit("    mov w0, w0"),
                     _ => {}
                 }
             } else {
-                // Sign-extend for signed types
                 match from_ty {
-                    IrType::I8 => { self.emit("    sxtb x0, w0"); }
-                    IrType::I16 => { self.emit("    sxth x0, w0"); }
-                    IrType::I32 => { self.emit("    sxtw x0, w0"); }
+                    IrType::I8 => self.state.emit("    sxtb x0, w0"),
+                    IrType::I16 => self.state.emit("    sxth x0, w0"),
+                    IrType::I32 => self.state.emit("    sxtw x0, w0"),
                     _ => {}
                 }
             }
         } else if to_size < from_size {
-            // Narrowing cast: mask to target width
             match to_ty {
-                IrType::I8 | IrType::U8 => { self.emit("    and x0, x0, #0xff"); }
-                IrType::I16 | IrType::U16 => { self.emit("    and x0, x0, #0xffff"); }
-                IrType::I32 | IrType::U32 => { self.emit("    mov w0, w0"); } // truncate to 32-bit
+                IrType::I8 | IrType::U8 => self.state.emit("    and x0, x0, #0xff"),
+                IrType::I16 | IrType::U16 => self.state.emit("    and x0, x0, #0xffff"),
+                IrType::I32 | IrType::U32 => self.state.emit("    mov w0, w0"),
                 _ => {}
             }
-        } else {
-            // Same size: pointer <-> integer conversions (no-op on AArch64)
+        }
+        // Same size: pointer <-> integer conversions (no-op on AArch64)
+    }
+}
+
+const ARM_ARG_REGS: [&str; 8] = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
+const ARM_TMP_REGS: [&str; 8] = ["x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16"];
+
+impl ArchCodegen for ArmCodegen {
+    fn state(&mut self) -> &mut CodegenState { &mut self.state }
+    fn state_ref(&self) -> &CodegenState { &self.state }
+    fn ptr_directive(&self) -> PtrDirective { PtrDirective::Xword }
+    fn function_type_directive(&self) -> &'static str { "%function" }
+
+    fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
+        calculate_stack_space_common(&mut self.state, func, 16, |space, alloc_size| {
+            // ARM uses positive offsets from sp, starting at 16 (after fp/lr)
+            let slot = space;
+            let new_space = space + ((alloc_size + 7) & !7).max(8);
+            (slot, new_space)
+        })
+    }
+
+    fn aligned_frame_size(&self, raw_space: i64) -> i64 {
+        (raw_space + 15) & !15
+    }
+
+    fn emit_prologue(&mut self, _func: &IrFunction, frame_size: i64) {
+        self.current_frame_size = frame_size;
+        self.emit_prologue_arm(frame_size);
+    }
+
+    fn emit_epilogue(&mut self, frame_size: i64) {
+        self.emit_epilogue_arm(frame_size);
+    }
+
+    fn emit_store_params(&mut self, func: &IrFunction) {
+        for (i, param) in func.params.iter().enumerate() {
+            if i >= 8 || param.name.is_empty() { continue; }
+            if let Some((dest, ty)) = find_param_alloca(func, i) {
+                if let Some(slot) = self.state.get_slot(dest.0) {
+                    let store_instr = Self::str_for_type(ty);
+                    let reg = Self::reg_for_type(ARM_ARG_REGS[i], ty);
+                    self.emit_store_to_sp(reg, slot.0, store_instr);
+                }
+            }
         }
     }
 
-    fn operand_to_x0(&mut self, op: &Operand) {
-        match op {
-            Operand::Const(c) => {
-                match c {
-                    IrConst::I8(v) => self.emit(&format!("    mov x0, #{}", v)),
-                    IrConst::I16(v) => self.emit(&format!("    mov x0, #{}", v)),
-                    IrConst::I32(v) => {
-                        if *v >= 0 && *v <= 65535 {
-                            self.emit(&format!("    mov x0, #{}", v));
-                        } else if *v < 0 && *v >= -65536 {
-                            self.emit(&format!("    mov x0, #{}", v));
-                        } else {
-                            self.emit(&format!("    mov x0, #{}", *v as u32 & 0xffff));
-                            self.emit(&format!("    movk x0, #{}, lsl #16", (*v as u32 >> 16) & 0xffff));
-                        }
-                    }
-                    IrConst::I64(v) => {
-                        if *v >= 0 && *v <= 65535 {
-                            self.emit(&format!("    mov x0, #{}", v));
-                        } else if *v < 0 && *v >= -65536 {
-                            self.emit(&format!("    mov x0, #{}", v));
-                        } else {
-                            self.emit(&format!("    mov x0, #{}", *v as u64 & 0xffff));
-                            if (*v as u64 >> 16) & 0xffff != 0 {
-                                self.emit(&format!("    movk x0, #{}, lsl #16", (*v as u64 >> 16) & 0xffff));
-                            }
-                            if (*v as u64 >> 32) & 0xffff != 0 {
-                                self.emit(&format!("    movk x0, #{}, lsl #32", (*v as u64 >> 32) & 0xffff));
-                            }
-                            if (*v as u64 >> 48) & 0xffff != 0 {
-                                self.emit(&format!("    movk x0, #{}, lsl #48", (*v as u64 >> 48) & 0xffff));
-                            }
-                        }
-                    }
-                    IrConst::F32(_) | IrConst::F64(_) => {
-                        self.emit("    mov x0, #0");
-                    }
-                    IrConst::Zero => self.emit("    mov x0, #0"),
-                }
-            }
-            Operand::Value(v) => {
-                if let Some(&offset) = self.value_locations.get(&v.0) {
-                    if self.alloca_values.contains(&v.0) {
-                        self.emit_add_sp_offset("x0", offset);
-                    } else {
-                        self.emit_load_from_sp("x0", offset, "ldr");
-                    }
-                } else {
-                    self.emit("    mov x0, #0");
-                }
+    fn emit_load_operand(&mut self, op: &Operand) {
+        self.operand_to_x0(op);
+    }
+
+    fn emit_store_result(&mut self, dest: &Value) {
+        self.store_x0_to(dest);
+    }
+
+    fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
+        self.operand_to_x0(val);
+        if let Some(slot) = self.state.get_slot(ptr.0) {
+            if self.state.is_alloca(ptr.0) {
+                let store_instr = Self::str_for_type(ty);
+                let reg = Self::reg_for_type("x0", ty);
+                self.emit_store_to_sp(reg, slot.0, store_instr);
+            } else {
+                self.state.emit("    mov x1, x0");
+                self.emit_load_from_sp("x2", slot.0, "ldr");
+                let store_instr = Self::str_for_type(ty);
+                let reg = Self::reg_for_type("x1", ty);
+                self.state.emit(&format!("    {} {}, [x2]", store_instr, reg));
             }
         }
+    }
+
+    fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) {
+        if let Some(slot) = self.state.get_slot(ptr.0) {
+            let load_instr = Self::ldr_for_type(ty);
+            let dest_reg = Self::load_dest_reg(ty);
+            if self.state.is_alloca(ptr.0) {
+                self.emit_load_from_sp(dest_reg, slot.0, load_instr);
+            } else {
+                self.emit_load_from_sp("x0", slot.0, "ldr");
+                self.state.emit("    mov x1, x0");
+                self.state.emit(&format!("    {} {}, [x1]", load_instr, dest_reg));
+            }
+            self.store_x0_to(dest);
+        }
+    }
+
+    fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        self.operand_to_x0(lhs);
+        self.state.emit("    mov x1, x0");
+        self.operand_to_x0(rhs);
+        self.state.emit("    mov x2, x0");
+
+        let use_32bit = ty == IrType::I32 || ty == IrType::U32;
+        let is_unsigned = ty.is_unsigned();
+
+        if use_32bit {
+            match op {
+                IrBinOp::Add => {
+                    self.state.emit("    add w0, w1, w2");
+                    if !is_unsigned { self.state.emit("    sxtw x0, w0"); }
+                }
+                IrBinOp::Sub => {
+                    self.state.emit("    sub w0, w1, w2");
+                    if !is_unsigned { self.state.emit("    sxtw x0, w0"); }
+                }
+                IrBinOp::Mul => {
+                    self.state.emit("    mul w0, w1, w2");
+                    if !is_unsigned { self.state.emit("    sxtw x0, w0"); }
+                }
+                IrBinOp::SDiv => {
+                    self.state.emit("    sdiv w0, w1, w2");
+                    self.state.emit("    sxtw x0, w0");
+                }
+                IrBinOp::UDiv => self.state.emit("    udiv w0, w1, w2"),
+                IrBinOp::SRem => {
+                    self.state.emit("    sdiv w3, w1, w2");
+                    self.state.emit("    msub w0, w3, w2, w1");
+                    self.state.emit("    sxtw x0, w0");
+                }
+                IrBinOp::URem => {
+                    self.state.emit("    udiv w3, w1, w2");
+                    self.state.emit("    msub w0, w3, w2, w1");
+                }
+                IrBinOp::And => self.state.emit("    and w0, w1, w2"),
+                IrBinOp::Or => self.state.emit("    orr w0, w1, w2"),
+                IrBinOp::Xor => self.state.emit("    eor w0, w1, w2"),
+                IrBinOp::Shl => self.state.emit("    lsl w0, w1, w2"),
+                IrBinOp::AShr => self.state.emit("    asr w0, w1, w2"),
+                IrBinOp::LShr => self.state.emit("    lsr w0, w1, w2"),
+            }
+        } else {
+            match op {
+                IrBinOp::Add => self.state.emit("    add x0, x1, x2"),
+                IrBinOp::Sub => self.state.emit("    sub x0, x1, x2"),
+                IrBinOp::Mul => self.state.emit("    mul x0, x1, x2"),
+                IrBinOp::SDiv => self.state.emit("    sdiv x0, x1, x2"),
+                IrBinOp::UDiv => self.state.emit("    udiv x0, x1, x2"),
+                IrBinOp::SRem => {
+                    self.state.emit("    sdiv x3, x1, x2");
+                    self.state.emit("    msub x0, x3, x2, x1");
+                }
+                IrBinOp::URem => {
+                    self.state.emit("    udiv x3, x1, x2");
+                    self.state.emit("    msub x0, x3, x2, x1");
+                }
+                IrBinOp::And => self.state.emit("    and x0, x1, x2"),
+                IrBinOp::Or => self.state.emit("    orr x0, x1, x2"),
+                IrBinOp::Xor => self.state.emit("    eor x0, x1, x2"),
+                IrBinOp::Shl => self.state.emit("    lsl x0, x1, x2"),
+                IrBinOp::AShr => self.state.emit("    asr x0, x1, x2"),
+                IrBinOp::LShr => self.state.emit("    lsr x0, x1, x2"),
+            }
+        }
+
+        self.store_x0_to(dest);
+    }
+
+    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand) {
+        self.operand_to_x0(src);
+        match op {
+            IrUnaryOp::Neg => self.state.emit("    neg x0, x0"),
+            IrUnaryOp::Not => self.state.emit("    mvn x0, x0"),
+        }
+        self.store_x0_to(dest);
+    }
+
+    fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        self.operand_to_x0(lhs);
+        self.state.emit("    mov x1, x0");
+        self.operand_to_x0(rhs);
+        let use_32bit = ty == IrType::I32 || ty == IrType::U32
+            || ty == IrType::I8 || ty == IrType::U8
+            || ty == IrType::I16 || ty == IrType::U16;
+        if use_32bit {
+            self.state.emit("    cmp w1, w0");
+        } else {
+            self.state.emit("    cmp x1, x0");
+        }
+
+        let cond = match op {
+            IrCmpOp::Eq => "eq",
+            IrCmpOp::Ne => "ne",
+            IrCmpOp::Slt => "lt",
+            IrCmpOp::Sle => "le",
+            IrCmpOp::Sgt => "gt",
+            IrCmpOp::Sge => "ge",
+            IrCmpOp::Ult => "lo",
+            IrCmpOp::Ule => "ls",
+            IrCmpOp::Ugt => "hi",
+            IrCmpOp::Uge => "hs",
+        };
+        self.state.emit(&format!("    cset x0, {}", cond));
+        self.store_x0_to(dest);
+    }
+
+    fn emit_call(&mut self, args: &[Operand], direct_name: Option<&str>,
+                 func_ptr: Option<&Operand>, dest: Option<Value>) {
+        let num_args = args.len().min(8);
+
+        // Load all args into temp registers first (to avoid clobbering)
+        for (i, arg) in args.iter().enumerate().take(num_args) {
+            self.operand_to_x0(arg);
+            self.state.emit(&format!("    mov {}, x0", ARM_TMP_REGS[i]));
+        }
+        // Move from temps to arg registers
+        for i in 0..num_args {
+            self.state.emit(&format!("    mov {}, {}", ARM_ARG_REGS[i], ARM_TMP_REGS[i]));
+        }
+
+        if let Some(name) = direct_name {
+            self.state.emit(&format!("    bl {}", name));
+        } else if let Some(ptr) = func_ptr {
+            self.operand_to_x0(ptr);
+            self.state.emit("    mov x17, x0");
+            self.state.emit("    blr x17");
+        }
+
+        if let Some(dest) = dest {
+            self.store_x0_to(&dest);
+        }
+    }
+
+    fn emit_global_addr(&mut self, dest: &Value, name: &str) {
+        self.state.emit(&format!("    adrp x0, {}", name));
+        self.state.emit(&format!("    add x0, x0, :lo12:{}", name));
+        self.store_x0_to(dest);
+    }
+
+    fn emit_gep(&mut self, dest: &Value, base: &Value, offset: &Operand) {
+        if let Some(slot) = self.state.get_slot(base.0) {
+            if self.state.is_alloca(base.0) {
+                self.emit_add_sp_offset("x1", slot.0);
+            } else {
+                self.emit_load_from_sp("x1", slot.0, "ldr");
+            }
+        }
+        self.operand_to_x0(offset);
+        self.state.emit("    add x0, x1, x0");
+        self.store_x0_to(dest);
+    }
+
+    fn emit_cast(&mut self, dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType) {
+        self.operand_to_x0(src);
+        self.emit_cast_instrs(from_ty, to_ty);
+        self.store_x0_to(dest);
+    }
+
+    fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {
+        if let Some(val) = val {
+            self.operand_to_x0(val);
+        }
+        self.emit_epilogue_arm(frame_size);
+        self.state.emit("    ret");
+    }
+
+    fn emit_branch(&mut self, label: &str) {
+        self.state.emit(&format!("    b {}", label));
+    }
+
+    fn emit_cond_branch(&mut self, cond: &Operand, true_label: &str, false_label: &str) {
+        self.operand_to_x0(cond);
+        self.state.emit(&format!("    cbnz x0, {}", true_label));
+        self.state.emit(&format!("    b {}", false_label));
+    }
+
+    fn emit_unreachable(&mut self) {
+        self.state.emit("    brk #0");
     }
 }
 

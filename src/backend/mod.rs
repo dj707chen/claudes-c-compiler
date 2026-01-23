@@ -1,4 +1,5 @@
 pub mod common;
+pub mod codegen_shared;
 pub mod x86;
 pub mod arm;
 pub mod riscv;
