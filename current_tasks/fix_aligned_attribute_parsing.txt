@@ -1,0 +1,15 @@
+Fix __attribute__((__aligned__(...))) parsing to handle expressions
+
+Problem: The parser only handles integer literals inside __aligned__(...).
+When _Alignof(type) or other constant expressions are used (as in system
+headers like max_align_t), the parser fails and desyncs, causing all
+subsequent function definitions in the file to be incorrectly merged.
+
+This breaks mbedtls compilation because psa_crypto.c includes headers
+with max_align_t that uses _Alignof inside __aligned__.
+
+Fix: Properly balance parentheses when skipping aligned attribute arguments
+instead of using a simple scan that doesn't track nesting.
+
+Also: Parse _Alignof and sizeof expressions as aligned values so that
+the alignment info can be used for proper struct layout.
