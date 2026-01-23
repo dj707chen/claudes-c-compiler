@@ -7,6 +7,10 @@ pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     typedefs: Vec<String>,
+    /// Typedef names shadowed by local variable declarations in the current scope.
+    /// When a variable is declared with the same name as a typedef (e.g., `st02 st02;`),
+    /// subsequent uses of that name should be treated as the variable, not the type.
+    shadowed_typedefs: Vec<String>,
     /// Set to true when parse_type_specifier encounters a `typedef` keyword.
     /// Used by declaration parsers to register the declared names as typedefs.
     parsing_typedef: bool,
@@ -27,6 +31,7 @@ impl Parser {
             tokens,
             pos: 0,
             typedefs: Self::builtin_typedefs(),
+            shadowed_typedefs: Vec::new(),
             parsing_typedef: false,
             parsing_static: false,
             parsing_extern: false,
@@ -154,7 +159,7 @@ impl Parser {
             TokenKind::Noreturn | TokenKind::Restrict | TokenKind::Complex |
             TokenKind::Atomic | TokenKind::Auto | TokenKind::Alignas |
             TokenKind::Builtin => true,  // __builtin_va_list is a type
-            TokenKind::Identifier(name) => self.typedefs.contains(name),
+            TokenKind::Identifier(name) => self.typedefs.contains(name) && !self.shadowed_typedefs.contains(name),
             _ => false,
         }
     }
@@ -383,7 +388,18 @@ impl Parser {
                     _ => {}
                 }
             }
+            // Shadow typedef names that are used as parameter names,
+            // so the function body sees them as variables, not types.
+            let saved_shadowed = self.shadowed_typedefs.clone();
+            for param in &final_params {
+                if let Some(ref pname) = param.name {
+                    if self.typedefs.contains(pname) && !self.shadowed_typedefs.contains(pname) {
+                        self.shadowed_typedefs.push(pname.clone());
+                    }
+                }
+            }
             let body = self.parse_compound_stmt();
+            self.shadowed_typedefs = saved_shadowed;
             Some(ExternalDecl::FunctionDef(FunctionDef {
                 return_type,
                 name: name.unwrap_or_default(),
@@ -700,7 +716,7 @@ impl Parser {
                         break;
                     }
                 }
-                TokenKind::Identifier(ref name) if self.typedefs.contains(name) => {
+                TokenKind::Identifier(ref name) if self.typedefs.contains(name) && !self.shadowed_typedefs.contains(name) => {
                     // Only consume typedef name if we haven't seen any other base specifier
                     if !any_base_specifier {
                         typedef_name = Some(name.clone());
@@ -1191,7 +1207,7 @@ impl Parser {
         // Check if this is a K&R-style identifier list: foo(a, b, c)
         // Identifiers that are NOT type names appear directly
         if let TokenKind::Identifier(ref name) = self.peek() {
-            if !self.typedefs.contains(name) && !self.is_type_specifier() {
+            if (!self.typedefs.contains(name) || self.shadowed_typedefs.contains(name)) && !self.is_type_specifier() {
                 // K&R-style identifier list
                 loop {
                     if let TokenKind::Identifier(n) = self.peek().clone() {
@@ -1413,6 +1429,7 @@ impl Parser {
         let start = self.peek_span();
         self.expect(&TokenKind::LBrace);
         let mut items = Vec::new();
+        let saved_shadowed = self.shadowed_typedefs.clone();
 
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             self.skip_gcc_extensions();
@@ -1427,6 +1444,7 @@ impl Parser {
         }
 
         self.expect(&TokenKind::RBrace);
+        self.shadowed_typedefs = saved_shadowed;
         CompoundStmt { items, span: start }
     }
 
@@ -1501,9 +1519,21 @@ impl Parser {
             for decl in &declarators {
                 if !decl.name.is_empty() {
                     self.typedefs.push(decl.name.clone());
+                    // Remove from shadowed if we're re-typedefing
+                    self.shadowed_typedefs.retain(|n| n != &decl.name);
                 }
             }
             self.parsing_typedef = false;
+        } else {
+            // Non-typedef declaration: if a declarator name matches a typedef,
+            // shadow the typedef so subsequent uses parse as variable references.
+            for decl in &declarators {
+                if !decl.name.is_empty() && self.typedefs.contains(&decl.name) {
+                    if !self.shadowed_typedefs.contains(&decl.name) {
+                        self.shadowed_typedefs.push(decl.name.clone());
+                    }
+                }
+            }
         }
 
         self.expect(&TokenKind::Semicolon);
