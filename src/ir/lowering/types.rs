@@ -576,9 +576,18 @@ impl Lowerer {
                 }
                 false
             }
+            Expr::ArraySubscript(_, _, _) => {
+                // e.g. p->t[3] where t is an array of structs
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    return matches!(ctype, CType::Struct(_) | CType::Union(_));
+                }
+                false
+            }
             Expr::Deref(_, _) => {
                 // *ptr where ptr points to struct - could be struct value
-                // TODO: track pointed-to type more precisely
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    return matches!(ctype, CType::Struct(_) | CType::Union(_));
+                }
                 false
             }
             _ => false,
@@ -611,6 +620,18 @@ impl Lowerer {
             }
             Expr::PointerMemberAccess(base_expr, field_name, _) => {
                 if let Some(ctype) = self.resolve_pointer_member_field_ctype(base_expr, field_name) {
+                    return ctype.size();
+                }
+                8
+            }
+            Expr::ArraySubscript(_, _, _) => {
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    return ctype.size();
+                }
+                8
+            }
+            Expr::Deref(_, _) => {
+                if let Some(ctype) = self.get_expr_ctype(expr) {
                     return ctype.size();
                 }
                 8

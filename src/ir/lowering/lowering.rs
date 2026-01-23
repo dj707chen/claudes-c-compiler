@@ -716,9 +716,14 @@ impl Lowerer {
                 }
 
                 if is_array && elem_size > 0 {
-                    // For flat value arrays, we need total_elements = total_size / base_type_size
-                    let base_type_size = base_ty.size().max(1);
-                    let num_elems = total_size / base_type_size;
+                    // For struct arrays, elem_size is the actual struct size (from sizeof_type),
+                    // whereas base_ty.size() may return Ptr size (8). Use elem_size for structs.
+                    let num_elems = if struct_layout.is_some() {
+                        total_size / elem_size.max(1)
+                    } else {
+                        let base_type_size = base_ty.size().max(1);
+                        total_size / base_type_size
+                    };
 
                     // Array of structs: emit as byte array using struct layout.
                     // But skip byte-serialization if any struct field is a pointer type

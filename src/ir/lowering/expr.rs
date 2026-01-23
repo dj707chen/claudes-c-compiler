@@ -908,6 +908,11 @@ impl Lowerer {
             let addr = self.compute_array_element_addr(base, index);
             return Operand::Value(addr);
         }
+        // Struct/union elements: return address (don't load), like member access
+        if self.expr_is_struct_value(expr) {
+            let addr = self.compute_array_element_addr(base, index);
+            return Operand::Value(addr);
+        }
         // Compute element address and load
         let elem_ty = self.get_expr_type(expr);
         let addr = self.compute_array_element_addr(base, index);
