@@ -978,13 +978,26 @@ impl Lowerer {
                     let elem_size = elem_ty.size();
                     match &item.init {
                         Initializer::List(sub_items) => {
+                            // Check for brace-wrapped string literal: {"hello"} for char[]
+                            if sub_items.len() == 1 && sub_items[0].designators.is_empty() {
+                                if let Initializer::Expr(Expr::StringLiteral(s, _)) = &sub_items[0].init {
+                                    if matches!(elem_ty.as_ref(), CType::Char | CType::UChar) {
+                                        self.emit_string_to_alloca(base_alloca, s, field_offset);
+                                        item_idx += 1;
+                                        current_field_idx = field_idx + 1;
+                                        continue;
+                                    }
+                                }
+                            }
                             // Braced array init
                             for (ai, sub_item) in sub_items.iter().enumerate() {
                                 if ai >= *arr_size { break; }
                                 let elem_offset = field_offset + ai * elem_size;
                                 if let Initializer::Expr(e) = &sub_item.init {
+                                    let expr_ty = self.get_expr_type(e);
                                     let val = self.lower_expr(e);
                                     let elem_ir_ty = IrType::from_ctype(elem_ty);
+                                    let val = self.emit_implicit_cast(val, expr_ty, elem_ir_ty);
                                     let addr = self.fresh_value();
                                     self.emit(Instruction::GetElementPtr {
                                         dest: addr,
@@ -998,7 +1011,16 @@ impl Lowerer {
                             item_idx += 1;
                         }
                         Initializer::Expr(e) => {
-                            // Single expression for array (e.g., string literal for char[])
+                            // String literal for char array field: copy bytes
+                            if let Expr::StringLiteral(s, _) = e {
+                                if matches!(elem_ty.as_ref(), CType::Char | CType::UChar) {
+                                    self.emit_string_to_alloca(base_alloca, s, field_offset);
+                                    item_idx += 1;
+                                    current_field_idx = field_idx + 1;
+                                    continue;
+                                }
+                            }
+                            // Other single expression for array
                             let val = self.lower_expr(e);
                             let field_ty = IrType::from_ctype(&field.ty);
                             let addr = self.fresh_value();
@@ -1016,21 +1038,27 @@ impl Lowerer {
                 _ => {
                     // Scalar field
                     let field_ty = IrType::from_ctype(&field.ty);
-                    let val = match &item.init {
-                        Initializer::Expr(e) => self.lower_expr(e),
+                    let (val, expr_ty) = match &item.init {
+                        Initializer::Expr(e) => {
+                            let et = self.get_expr_type(e);
+                            (self.lower_expr(e), et)
+                        }
                         Initializer::List(sub_items) => {
                             // Scalar with braces, e.g., int x = {5};
                             if let Some(first) = sub_items.first() {
                                 if let Initializer::Expr(e) = &first.init {
-                                    self.lower_expr(e)
+                                    let et = self.get_expr_type(e);
+                                    (self.lower_expr(e), et)
                                 } else {
-                                    Operand::Const(IrConst::I64(0))
+                                    (Operand::Const(IrConst::I64(0)), IrType::I64)
                                 }
                             } else {
-                                Operand::Const(IrConst::I64(0))
+                                (Operand::Const(IrConst::I64(0)), IrType::I64)
                             }
                         }
                     };
+                    // Implicit cast for type mismatches (e.g., int literal to float field)
+                    let val = self.emit_implicit_cast(val, expr_ty, field_ty);
                     let addr = self.fresh_value();
                     self.emit(Instruction::GetElementPtr {
                         dest: addr,

@@ -967,6 +967,27 @@ impl Lowerer {
                     let elem_ir_ty = IrType::from_ctype(elem_ty);
                     match &item.init {
                         Initializer::List(sub_items) => {
+                            // Check for brace-wrapped string literal: { "hello" }
+                            if sub_items.len() == 1 && sub_items[0].designators.is_empty() {
+                                if let Initializer::Expr(Expr::StringLiteral(s, _)) = &sub_items[0].init {
+                                    if matches!(elem_ty.as_ref(), CType::Char | CType::UChar) {
+                                        let str_bytes = s.as_bytes();
+                                        for (i, &b) in str_bytes.iter().enumerate() {
+                                            if i >= *arr_size { break; }
+                                            if field_offset + i < bytes.len() {
+                                                bytes[field_offset + i] = b;
+                                            }
+                                        }
+                                        // null terminator
+                                        if str_bytes.len() < *arr_size && field_offset + str_bytes.len() < bytes.len() {
+                                            bytes[field_offset + str_bytes.len()] = 0;
+                                        }
+                                        item_idx += 1;
+                                        current_field_idx = field_idx + 1;
+                                        continue;
+                                    }
+                                }
+                            }
                             for (ai, sub_item) in sub_items.iter().enumerate() {
                                 if ai >= *arr_size { break; }
                                 let elem_offset = field_offset + ai * elem_size;
@@ -978,6 +999,25 @@ impl Lowerer {
                             item_idx += 1;
                         }
                         Initializer::Expr(expr) => {
+                            // String literal initializer for char array field
+                            if let Expr::StringLiteral(s, _) = expr {
+                                if matches!(elem_ty.as_ref(), CType::Char | CType::UChar) {
+                                    let str_bytes = s.as_bytes();
+                                    for (i, &b) in str_bytes.iter().enumerate() {
+                                        if i >= *arr_size { break; }
+                                        if field_offset + i < bytes.len() {
+                                            bytes[field_offset + i] = b;
+                                        }
+                                    }
+                                    // null terminator
+                                    if str_bytes.len() < *arr_size && field_offset + str_bytes.len() < bytes.len() {
+                                        bytes[field_offset + str_bytes.len()] = 0;
+                                    }
+                                    item_idx += 1;
+                                    current_field_idx = field_idx + 1;
+                                    continue;
+                                }
+                            }
                             let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
                             let field_ir_ty = IrType::from_ctype(&field_layout.ty);
                             self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
@@ -1177,26 +1217,8 @@ impl Lowerer {
             IrConst::I32(v) => *v as i64,
             IrConst::I64(v) => *v,
             IrConst::Zero => 0,
-            IrConst::F32(v) => {
-                // Write float as 4 bytes
-                let bits = v.to_bits().to_le_bytes();
-                for (i, &b) in bits.iter().enumerate() {
-                    if offset + i < bytes.len() {
-                        bytes[offset + i] = b;
-                    }
-                }
-                return;
-            }
-            IrConst::F64(v) => {
-                // Write double as 8 bytes
-                let bits = v.to_bits().to_le_bytes();
-                for (i, &b) in bits.iter().enumerate() {
-                    if offset + i < bytes.len() {
-                        bytes[offset + i] = b;
-                    }
-                }
-                return;
-            }
+            IrConst::F32(v) => *v as i64,
+            IrConst::F64(v) => *v as i64,
         };
 
         // Write integer value in little-endian at the appropriate size
@@ -1619,6 +1641,32 @@ impl Lowerer {
                 matches!(type_spec, TypeSpecifier::Pointer(_))
             }
             Expr::StringLiteral(_, _) => true,
+            Expr::BinaryOp(op, lhs, rhs, _) => {
+                match op {
+                    BinOp::Add => {
+                        // ptr + int or int + ptr yields a pointer
+                        self.expr_is_pointer(lhs) || self.expr_is_pointer(rhs)
+                    }
+                    BinOp::Sub => {
+                        // ptr - int yields a pointer; ptr - ptr yields an integer
+                        let lhs_ptr = self.expr_is_pointer(lhs);
+                        let rhs_ptr = self.expr_is_pointer(rhs);
+                        lhs_ptr && !rhs_ptr
+                    }
+                    _ => false,
+                }
+            }
+            Expr::Conditional(_, then_expr, else_expr, _) => {
+                self.expr_is_pointer(then_expr) || self.expr_is_pointer(else_expr)
+            }
+            Expr::Comma(_, rhs, _) => self.expr_is_pointer(rhs),
+            Expr::FunctionCall(_, _, _) => {
+                // Check CType for function call return
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    return matches!(ctype, CType::Pointer(_));
+                }
+                false
+            }
             Expr::MemberAccess(base_expr, field_name, _) => {
                 // Struct member that is an array (decays to pointer) or pointer type
                 if let Some(ctype) = self.resolve_member_field_ctype(base_expr, field_name) {
@@ -1682,6 +1730,38 @@ impl Lowerer {
                     UnaryOp::PreInc | UnaryOp::PreDec => self.get_pointer_elem_size_from_expr(inner),
                     _ => 8,
                 }
+            }
+            Expr::BinaryOp(op, lhs, rhs, _) => {
+                // ptr + int or ptr - int: get elem size from the pointer operand
+                match op {
+                    BinOp::Add => {
+                        if self.expr_is_pointer(lhs) {
+                            self.get_pointer_elem_size_from_expr(lhs)
+                        } else if self.expr_is_pointer(rhs) {
+                            self.get_pointer_elem_size_from_expr(rhs)
+                        } else {
+                            8
+                        }
+                    }
+                    BinOp::Sub => {
+                        if self.expr_is_pointer(lhs) {
+                            self.get_pointer_elem_size_from_expr(lhs)
+                        } else {
+                            8
+                        }
+                    }
+                    _ => 8,
+                }
+            }
+            Expr::Conditional(_, then_expr, _, _) => self.get_pointer_elem_size_from_expr(then_expr),
+            Expr::Comma(_, rhs, _) => self.get_pointer_elem_size_from_expr(rhs),
+            Expr::FunctionCall(_, _, _) => {
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    if let CType::Pointer(pointee) = &ctype {
+                        return pointee.size().max(1);
+                    }
+                }
+                8
             }
             Expr::AddressOf(inner, _) => {
                 // &x: pointer to typeof(x)
