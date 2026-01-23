@@ -1,3 +1,3 @@
 pub mod driver;
 
-pub use driver::Driver;
+pub use driver::{Driver, CompileMode, CliDefine};

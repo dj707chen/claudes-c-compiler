@@ -279,6 +279,27 @@ impl Preprocessor {
         &self.errors
     }
 
+    /// Define a macro from a command-line -D flag.
+    /// Takes a name and value (e.g., name="FOO", value="1").
+    pub fn define_macro(&mut self, name: &str, value: &str) {
+        self.macros.define(MacroDef {
+            name: name.to_string(),
+            is_function_like: false,
+            params: Vec::new(),
+            is_variadic: false,
+            body: value.to_string(),
+            is_predefined: false,
+        });
+    }
+
+    /// Add an include search path for #include directives.
+    /// TODO: Currently include paths are recorded but not used for file resolution.
+    pub fn add_include_path(&mut self, _path: &str) {
+        // TODO: Implement include path resolution.
+        // For now, we strip #include directives and provide builtin macros.
+        // When file-based includes are implemented, this will add to the search list.
+    }
+
     /// Join lines that end with backslash (line continuation).
     fn join_continued_lines(&self, source: &str) -> String {
         let mut result = String::with_capacity(source.len());

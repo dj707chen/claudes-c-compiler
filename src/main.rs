@@ -1,5 +1,5 @@
 use ccc::backend::Target;
-use ccc::driver::Driver;
+use ccc::driver::{Driver, CompileMode};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -21,65 +21,150 @@ fn main() {
     let mut driver = Driver::new();
     driver.target = target;
 
-    // Parse command-line arguments
+    // Parse command-line arguments (GCC-compatible)
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            // Output file
             "-o" => {
                 i += 1;
                 if i < args.len() {
                     driver.output_path = args[i].clone();
+                    driver.output_path_set = true;
                 } else {
                     eprintln!("error: -o requires an argument");
                     std::process::exit(1);
                 }
             }
+
+            // Compilation mode flags
+            "-S" => {
+                driver.mode = CompileMode::AssemblyOnly;
+            }
+            "-c" => {
+                driver.mode = CompileMode::ObjectOnly;
+            }
+            "-E" => {
+                driver.mode = CompileMode::PreprocessOnly;
+            }
+
+            // Optimization levels
             "-O0" => driver.opt_level = 0,
             "-O1" => driver.opt_level = 1,
             "-O2" => driver.opt_level = 2,
             "-O3" => driver.opt_level = 3,
-            "-v" | "--verbose" => driver.verbose = true,
-            "-lm" | "-lc" | "-lpthread" => {
-                // Ignore linker flags, we link libc automatically when needed
+            "-Os" => driver.opt_level = 2, // treat size opt as O2 for now
+            "-Oz" => driver.opt_level = 2,
+
+            // Debug info
+            "-g" => {
+                driver.debug_info = true;
             }
-            arg if arg.starts_with("-W") => {
-                // Ignore warning flags
+            arg if arg.starts_with("-g") && arg.len() > 2 => {
+                // -g1, -g2, -g3, -gdwarf, etc. - all enable debug info
+                driver.debug_info = true;
+            }
+
+            // Verbose/diagnostic flags
+            "-v" | "--verbose" => driver.verbose = true,
+
+            // Linker library flags (ignored, handled by our linker)
+            arg if arg == "-lm" || arg == "-lc" || arg == "-lpthread" || arg.starts_with("-l") => {
+                // Silently ignore linker library flags
+            }
+
+            // Warning flags (ignored for now)
+            arg if arg.starts_with("-W") => {}
+
+            // Preprocessor defines: -DFOO or -DFOO=bar or -D FOO
+            "-D" => {
+                i += 1;
+                if i < args.len() {
+                    driver.add_define(&args[i]);
+                } else {
+                    eprintln!("error: -D requires an argument");
+                    std::process::exit(1);
+                }
             }
             arg if arg.starts_with("-D") => {
-                // TODO: handle defines
+                driver.add_define(&arg[2..]);
+            }
+
+            // Include paths: -I path or -Ipath
+            "-I" => {
+                i += 1;
+                if i < args.len() {
+                    driver.add_include_path(&args[i]);
+                } else {
+                    eprintln!("error: -I requires an argument");
+                    std::process::exit(1);
+                }
             }
             arg if arg.starts_with("-I") => {
-                // TODO: handle include paths
+                driver.add_include_path(&arg[2..]);
             }
+
+            // Undefine macro
+            "-U" => {
+                i += 1;
+                // TODO: implement -U (undefine) support
+            }
+            arg if arg.starts_with("-U") => {
+                // TODO: implement -U (undefine) support
+            }
+
+            // Standard version flag
             arg if arg.starts_with("-std=") => {
-                // TODO: handle standard version
+                // TODO: handle standard version selection (c99, c11, c17, c2x)
             }
-            "-g" => {
-                // TODO: debug info
+
+            // Machine/target flags (ignored for now)
+            arg if arg.starts_with("-m") => {
+                // -m32, -m64, -march=, -mtune=, etc.
             }
-            "-c" => {
-                // TODO: compile only mode
+
+            // Feature flags (ignored for now)
+            arg if arg.starts_with("-f") => {
+                // -fno-pie, -fpic, -fPIC, -fomit-frame-pointer, etc.
             }
-            "-E" => {
-                // TODO: preprocess only mode
-            }
-            "-S" => {
-                // TODO: assembly output mode
-            }
+
+            // Linker flags
             "-static" => {
-                // Already handled
+                // Already handled (we always link statically for cross-compile)
             }
-            "-no-pie" | "-fno-pie" => {
-                // Already no-pie
+            "-shared" => {
+                // TODO: shared library output
             }
+            "-no-pie" | "-pie" => {
+                // Ignored
+            }
+            "-nostdlib" | "-nostdinc" | "-nodefaultlibs" => {
+                // TODO: handle no-stdlib modes
+            }
+
+            // Linker pass-through
+            arg if arg.starts_with("-Wl,") => {
+                // Linker flags passed through -Wl,
+            }
+
+            // Language selection
+            "-x" => {
+                i += 1;
+                // TODO: handle -x c, -x assembler, etc.
+            }
+
+            // Miscellaneous ignored flags
+            "-pipe" | "-pthread" | "-rdynamic" => {}
+
+            // Unknown flags - warn in verbose mode
             arg if arg.starts_with('-') => {
-                // Ignore unknown flags
                 if driver.verbose {
                     eprintln!("warning: unknown flag: {}", arg);
                 }
             }
+
+            // Input file
             _ => {
-                // Input file
                 driver.input_files.push(args[i].clone());
             }
         }
