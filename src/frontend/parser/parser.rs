@@ -1675,6 +1675,28 @@ impl Parser {
                         result_type = TypeSpecifier::Pointer(Box::new(result_type));
                         self.skip_cv_qualifiers();
                     }
+                    // Handle function pointer casts: (int (*)(int, int))
+                    // If we see '(' after the stars, this might be a function pointer
+                    if matches!(self.peek(), TokenKind::LParen) {
+                        let save2 = self.pos;
+                        self.advance(); // skip '('
+                        if self.consume_if(&TokenKind::Star) {
+                            // This is a function pointer cast like (int (*)(args))
+                            // Skip rest of declarator: optional name, then ')'
+                            while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+                                self.advance();
+                            }
+                            self.consume_if(&TokenKind::RParen);
+                            // Skip parameter list if present
+                            if matches!(self.peek(), TokenKind::LParen) {
+                                self.skip_balanced_parens();
+                            }
+                            // The result type is a function pointer (Ptr)
+                            result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                        } else {
+                            self.pos = save2;
+                        }
+                    }
                     // Skip array dimensions in abstract declarators e.g. (int [3])
                     self.skip_array_dimensions();
                     if matches!(self.peek(), TokenKind::RParen) {

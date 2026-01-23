@@ -524,9 +524,12 @@ impl Lowerer {
                 let src = self.lower_expr(inner);
                 let from_ty = self.get_expr_type(inner);
                 let to_ty = self.type_spec_to_ir(target_type);
-                // For pointer casts or same-type casts, just pass through
-                if to_ty == from_ty || (to_ty == IrType::Ptr && from_ty == IrType::I64)
-                    || (to_ty == IrType::I64 && from_ty == IrType::Ptr) {
+                // For pointer casts or same-type casts, just pass through.
+                // Ptr <-> I64/U64 are all no-ops since they're the same size on 64-bit.
+                // Ptr -> Ptr is always a no-op (e.g., void* to int*).
+                if to_ty == from_ty
+                    || (to_ty == IrType::Ptr && (from_ty == IrType::I64 || from_ty == IrType::U64))
+                    || ((to_ty == IrType::I64 || to_ty == IrType::U64) && from_ty == IrType::Ptr) {
                     src
                 } else if to_ty.is_float() || from_ty.is_float() {
                     // Float<->int or float<->float cast
