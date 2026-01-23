@@ -1,0 +1,487 @@
+use crate::frontend::parser::ast::*;
+use crate::ir::ir::*;
+use crate::common::types::IrType;
+use super::lowering::{Lowerer, LocalInfo, GlobalInfo};
+
+impl Lowerer {
+    pub(super) fn lower_compound_stmt(&mut self, compound: &CompoundStmt) {
+        for item in &compound.items {
+            match item {
+                BlockItem::Declaration(decl) => self.lower_local_decl(decl),
+                BlockItem::Statement(stmt) => self.lower_stmt(stmt),
+            }
+        }
+    }
+
+    pub(super) fn lower_local_decl(&mut self, decl: &Declaration) {
+        // First, register any struct/union definition from the type specifier
+        self.register_struct_type(&decl.type_spec);
+
+        for declarator in &decl.declarators {
+            if declarator.name.is_empty() {
+                continue; // Skip anonymous declarations (e.g., bare struct definitions)
+            }
+
+            let base_ty = self.type_spec_to_ir(&decl.type_spec);
+            let (alloc_size, elem_size, is_array, is_pointer) = self.compute_decl_info(&decl.type_spec, &declarator.derived);
+            let var_ty = if is_pointer { IrType::Ptr } else { base_ty };
+
+            // Determine if this is a struct/union variable or pointer-to-struct.
+            // For pointer-to-struct, we still store the layout so p->field works.
+            let struct_layout = self.get_struct_layout_for_type(&decl.type_spec);
+            let is_struct = struct_layout.is_some() && !is_pointer && !is_array;
+
+            // For struct variables, use the struct's actual size
+            let actual_alloc_size = if let Some(ref layout) = struct_layout {
+                layout.size
+            } else {
+                alloc_size
+            };
+
+            // Handle static local variables: emit as globals with mangled names
+            if decl.is_static {
+                let static_name = format!("{}.{}", self.current_function_name, declarator.name);
+
+                // Determine initializer (evaluated at compile time for static locals)
+                let init = if let Some(ref initializer) = declarator.init {
+                    self.lower_global_init(initializer, &decl.type_spec, base_ty, is_array, elem_size, actual_alloc_size, &struct_layout)
+                } else {
+                    GlobalInit::Zero
+                };
+
+                let align = match var_ty {
+                    IrType::I8 | IrType::U8 => 1,
+                    IrType::I16 | IrType::U16 => 2,
+                    IrType::I32 | IrType::U32 => 4,
+                    IrType::I64 | IrType::U64 | IrType::Ptr => 8,
+                    IrType::F32 => 4,
+                    IrType::F64 => 8,
+                    IrType::Void => 1,
+                };
+
+                // Add as a global variable (with static linkage = not exported)
+                self.module.globals.push(IrGlobal {
+                    name: static_name.clone(),
+                    ty: var_ty,
+                    size: actual_alloc_size,
+                    align,
+                    init,
+                    is_static: true,
+                });
+
+                // Track as a global for access via GlobalAddr
+                self.globals.insert(static_name.clone(), GlobalInfo {
+                    ty: var_ty,
+                    elem_size,
+                    is_array,
+                    struct_layout: struct_layout.clone(),
+                    is_struct,
+                });
+
+                // Also add an alias so the local name resolves to the global
+                // We emit a GlobalAddr to get the address, then treat it like an alloca
+                let addr = self.fresh_value();
+                self.emit(Instruction::GlobalAddr {
+                    dest: addr,
+                    name: static_name,
+                });
+
+                self.locals.insert(declarator.name.clone(), LocalInfo {
+                    alloca: addr,
+                    elem_size,
+                    is_array,
+                    ty: var_ty,
+                    struct_layout,
+                    is_struct,
+                });
+
+                self.next_static_local += 1;
+                // Static locals are initialized once at program start (via .data/.bss),
+                // not at every function call, so skip the runtime initialization below
+                continue;
+            }
+
+            let alloca = self.fresh_value();
+            self.emit(Instruction::Alloca {
+                dest: alloca,
+                ty: if is_array || is_struct { IrType::Ptr } else { var_ty },
+                size: actual_alloc_size,
+            });
+            self.locals.insert(declarator.name.clone(), LocalInfo {
+                alloca,
+                elem_size,
+                is_array,
+                ty: var_ty,
+                struct_layout,
+                is_struct,
+            });
+
+            if let Some(ref init) = declarator.init {
+                match init {
+                    Initializer::Expr(expr) => {
+                        if !is_struct {
+                            let val = self.lower_expr(expr);
+                            self.emit(Instruction::Store { val, ptr: alloca, ty: var_ty });
+                        }
+                        // TODO: struct assignment from expression
+                    }
+                    Initializer::List(items) => {
+                        if is_struct {
+                            // Initialize struct fields from initializer list
+                            if let Some(layout) = self.locals.get(&declarator.name).and_then(|l| l.struct_layout.clone()) {
+                                for (i, item) in items.iter().enumerate() {
+                                    if i >= layout.fields.len() { break; }
+                                    let field = &layout.fields[i];
+                                    let field_offset = field.offset;
+                                    let field_ty = self.ctype_to_ir(&field.ty);
+                                    let val = match &item.init {
+                                        Initializer::Expr(e) => self.lower_expr(e),
+                                        _ => Operand::Const(IrConst::I64(0)),
+                                    };
+                                    let field_addr = self.fresh_value();
+                                    self.emit(Instruction::GetElementPtr {
+                                        dest: field_addr,
+                                        base: alloca,
+                                        offset: Operand::Const(IrConst::I64(field_offset as i64)),
+                                        ty: field_ty,
+                                    });
+                                    self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
+                                }
+                            }
+                        } else if is_array && elem_size > 0 {
+                            // Store each element at its correct offset
+                            for (i, item) in items.iter().enumerate() {
+                                let val = match &item.init {
+                                    Initializer::Expr(e) => self.lower_expr(e),
+                                    _ => Operand::Const(IrConst::I64(0)),
+                                };
+                                let offset_val = Operand::Const(IrConst::I64((i * elem_size) as i64));
+                                let elem_addr = self.fresh_value();
+                                self.emit(Instruction::GetElementPtr {
+                                    dest: elem_addr,
+                                    base: alloca,
+                                    offset: offset_val,
+                                    ty: base_ty,
+                                });
+                                self.emit(Instruction::Store { val, ptr: elem_addr, ty: base_ty });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) fn lower_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Return(expr, _span) => {
+                let op = expr.as_ref().map(|e| self.lower_expr(e));
+                self.terminate(Terminator::Return(op));
+                // Start a new unreachable block for any code after return
+                let label = self.fresh_label("post_ret");
+                self.start_block(label);
+            }
+            Stmt::Expr(Some(expr)) => {
+                self.lower_expr(expr);
+            }
+            Stmt::Expr(None) => {}
+            Stmt::Compound(compound) => {
+                self.lower_compound_stmt(compound);
+            }
+            Stmt::If(cond, then_stmt, else_stmt, _span) => {
+                let cond_val = self.lower_expr(cond);
+                let then_label = self.fresh_label("then");
+                let else_label = self.fresh_label("else");
+                let end_label = self.fresh_label("endif");
+
+                if else_stmt.is_some() {
+                    self.terminate(Terminator::CondBranch {
+                        cond: cond_val,
+                        true_label: then_label.clone(),
+                        false_label: else_label.clone(),
+                    });
+                } else {
+                    self.terminate(Terminator::CondBranch {
+                        cond: cond_val,
+                        true_label: then_label.clone(),
+                        false_label: end_label.clone(),
+                    });
+                }
+
+                // Then block
+                self.start_block(then_label);
+                self.lower_stmt(then_stmt);
+                self.terminate(Terminator::Branch(end_label.clone()));
+
+                // Else block
+                if let Some(else_stmt) = else_stmt {
+                    self.start_block(else_label);
+                    self.lower_stmt(else_stmt);
+                    self.terminate(Terminator::Branch(end_label.clone()));
+                }
+
+                self.start_block(end_label);
+            }
+            Stmt::While(cond, body, _span) => {
+                let cond_label = self.fresh_label("while_cond");
+                let body_label = self.fresh_label("while_body");
+                let end_label = self.fresh_label("while_end");
+
+                self.break_labels.push(end_label.clone());
+                self.continue_labels.push(cond_label.clone());
+
+                self.terminate(Terminator::Branch(cond_label.clone()));
+
+                self.start_block(cond_label);
+                let cond_val = self.lower_expr(cond);
+                self.terminate(Terminator::CondBranch {
+                    cond: cond_val,
+                    true_label: body_label.clone(),
+                    false_label: end_label.clone(),
+                });
+
+                self.start_block(body_label);
+                self.lower_stmt(body);
+                self.terminate(Terminator::Branch(self.continue_labels.last().unwrap().clone()));
+
+                self.break_labels.pop();
+                self.continue_labels.pop();
+
+                self.start_block(end_label);
+            }
+            Stmt::For(init, cond, inc, body, _span) => {
+                // Init
+                if let Some(init) = init {
+                    match init.as_ref() {
+                        ForInit::Declaration(decl) => self.lower_local_decl(decl),
+                        ForInit::Expr(expr) => { self.lower_expr(expr); },
+                    }
+                }
+
+                let cond_label = self.fresh_label("for_cond");
+                let body_label = self.fresh_label("for_body");
+                let inc_label = self.fresh_label("for_inc");
+                let end_label = self.fresh_label("for_end");
+
+                self.break_labels.push(end_label.clone());
+                self.continue_labels.push(inc_label.clone());
+
+                let cond_label_ref = cond_label.clone();
+                self.terminate(Terminator::Branch(cond_label.clone()));
+
+                // Condition
+                self.start_block(cond_label);
+                if let Some(cond) = cond {
+                    let cond_val = self.lower_expr(cond);
+                    self.terminate(Terminator::CondBranch {
+                        cond: cond_val,
+                        true_label: body_label.clone(),
+                        false_label: end_label.clone(),
+                    });
+                } else {
+                    self.terminate(Terminator::Branch(body_label.clone()));
+                }
+
+                // Body
+                self.start_block(body_label);
+                self.lower_stmt(body);
+                self.terminate(Terminator::Branch(inc_label.clone()));
+
+                // Increment
+                self.start_block(inc_label);
+                if let Some(inc) = inc {
+                    self.lower_expr(inc);
+                }
+                self.terminate(Terminator::Branch(cond_label_ref));
+
+                self.break_labels.pop();
+                self.continue_labels.pop();
+
+                self.start_block(end_label);
+            }
+            Stmt::DoWhile(body, cond, _span) => {
+                let body_label = self.fresh_label("do_body");
+                let cond_label = self.fresh_label("do_cond");
+                let end_label = self.fresh_label("do_end");
+
+                self.break_labels.push(end_label.clone());
+                self.continue_labels.push(cond_label.clone());
+
+                self.terminate(Terminator::Branch(body_label.clone()));
+
+                self.start_block(body_label.clone());
+                self.lower_stmt(body);
+                self.terminate(Terminator::Branch(cond_label.clone()));
+
+                self.start_block(cond_label);
+                let cond_val = self.lower_expr(cond);
+                self.terminate(Terminator::CondBranch {
+                    cond: cond_val,
+                    true_label: body_label,
+                    false_label: end_label.clone(),
+                });
+
+                self.break_labels.pop();
+                self.continue_labels.pop();
+
+                self.start_block(end_label);
+            }
+            Stmt::Break(_span) => {
+                if let Some(label) = self.break_labels.last().cloned() {
+                    self.terminate(Terminator::Branch(label));
+                    let dead = self.fresh_label("post_break");
+                    self.start_block(dead);
+                }
+            }
+            Stmt::Continue(_span) => {
+                if let Some(label) = self.continue_labels.last().cloned() {
+                    self.terminate(Terminator::Branch(label));
+                    let dead = self.fresh_label("post_continue");
+                    self.start_block(dead);
+                }
+            }
+            Stmt::Switch(expr, body, _span) => {
+                // Evaluate switch expression and store it in an alloca so we can
+                // reload it in the dispatch chain (which is emitted after the body).
+                let val = self.lower_expr(expr);
+                let switch_alloca = self.fresh_value();
+                self.emit(Instruction::Alloca {
+                    dest: switch_alloca,
+                    ty: IrType::I64,
+                    size: 8,
+                });
+                self.emit(Instruction::Store {
+                    val,
+                    ptr: switch_alloca,
+                    ty: IrType::I64,
+                });
+
+                let dispatch_label = self.fresh_label("switch_dispatch");
+                let end_label = self.fresh_label("switch_end");
+                let body_label = self.fresh_label("switch_body");
+
+                // Push switch context
+                self.switch_end_labels.push(end_label.clone());
+                self.break_labels.push(end_label.clone());
+                self.switch_cases.push(Vec::new());
+                self.switch_default.push(None);
+                self.switch_val_allocas.push(switch_alloca);
+
+                // Jump to dispatch (which will be emitted after the body)
+                self.terminate(Terminator::Branch(dispatch_label.clone()));
+
+                // Lower the switch body - case/default stmts will register
+                // their labels in switch_cases/switch_default
+                self.start_block(body_label.clone());
+                self.lower_stmt(body);
+                // Fall off end of switch body -> go to end
+                self.terminate(Terminator::Branch(end_label.clone()));
+
+                // Pop switch context and collect the case/default info
+                self.switch_end_labels.pop();
+                self.break_labels.pop();
+                let cases = self.switch_cases.pop().unwrap_or_default();
+                let default_label = self.switch_default.pop().flatten();
+                self.switch_val_allocas.pop();
+
+                // Now emit the dispatch chain: a series of comparison blocks
+                // that check each case value and branch accordingly.
+                let fallback = default_label.unwrap_or_else(|| end_label.clone());
+
+                self.start_block(dispatch_label);
+
+                if cases.is_empty() {
+                    // No cases, just go to default or end
+                    self.terminate(Terminator::Branch(fallback));
+                } else {
+                    // Emit comparison chain: each check block loads the switch
+                    // value, compares against a case constant, and branches.
+                    for (i, (case_val, case_label)) in cases.iter().enumerate() {
+                        // Load the switch value in this block
+                        let loaded = self.fresh_value();
+                        self.emit(Instruction::Load {
+                            dest: loaded,
+                            ptr: switch_alloca,
+                            ty: IrType::I64,
+                        });
+
+                        let cmp_result = self.fresh_value();
+                        self.emit(Instruction::Cmp {
+                            dest: cmp_result,
+                            op: IrCmpOp::Eq,
+                            lhs: Operand::Value(loaded),
+                            rhs: Operand::Const(IrConst::I64(*case_val)),
+                            ty: IrType::I64,
+                        });
+
+                        let next_check = if i + 1 < cases.len() {
+                            self.fresh_label("switch_check")
+                        } else {
+                            fallback.clone()
+                        };
+
+                        self.terminate(Terminator::CondBranch {
+                            cond: Operand::Value(cmp_result),
+                            true_label: case_label.clone(),
+                            false_label: next_check.clone(),
+                        });
+
+                        // Start next check block (unless this was the last case)
+                        if i + 1 < cases.len() {
+                            self.start_block(next_check);
+                        }
+                    }
+                }
+
+                self.start_block(end_label);
+            }
+            Stmt::Case(expr, stmt, _span) => {
+                // Evaluate the case constant expression
+                let case_val = self.eval_const_expr(expr)
+                    .and_then(|c| self.const_to_i64(&c))
+                    .unwrap_or(0);
+
+                // Create a label for this case
+                let label = self.fresh_label("case");
+
+                // Register this case with the enclosing switch
+                if let Some(cases) = self.switch_cases.last_mut() {
+                    cases.push((case_val, label.clone()));
+                }
+
+                // Terminate current block and start the case block.
+                // The previous case falls through to this one (C semantics).
+                self.terminate(Terminator::Branch(label.clone()));
+                self.start_block(label);
+                self.lower_stmt(stmt);
+            }
+            Stmt::Default(stmt, _span) => {
+                let label = self.fresh_label("default");
+
+                // Register as default with enclosing switch
+                if let Some(default) = self.switch_default.last_mut() {
+                    *default = Some(label.clone());
+                }
+
+                // Fallthrough from previous case
+                self.terminate(Terminator::Branch(label.clone()));
+                self.start_block(label);
+                self.lower_stmt(stmt);
+            }
+            Stmt::Goto(label, _span) => {
+                // Include function name in label to avoid collisions across functions
+                let scoped_label = format!(".Luser_{}_{}", self.current_function_name, label);
+                self.terminate(Terminator::Branch(scoped_label));
+                let dead = self.fresh_label("post_goto");
+                self.start_block(dead);
+            }
+            Stmt::Label(name, stmt, _span) => {
+                // Include function name in label to avoid collisions across functions
+                let label = format!(".Luser_{}_{}", self.current_function_name, name);
+                self.terminate(Terminator::Branch(label.clone()));
+                self.start_block(label);
+                self.lower_stmt(stmt);
+            }
+        }
+    }
+}

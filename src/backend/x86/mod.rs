@@ -1,3 +1,3 @@
 pub mod codegen;
-pub mod assembler;
-pub mod linker;
+
+pub use codegen::codegen::X86Codegen;

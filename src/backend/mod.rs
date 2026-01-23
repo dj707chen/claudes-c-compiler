@@ -1,6 +1,9 @@
+pub mod common;
 pub mod x86;
 pub mod arm;
 pub mod riscv;
+
+use crate::ir::ir::IrModule;
 
 /// Target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8,4 +11,61 @@ pub enum Target {
     X86_64,
     Aarch64,
     Riscv64,
+}
+
+impl Target {
+    /// Get the assembler config for this target.
+    pub fn assembler_config(&self) -> common::AssemblerConfig {
+        match self {
+            Target::X86_64 => common::AssemblerConfig {
+                command: "gcc",
+                extra_args: &[],
+            },
+            Target::Aarch64 => common::AssemblerConfig {
+                command: "aarch64-linux-gnu-gcc",
+                extra_args: &[],
+            },
+            Target::Riscv64 => common::AssemblerConfig {
+                command: "riscv64-linux-gnu-gcc",
+                extra_args: &["-march=rv64gc", "-mabi=lp64d"],
+            },
+        }
+    }
+
+    /// Get the linker config for this target.
+    pub fn linker_config(&self) -> common::LinkerConfig {
+        match self {
+            Target::X86_64 => common::LinkerConfig {
+                command: "gcc",
+                extra_args: &["-no-pie"],
+            },
+            Target::Aarch64 => common::LinkerConfig {
+                command: "aarch64-linux-gnu-gcc",
+                extra_args: &["-static"],
+            },
+            Target::Riscv64 => common::LinkerConfig {
+                command: "riscv64-linux-gnu-gcc",
+                extra_args: &["-static"],
+            },
+        }
+    }
+
+    /// Generate assembly for an IR module using this target's code generator.
+    pub fn generate_assembly(&self, module: &IrModule) -> String {
+        match self {
+            Target::X86_64 => x86::X86Codegen::new().generate(module),
+            Target::Aarch64 => arm::ArmCodegen::new().generate(module),
+            Target::Riscv64 => riscv::RiscvCodegen::new().generate(module),
+        }
+    }
+
+    /// Assemble text to object file.
+    pub fn assemble(&self, asm_text: &str, output_path: &str) -> Result<(), String> {
+        common::assemble(&self.assembler_config(), asm_text, output_path)
+    }
+
+    /// Link object files into executable.
+    pub fn link(&self, object_files: &[&str], output_path: &str) -> Result<(), String> {
+        common::link(&self.linker_config(), object_files, output_path)
+    }
 }

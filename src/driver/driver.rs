@@ -1,21 +1,11 @@
 use crate::backend::Target;
 use crate::frontend::preprocessor::Preprocessor;
-use crate::frontend::preprocessor::macro_defs::MacroDef;
 use crate::frontend::lexer::Lexer;
 use crate::frontend::parser::Parser;
 use crate::frontend::sema::SemanticAnalyzer;
 use crate::ir::lowering::Lowerer;
 use crate::ir::mem2reg::promote_allocas;
 use crate::passes::run_passes;
-use crate::backend::x86::codegen::X86Codegen;
-use crate::backend::x86::assembler::X86Assembler;
-use crate::backend::x86::linker::X86Linker;
-use crate::backend::arm::codegen::ArmCodegen;
-use crate::backend::arm::assembler::ArmAssembler;
-use crate::backend::arm::linker::ArmLinker;
-use crate::backend::riscv::codegen::RiscvCodegen;
-use crate::backend::riscv::assembler::RiscvAssembler;
-use crate::backend::riscv::linker::RiscvLinker;
 use crate::common::source::SourceManager;
 
 /// Compilation mode - determines where in the pipeline to stop.
@@ -69,7 +59,6 @@ impl Driver {
     }
 
     /// Add a -D define from command line.
-    /// Accepts "NAME" (defines to "1") or "NAME=VALUE".
     pub fn add_define(&mut self, arg: &str) {
         if let Some(eq_pos) = arg.find('=') {
             self.defines.push(CliDefine {
@@ -101,7 +90,7 @@ impl Driver {
         match self.mode {
             CompileMode::AssemblyOnly => format!("{}.s", stem),
             CompileMode::ObjectOnly => format!("{}.o", stem),
-            CompileMode::PreprocessOnly => String::new(), // stdout
+            CompileMode::PreprocessOnly => String::new(),
             CompileMode::Full => self.output_path.clone(),
         }
     }
@@ -130,7 +119,6 @@ impl Driver {
         }
     }
 
-    /// -E mode: preprocess and output to stdout (or -o file).
     fn run_preprocess_only(&self) -> Result<(), String> {
         for input_file in &self.input_files {
             let source = std::fs::read_to_string(input_file)
@@ -151,7 +139,6 @@ impl Driver {
         Ok(())
     }
 
-    /// -S mode: compile to assembly, output .s file.
     fn run_assembly_only(&self) -> Result<(), String> {
         for input_file in &self.input_files {
             let asm = self.compile_to_assembly(input_file)?;
@@ -165,12 +152,11 @@ impl Driver {
         Ok(())
     }
 
-    /// -c mode: compile to object file, don't link.
     fn run_object_only(&self) -> Result<(), String> {
         for input_file in &self.input_files {
             let asm = self.compile_to_assembly(input_file)?;
             let out_path = self.output_for_input(input_file);
-            self.assemble_text(&asm, &out_path)?;
+            self.target.assemble(&asm, &out_path)?;
             if self.verbose {
                 eprintln!("Object output: {}", out_path);
             }
@@ -178,16 +164,11 @@ impl Driver {
         Ok(())
     }
 
-    /// Full compilation mode: compile, assemble, and link.
     fn run_full(&self) -> Result<(), String> {
         let mut object_files = Vec::new();
-        let mut needs_libc = false;
 
         for input_file in &self.input_files {
-            let (asm, file_needs_libc) = self.compile_to_assembly_with_libc_check(input_file)?;
-            if file_needs_libc {
-                needs_libc = true;
-            }
+            let asm = self.compile_to_assembly(input_file)?;
 
             let obj_path = format!("/tmp/ccc_{}_{}.o",
                 std::process::id(),
@@ -195,28 +176,13 @@ impl Driver {
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("out"));
-            self.assemble_text(&asm, &obj_path)?;
+            self.target.assemble(&asm, &obj_path)?;
             object_files.push(obj_path);
         }
 
-        // Link all object files
         let obj_refs: Vec<&str> = object_files.iter().map(|s| s.as_str()).collect();
-        match self.target {
-            Target::X86_64 => {
-                let linker = X86Linker::new();
-                linker.link(&obj_refs, &self.output_path, needs_libc)?;
-            }
-            Target::Aarch64 => {
-                let linker = ArmLinker::new();
-                linker.link(&obj_refs, &self.output_path, needs_libc)?;
-            }
-            Target::Riscv64 => {
-                let linker = RiscvLinker::new();
-                linker.link(&obj_refs, &self.output_path, needs_libc)?;
-            }
-        }
+        self.target.link(&obj_refs, &self.output_path)?;
 
-        // Clean up object files
         for obj in &object_files {
             let _ = std::fs::remove_file(obj);
         }
@@ -229,14 +195,7 @@ impl Driver {
     }
 
     /// Core pipeline: preprocess, lex, parse, sema, lower, optimize, codegen.
-    /// Returns assembly text.
     fn compile_to_assembly(&self, input_file: &str) -> Result<String, String> {
-        let (asm, _) = self.compile_to_assembly_with_libc_check(input_file)?;
-        Ok(asm)
-    }
-
-    /// Core pipeline returning assembly and whether libc is needed.
-    fn compile_to_assembly_with_libc_check(&self, input_file: &str) -> Result<(String, bool), String> {
         let source = std::fs::read_to_string(input_file)
             .map_err(|e| format!("Cannot read {}: {}", input_file, e))?;
 
@@ -245,18 +204,6 @@ impl Driver {
         self.configure_preprocessor(&mut preprocessor);
         preprocessor.set_filename(input_file);
         let preprocessed = preprocessor.preprocess(&source);
-
-        // Check if we need libc
-        let needs_libc = preprocessor.includes().iter().any(|inc| {
-            inc.contains("stdio.h") || inc.contains("stdlib.h") || inc.contains("string.h")
-                || inc.contains("math.h") || inc.contains("ctype.h") || inc.contains("assert.h")
-                || inc.contains("stdarg.h") || inc.contains("stdint.h") || inc.contains("stddef.h")
-                || inc.contains("limits.h") || inc.contains("errno.h") || inc.contains("signal.h")
-                || inc.contains("time.h") || inc.contains("unistd.h") || inc.contains("fcntl.h")
-                || inc.contains("sys/") || inc.contains("inttypes.h") || inc.contains("stdbool.h")
-                || inc.contains("float.h") || inc.contains("setjmp.h") || inc.contains("locale.h")
-                || inc.contains("wchar.h") || inc.contains("dirent.h") || inc.contains("pthread.h")
-        });
 
         // Lex
         let mut source_manager = SourceManager::new();
@@ -297,53 +244,14 @@ impl Driver {
         promote_allocas(&mut module);
         run_passes(&mut module, self.opt_level);
 
-        // Generate assembly based on target
-        let asm = match self.target {
-            Target::X86_64 => {
-                let codegen = X86Codegen::new();
-                let asm = codegen.generate(&module);
-                if self.verbose {
-                    eprintln!("Generated x86-64 assembly ({} bytes)", asm.len());
-                }
-                asm
-            }
-            Target::Aarch64 => {
-                let codegen = ArmCodegen::new();
-                let asm = codegen.generate(&module);
-                if self.verbose {
-                    eprintln!("Generated AArch64 assembly ({} bytes)", asm.len());
-                }
-                asm
-            }
-            Target::Riscv64 => {
-                let codegen = RiscvCodegen::new();
-                let asm = codegen.generate(&module);
-                if self.verbose {
-                    eprintln!("Generated RISC-V assembly ({} bytes)", asm.len());
-                }
-                asm
-            }
-        };
+        // Generate assembly using target-specific codegen
+        let asm = self.target.generate_assembly(&module);
 
-        Ok((asm, needs_libc))
-    }
-
-    /// Assemble text to an object file using the appropriate backend assembler.
-    fn assemble_text(&self, asm_text: &str, output_path: &str) -> Result<(), String> {
-        match self.target {
-            Target::X86_64 => {
-                let assembler = X86Assembler::new();
-                assembler.assemble(asm_text, output_path)
-            }
-            Target::Aarch64 => {
-                let assembler = ArmAssembler::new();
-                assembler.assemble(asm_text, output_path)
-            }
-            Target::Riscv64 => {
-                let assembler = RiscvAssembler::new();
-                assembler.assemble(asm_text, output_path)
-            }
+        if self.verbose {
+            eprintln!("Generated {:?} assembly ({} bytes)", self.target, asm.len());
         }
+
+        Ok(asm)
     }
 }
 
