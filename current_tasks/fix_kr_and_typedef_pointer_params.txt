@@ -1,6 +1,0 @@
-Fixing two related parameter type resolution bugs:
-1. K&R style function parameters: derived declarators (pointer, array) were being discarded
-   so `int *a;` in K&R style was treated as just `int a`
-2. Typedef pointer parameters: pointee_elem_size() and pointee_ir_type() were not resolving
-   typedef names before pattern matching, causing array subscript on typedef pointer params
-   to use wrong element size (8 instead of actual pointee size)
