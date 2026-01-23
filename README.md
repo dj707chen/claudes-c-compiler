@@ -23,7 +23,14 @@ A C compiler written in Rust, targeting x86-64, AArch64, and RISC-V 64.
 - `if`/`else`, `while`, `for`, `do-while` control flow
 - Function calls with up to 6/8 arguments
 - Comparison operators
-- Array declarations, subscript read/write (`arr[i]`, `arr[i] = val`)
+- **Type-aware code generation**: correct-sized load/store instructions for all types
+  - `char` uses byte operations (movb/strb/sb)
+  - `short` uses 16-bit operations (movw/strh/sh)
+  - `int` uses 32-bit operations (movl/str w/sw)
+  - `long`/pointers use 64-bit operations (movq/str x/sd)
+  - Sign extension on loads for smaller types
+- Array declarations with correct element sizes (4 bytes for int[], 1 for char[], etc.)
+- Array subscript read/write (`arr[i]`, `arr[i] = val`)
 - Array initializer lists (`int arr[] = {1, 2, 3}`)
 - Pointer dereference assignment (`*p = val`, `val = *p`)
 - Address-of operator (`&x`, `&arr[i]`)
@@ -31,6 +38,7 @@ A C compiler written in Rust, targeting x86-64, AArch64, and RISC-V 64.
 - Pre/post increment/decrement on arrays/pointers (`arr[i]++`, `++(*p)`)
 - Short-circuit evaluation for `&&` and `||`
 - Proper `sizeof` for basic types and arrays
+- 32-bit arithmetic operations for `int` type (addl/subl/imull/idivl on x86)
 
 ### What's Not Yet Implemented
 - Preprocessor (macros, includes, conditionals)

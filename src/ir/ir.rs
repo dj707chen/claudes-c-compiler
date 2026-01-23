@@ -53,8 +53,8 @@ pub enum Instruction {
     /// Allocate stack space: %dest = alloca ty
     Alloca { dest: Value, ty: IrType, size: usize },
 
-    /// Store to memory: store val, ptr
-    Store { val: Operand, ptr: Value },
+    /// Store to memory: store val, ptr (type indicates size of store)
+    Store { val: Operand, ptr: Value, ty: IrType },
 
     /// Load from memory: %dest = load ptr
     Load { dest: Value, ptr: Value, ty: IrType },

@@ -150,30 +150,34 @@ impl RiscvCodegen {
     fn generate_instruction(&mut self, inst: &Instruction) {
         match inst {
             Instruction::Alloca { .. } => {}
-            Instruction::Store { val, ptr } => {
+            Instruction::Store { val, ptr, ty } => {
                 self.operand_to_t0(val);
                 if let Some(&offset) = self.value_locations.get(&ptr.0) {
                     if self.alloca_values.contains(&ptr.0) {
-                        // Store directly to the alloca's stack slot
-                        self.emit(&format!("    sd t0, {}(s0)", offset));
+                        // Store directly to the alloca's stack slot with type-aware size
+                        let store_instr = Self::store_for_type(*ty);
+                        self.emit(&format!("    {} t0, {}(s0)", store_instr, offset));
                     } else {
                         // ptr is a computed address (e.g., from GEP).
                         // Load the pointer, then store through it.
                         self.emit("    mv t3, t0"); // save value
                         self.emit(&format!("    ld t4, {}(s0)", offset)); // load pointer
-                        self.emit("    sd t3, 0(t4)"); // store value at address
+                        let store_instr = Self::store_for_type(*ty);
+                        self.emit(&format!("    {} t3, 0(t4)", store_instr));
                     }
                 }
             }
-            Instruction::Load { dest, ptr, .. } => {
+            Instruction::Load { dest, ptr, ty } => {
                 if let Some(&ptr_off) = self.value_locations.get(&ptr.0) {
                     if self.alloca_values.contains(&ptr.0) {
-                        // Load directly from the alloca's stack slot
-                        self.emit(&format!("    ld t0, {}(s0)", ptr_off));
+                        // Load directly from the alloca's stack slot with type-aware size
+                        let load_instr = Self::load_for_type(*ty);
+                        self.emit(&format!("    {} t0, {}(s0)", load_instr, ptr_off));
                     } else {
                         // ptr is a computed address. Load the pointer, then deref.
                         self.emit(&format!("    ld t0, {}(s0)", ptr_off)); // load pointer
-                        self.emit("    ld t0, 0(t0)"); // load from address
+                        let load_instr = Self::load_for_type(*ty);
+                        self.emit(&format!("    {} t0, 0(t0)", load_instr));
                     }
                     if let Some(&dest_off) = self.value_locations.get(&dest.0) {
                         self.emit(&format!("    sd t0, {}(s0)", dest_off));
@@ -325,6 +329,28 @@ impl RiscvCodegen {
             Terminator::Unreachable => {
                 self.emit("    ebreak");
             }
+        }
+    }
+
+    /// Get the store instruction for a given type (RISC-V).
+    fn store_for_type(ty: IrType) -> &'static str {
+        match ty {
+            IrType::I8 => "sb",
+            IrType::I16 => "sh",
+            IrType::I32 => "sw",
+            IrType::I64 | IrType::Ptr => "sd",
+            _ => "sd",
+        }
+    }
+
+    /// Get the load instruction for a given type (with sign extension, RISC-V).
+    fn load_for_type(ty: IrType) -> &'static str {
+        match ty {
+            IrType::I8 => "lb",     // sign-extend byte
+            IrType::I16 => "lh",    // sign-extend halfword
+            IrType::I32 => "lw",    // sign-extend word to 64-bit
+            IrType::I64 | IrType::Ptr => "ld",
+            _ => "ld",
         }
     }
 

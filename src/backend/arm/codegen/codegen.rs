@@ -148,30 +148,36 @@ impl ArmCodegen {
     fn generate_instruction(&mut self, inst: &Instruction) {
         match inst {
             Instruction::Alloca { .. } => {}
-            Instruction::Store { val, ptr } => {
+            Instruction::Store { val, ptr, ty } => {
                 self.operand_to_x0(val);
                 if let Some(&offset) = self.value_locations.get(&ptr.0) {
                     if self.alloca_values.contains(&ptr.0) {
-                        // Store directly to the alloca's stack slot
-                        self.emit(&format!("    str x0, [sp, #{}]", offset));
+                        // Store directly to the alloca's stack slot with type-aware size
+                        let store_instr = Self::str_for_type(*ty);
+                        let reg = Self::reg_for_type("x0", *ty);
+                        self.emit(&format!("    {} {}, [sp, #{}]", store_instr, reg, offset));
                     } else {
                         // ptr is a computed address (e.g., from GEP).
                         // Load the pointer, then store through it.
                         self.emit("    mov x1, x0"); // save value
                         self.emit(&format!("    ldr x2, [sp, #{}]", offset)); // load pointer
-                        self.emit("    str x1, [x2]"); // store value at address
+                        let store_instr = Self::str_for_type(*ty);
+                        let reg = Self::reg_for_type("x1", *ty);
+                        self.emit(&format!("    {} {}, [x2]", store_instr, reg));
                     }
                 }
             }
-            Instruction::Load { dest, ptr, .. } => {
+            Instruction::Load { dest, ptr, ty } => {
                 if let Some(&ptr_off) = self.value_locations.get(&ptr.0) {
                     if self.alloca_values.contains(&ptr.0) {
-                        // Load directly from the alloca's stack slot
-                        self.emit(&format!("    ldr x0, [sp, #{}]", ptr_off));
+                        // Load directly from the alloca's stack slot with type-aware size
+                        let load_instr = Self::ldr_for_type(*ty);
+                        self.emit(&format!("    {} x0, [sp, #{}]", load_instr, ptr_off));
                     } else {
                         // ptr is a computed address. Load the pointer, then deref.
                         self.emit(&format!("    ldr x0, [sp, #{}]", ptr_off)); // load pointer
-                        self.emit("    ldr x0, [x0]"); // load from address
+                        let load_instr = Self::ldr_for_type(*ty);
+                        self.emit(&format!("    {} x0, [x0]", load_instr));
                     }
                     if let Some(&dest_off) = self.value_locations.get(&dest.0) {
                         self.emit(&format!("    str x0, [sp, #{}]", dest_off));
@@ -323,6 +329,45 @@ impl ArmCodegen {
             Terminator::Unreachable => {
                 self.emit("    brk #0");
             }
+        }
+    }
+
+    /// Get the store instruction for a given type.
+    fn str_for_type(ty: IrType) -> &'static str {
+        match ty {
+            IrType::I8 => "strb",
+            IrType::I16 => "strh",
+            IrType::I32 => "str",   // str w-reg
+            IrType::I64 | IrType::Ptr => "str",   // str x-reg
+            _ => "str",
+        }
+    }
+
+    /// Get the load instruction for a given type (with sign extension).
+    fn ldr_for_type(ty: IrType) -> &'static str {
+        match ty {
+            IrType::I8 => "ldrsb",   // sign-extend byte
+            IrType::I16 => "ldrsh",  // sign-extend halfword
+            IrType::I32 => "ldrsw",  // sign-extend word to 64-bit
+            IrType::I64 | IrType::Ptr => "ldr",
+            _ => "ldr",
+        }
+    }
+
+    /// Get the appropriate register name for a given base and type.
+    fn reg_for_type(base: &str, ty: IrType) -> &'static str {
+        // On AArch64, w0 is the 32-bit alias of x0, etc.
+        // For byte/halfword stores, we still use w-reg (strb/strh use 32-bit reg)
+        match base {
+            "x0" => match ty {
+                IrType::I8 | IrType::I16 | IrType::I32 => "w0",
+                _ => "x0",
+            },
+            "x1" => match ty {
+                IrType::I8 | IrType::I16 | IrType::I32 => "w1",
+                _ => "x1",
+            },
+            _ => "x0",
         }
     }
 

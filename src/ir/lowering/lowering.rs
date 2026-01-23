@@ -13,6 +13,8 @@ struct LocalInfo {
     elem_size: usize,
     /// Whether this is an array (the alloca IS the base address, not a pointer to one).
     is_array: bool,
+    /// The IR type of the variable (I8 for char, I32 for int, I64 for long, Ptr for pointers).
+    ty: IrType,
 }
 
 /// Represents an lvalue - something that can be assigned to.
@@ -129,15 +131,17 @@ impl Lowerer {
         for param in &params {
             if !param.name.is_empty() {
                 let alloca = self.fresh_value();
+                let ty = param.ty;
                 self.emit(Instruction::Alloca {
                     dest: alloca,
-                    ty: param.ty,
-                    size: param.ty.size(),
+                    ty,
+                    size: ty.size(),
                 });
                 self.locals.insert(param.name.clone(), LocalInfo {
                     alloca,
                     elem_size: 0,
                     is_array: false,
+                    ty,
                 });
             }
         }
@@ -186,29 +190,30 @@ impl Lowerer {
         for declarator in &decl.declarators {
             let base_ty = self.type_spec_to_ir(&decl.type_spec);
             let (alloc_size, elem_size, is_array, is_pointer) = self.compute_decl_info(&decl.type_spec, &declarator.derived);
+            let var_ty = if is_pointer { IrType::Ptr } else { base_ty };
             let alloca = self.fresh_value();
             self.emit(Instruction::Alloca {
                 dest: alloca,
-                ty: if is_pointer || is_array { IrType::Ptr } else { base_ty },
+                ty: if is_array { IrType::Ptr } else { var_ty },
                 size: alloc_size,
             });
             self.locals.insert(declarator.name.clone(), LocalInfo {
                 alloca,
                 elem_size,
                 is_array,
+                ty: var_ty,
             });
 
             if let Some(ref init) = declarator.init {
                 match init {
                     Initializer::Expr(expr) => {
                         let val = self.lower_expr(expr);
-                        self.emit(Instruction::Store { val, ptr: alloca });
+                        self.emit(Instruction::Store { val, ptr: alloca, ty: var_ty });
                     }
                     Initializer::List(items) => {
                         // Initialize array/struct elements from initializer list
                         if is_array && elem_size > 0 {
-                            // Zero-initialize the whole array first
-                            // Then store each element
+                            // Store each element at its correct offset
                             for (i, item) in items.iter().enumerate() {
                                 let val = match &item.init {
                                     Initializer::Expr(e) => self.lower_expr(e),
@@ -222,7 +227,7 @@ impl Lowerer {
                                     offset: offset_val,
                                     ty: base_ty,
                                 });
-                                self.emit(Instruction::Store { val, ptr: elem_addr });
+                                self.emit(Instruction::Store { val, ptr: elem_addr, ty: base_ty });
                             }
                         }
                     }
@@ -487,18 +492,28 @@ impl Lowerer {
         }
     }
 
-    /// Load the value from an lvalue.
-    fn load_lvalue(&mut self, lv: &LValue) -> Operand {
+    /// Load the value from an lvalue with a specific type.
+    fn load_lvalue_typed(&mut self, lv: &LValue, ty: IrType) -> Operand {
         let addr = self.lvalue_addr(lv);
         let dest = self.fresh_value();
-        self.emit(Instruction::Load { dest, ptr: addr, ty: IrType::I64 });
+        self.emit(Instruction::Load { dest, ptr: addr, ty });
         Operand::Value(dest)
     }
 
-    /// Store a value to an lvalue.
-    fn store_lvalue(&mut self, lv: &LValue, val: Operand) {
+    /// Load the value from an lvalue (defaults to I64 for backwards compat).
+    fn load_lvalue(&mut self, lv: &LValue) -> Operand {
+        self.load_lvalue_typed(lv, IrType::I64)
+    }
+
+    /// Store a value to an lvalue with a specific type.
+    fn store_lvalue_typed(&mut self, lv: &LValue, val: Operand, ty: IrType) {
         let addr = self.lvalue_addr(lv);
-        self.emit(Instruction::Store { val, ptr: addr });
+        self.emit(Instruction::Store { val, ptr: addr, ty });
+    }
+
+    /// Store a value to an lvalue (defaults to I64 for backwards compat).
+    fn store_lvalue(&mut self, lv: &LValue, val: Operand) {
+        self.store_lvalue_typed(lv, val, IrType::I64);
     }
 
     /// Compute the address of an array element: base_addr + index * elem_size.
@@ -560,9 +575,9 @@ impl Lowerer {
                         // The alloca IS the base address of the array
                         return Operand::Value(info.alloca);
                     } else {
-                        // It's a pointer - load it to get the address it points to
+                        // It's a pointer - load it (pointers are always 8 bytes/Ptr type)
                         let loaded = self.fresh_value();
-                        self.emit(Instruction::Load { dest: loaded, ptr: info.alloca, ty: IrType::I64 });
+                        self.emit(Instruction::Load { dest: loaded, ptr: info.alloca, ty: IrType::Ptr });
                         return Operand::Value(loaded);
                     }
                 }
@@ -585,9 +600,9 @@ impl Lowerer {
                 }
             }
         }
-        // Default element size: 8 bytes to match codegen's movq operations.
+        // Default element size: for pointers we don't know the element type,
+        // use 8 bytes as a safe default for pointer dereferencing.
         // TODO: use type information from sema to determine correct size
-        // once we have type-aware codegen with proper sized loads/stores.
         8
     }
 
@@ -617,7 +632,7 @@ impl Lowerer {
                         return Operand::Value(info.alloca);
                     }
                     let dest = self.fresh_value();
-                    self.emit(Instruction::Load { dest, ptr: info.alloca, ty: IrType::I64 });
+                    self.emit(Instruction::Load { dest, ptr: info.alloca, ty: info.ty });
                     Operand::Value(dest)
                 } else {
                     // Assume it's a function or global
@@ -704,8 +719,9 @@ impl Lowerer {
             }
             Expr::Assign(lhs, rhs, _) => {
                 let rhs_val = self.lower_expr(rhs);
+                let ty = self.get_expr_type(lhs);
                 if let Some(lv) = self.lower_lvalue(lhs) {
-                    self.store_lvalue(&lv, rhs_val.clone());
+                    self.store_lvalue_typed(&lv, rhs_val.clone(), ty);
                     return rhs_val;
                 }
                 // Fallback: just return the rhs value
@@ -749,12 +765,12 @@ impl Lowerer {
 
                 self.start_block(then_label);
                 let then_val = self.lower_expr(then_expr);
-                self.emit(Instruction::Store { val: then_val, ptr: result_alloca });
+                self.emit(Instruction::Store { val: then_val, ptr: result_alloca, ty: IrType::I64 });
                 self.terminate(Terminator::Branch(end_label.clone()));
 
                 self.start_block(else_label);
                 let else_val = self.lower_expr(else_expr);
-                self.emit(Instruction::Store { val: else_val, ptr: result_alloca });
+                self.emit(Instruction::Store { val: else_val, ptr: result_alloca, ty: IrType::I64 });
                 self.terminate(Terminator::Branch(end_label.clone()));
 
                 self.start_block(end_label);
@@ -802,23 +818,26 @@ impl Lowerer {
             Expr::Deref(inner, _) => {
                 let ptr = self.lower_expr(inner);
                 let dest = self.fresh_value();
+                // TODO: determine the type the pointer points to
+                let deref_ty = IrType::I64;
                 match ptr {
                     Operand::Value(v) => {
-                        self.emit(Instruction::Load { dest, ptr: v, ty: IrType::I64 });
+                        self.emit(Instruction::Load { dest, ptr: v, ty: deref_ty });
                     }
                     Operand::Const(_) => {
                         let tmp = self.fresh_value();
                         self.emit(Instruction::Copy { dest: tmp, src: ptr });
-                        self.emit(Instruction::Load { dest, ptr: tmp, ty: IrType::I64 });
+                        self.emit(Instruction::Load { dest, ptr: tmp, ty: deref_ty });
                     }
                 }
                 Operand::Value(dest)
             }
             Expr::ArraySubscript(base, index, _) => {
-                // Compute element address and load
+                // Compute element address and load with proper element type
+                let elem_ty = self.get_expr_type(expr);
                 let addr = self.compute_array_element_addr(base, index);
                 let dest = self.fresh_value();
-                self.emit(Instruction::Load { dest, ptr: addr, ty: IrType::I64 });
+                self.emit(Instruction::Load { dest, ptr: addr, ty: elem_ty });
                 Operand::Value(dest)
             }
             Expr::MemberAccess(_, _, _) | Expr::PointerMemberAccess(_, _, _) => {
@@ -845,7 +864,7 @@ impl Lowerer {
         let lhs_val = self.lower_expr(lhs);
 
         // If lhs is false (0), short-circuit to end with result = 0
-        self.emit(Instruction::Store { val: Operand::Const(IrConst::I64(0)), ptr: result_alloca });
+        self.emit(Instruction::Store { val: Operand::Const(IrConst::I64(0)), ptr: result_alloca, ty: IrType::I64 });
         self.terminate(Terminator::CondBranch {
             cond: lhs_val,
             true_label: rhs_label.clone(),
@@ -864,7 +883,7 @@ impl Lowerer {
             rhs: Operand::Const(IrConst::I64(0)),
             ty: IrType::I64,
         });
-        self.emit(Instruction::Store { val: Operand::Value(rhs_bool), ptr: result_alloca });
+        self.emit(Instruction::Store { val: Operand::Value(rhs_bool), ptr: result_alloca, ty: IrType::I64 });
         self.terminate(Terminator::Branch(end_label.clone()));
 
         self.start_block(end_label);
@@ -886,7 +905,7 @@ impl Lowerer {
         let lhs_val = self.lower_expr(lhs);
 
         // If lhs is true (nonzero), short-circuit to end with result = 1
-        self.emit(Instruction::Store { val: Operand::Const(IrConst::I64(1)), ptr: result_alloca });
+        self.emit(Instruction::Store { val: Operand::Const(IrConst::I64(1)), ptr: result_alloca, ty: IrType::I64 });
         self.terminate(Terminator::CondBranch {
             cond: lhs_val,
             true_label: end_label.clone(),
@@ -905,7 +924,7 @@ impl Lowerer {
             rhs: Operand::Const(IrConst::I64(0)),
             ty: IrType::I64,
         });
-        self.emit(Instruction::Store { val: Operand::Value(rhs_bool), ptr: result_alloca });
+        self.emit(Instruction::Store { val: Operand::Value(rhs_bool), ptr: result_alloca, ty: IrType::I64 });
         self.terminate(Terminator::Branch(end_label.clone()));
 
         self.start_block(end_label);
@@ -916,8 +935,9 @@ impl Lowerer {
 
     /// Lower pre-increment/decrement for any lvalue.
     fn lower_pre_inc_dec(&mut self, inner: &Expr, op: UnaryOp) -> Operand {
+        let ty = self.get_expr_type(inner);
         if let Some(lv) = self.lower_lvalue(inner) {
-            let loaded = self.load_lvalue(&lv);
+            let loaded = self.load_lvalue_typed(&lv, ty);
             let loaded_val = match loaded {
                 Operand::Value(v) => v,
                 _ => {
@@ -936,7 +956,7 @@ impl Lowerer {
                 rhs: one,
                 ty: IrType::I64,
             });
-            self.store_lvalue(&lv, Operand::Value(result));
+            self.store_lvalue_typed(&lv, Operand::Value(result), ty);
             return Operand::Value(result);
         }
         // Fallback
@@ -945,8 +965,9 @@ impl Lowerer {
 
     /// Lower post-increment/decrement for any lvalue.
     fn lower_post_inc_dec(&mut self, inner: &Expr, op: PostfixOp) -> Operand {
+        let ty = self.get_expr_type(inner);
         if let Some(lv) = self.lower_lvalue(inner) {
-            let loaded = self.load_lvalue(&lv);
+            let loaded = self.load_lvalue_typed(&lv, ty);
             let loaded_val = match loaded.clone() {
                 Operand::Value(v) => v,
                 _ => {
@@ -965,7 +986,7 @@ impl Lowerer {
                 rhs: one,
                 ty: IrType::I64,
             });
-            self.store_lvalue(&lv, Operand::Value(result));
+            self.store_lvalue_typed(&lv, Operand::Value(result), ty);
             // Return original value (before inc/dec)
             return loaded;
         }
@@ -976,8 +997,9 @@ impl Lowerer {
     /// Lower compound assignment (+=, -=, etc.) for any lvalue.
     fn lower_compound_assign(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> Operand {
         let rhs_val = self.lower_expr(rhs);
+        let ty = self.get_expr_type(lhs);
         if let Some(lv) = self.lower_lvalue(lhs) {
-            let loaded = self.load_lvalue(&lv);
+            let loaded = self.load_lvalue_typed(&lv, ty);
             let ir_op = match op {
                 BinOp::Add => IrBinOp::Add,
                 BinOp::Sub => IrBinOp::Sub,
@@ -999,11 +1021,46 @@ impl Lowerer {
                 rhs: rhs_val,
                 ty: IrType::I64,
             });
-            self.store_lvalue(&lv, Operand::Value(result));
+            self.store_lvalue_typed(&lv, Operand::Value(result), ty);
             return Operand::Value(result);
         }
         // Fallback
         rhs_val
+    }
+
+    /// Get the IR type for an expression (best-effort, based on locals info).
+    fn get_expr_type(&self, expr: &Expr) -> IrType {
+        match expr {
+            Expr::Identifier(name, _) => {
+                if let Some(info) = self.locals.get(name) {
+                    return info.ty;
+                }
+                IrType::I64
+            }
+            Expr::ArraySubscript(base, _, _) => {
+                // Element type of the array
+                if let Expr::Identifier(name, _) = base.as_ref() {
+                    if let Some(info) = self.locals.get(name) {
+                        if info.is_array {
+                            return info.ty; // base_ty was stored as the element type
+                        }
+                    }
+                }
+                IrType::I64
+            }
+            Expr::Deref(inner, _) => {
+                // Dereference of pointer - try to infer the pointed-to type
+                if let Expr::Identifier(name, _) = inner.as_ref() {
+                    if let Some(info) = self.locals.get(name) {
+                        if info.ty == IrType::Ptr {
+                            return IrType::I64; // TODO: track pointed-to type
+                        }
+                    }
+                }
+                IrType::I64
+            }
+            _ => IrType::I64,
+        }
     }
 
     fn type_spec_to_ir(&self, ts: &TypeSpecifier) -> IrType {
@@ -1051,7 +1108,7 @@ impl Lowerer {
 
     /// Compute allocation info for a declaration.
     /// Returns (alloc_size, elem_size, is_array, is_pointer).
-    fn compute_decl_info(&self, _ts: &TypeSpecifier, derived: &[DerivedDeclarator]) -> (usize, usize, bool, bool) {
+    fn compute_decl_info(&self, ts: &TypeSpecifier, derived: &[DerivedDeclarator]) -> (usize, usize, bool, bool) {
         // Check for pointer declarators
         let has_pointer = derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
         if has_pointer {
@@ -1061,11 +1118,10 @@ impl Lowerer {
         // Check for array declarators
         for d in derived {
             if let DerivedDeclarator::Array(size_expr) = d {
-                // TODO: When we have type-aware codegen (using different sizes for
-                // different types), use self.sizeof_type(ts) here. For now, since
-                // codegen uses 8-byte (movq) for all loads/stores, we use 8 as the
-                // element stride to avoid overlapping reads.
-                let elem_size = 8;
+                // Use actual element size based on type (type-aware codegen)
+                let elem_size = self.sizeof_type(ts);
+                // Ensure at least 1 byte per element
+                let elem_size = elem_size.max(1);
                 if let Some(size_expr) = size_expr {
                     if let Expr::IntLiteral(n, _) = size_expr.as_ref() {
                         let total = elem_size * (*n as usize);
@@ -1078,7 +1134,10 @@ impl Lowerer {
             }
         }
 
-        // Regular scalar - use 8 bytes to match codegen's movq operations
+        // Regular scalar - we use 8-byte slots for each stack value
+        // (simplifies codegen) but Store/Load type will be correct for the actual type.
+        // The unused ts parameter is kept for future use when we optimize stack layout.
+        let _ = ts;
         (8, 0, false, false)
     }
 }
