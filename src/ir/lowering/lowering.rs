@@ -273,10 +273,10 @@ impl Lowerer {
 
             // Determine alignment based on type
             let align = match var_ty {
-                IrType::I8 => 1,
-                IrType::I16 => 2,
-                IrType::I32 => 4,
-                IrType::I64 | IrType::Ptr => 8,
+                IrType::I8 | IrType::U8 => 1,
+                IrType::I16 | IrType::U16 => 2,
+                IrType::I32 | IrType::U32 => 4,
+                IrType::I64 | IrType::U64 | IrType::Ptr => 8,
                 IrType::F32 => 4,
                 IrType::F64 => 8,
                 IrType::Void => 1,
@@ -428,10 +428,10 @@ impl Lowerer {
     /// Get the zero constant for a given IR type.
     fn zero_const(&self, ty: IrType) -> IrConst {
         match ty {
-            IrType::I8 => IrConst::I8(0),
-            IrType::I16 => IrConst::I16(0),
-            IrType::I32 => IrConst::I32(0),
-            IrType::I64 | IrType::Ptr => IrConst::I64(0),
+            IrType::I8 | IrType::U8 => IrConst::I8(0),
+            IrType::I16 | IrType::U16 => IrConst::I16(0),
+            IrType::I32 | IrType::U32 => IrConst::I32(0),
+            IrType::I64 | IrType::U64 | IrType::Ptr => IrConst::I64(0),
             IrType::F32 => IrConst::F32(0.0),
             IrType::F64 => IrConst::F64(0.0),
             IrType::Void => IrConst::Zero,
@@ -1779,11 +1779,14 @@ impl Lowerer {
     fn type_spec_to_ir(&self, ts: &TypeSpecifier) -> IrType {
         match ts {
             TypeSpecifier::Void => IrType::Void,
-            TypeSpecifier::Char | TypeSpecifier::UnsignedChar => IrType::I8,
-            TypeSpecifier::Short | TypeSpecifier::UnsignedShort => IrType::I16,
-            TypeSpecifier::Int | TypeSpecifier::UnsignedInt | TypeSpecifier::Bool => IrType::I32,
-            TypeSpecifier::Long | TypeSpecifier::UnsignedLong
-            | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong => IrType::I64,
+            TypeSpecifier::Char => IrType::I8,
+            TypeSpecifier::UnsignedChar => IrType::U8,
+            TypeSpecifier::Short => IrType::I16,
+            TypeSpecifier::UnsignedShort => IrType::U16,
+            TypeSpecifier::Int | TypeSpecifier::Bool => IrType::I32,
+            TypeSpecifier::UnsignedInt => IrType::U32,
+            TypeSpecifier::Long | TypeSpecifier::LongLong => IrType::I64,
+            TypeSpecifier::UnsignedLong | TypeSpecifier::UnsignedLongLong => IrType::U64,
             TypeSpecifier::Float => IrType::F32,
             TypeSpecifier::Double => IrType::F64,
             TypeSpecifier::Pointer(_) => IrType::Ptr,
@@ -1792,7 +1795,7 @@ impl Lowerer {
             TypeSpecifier::Enum(_, _) => IrType::I32,
             TypeSpecifier::TypedefName(_) => IrType::I64, // TODO: resolve typedef
             TypeSpecifier::Signed => IrType::I32,
-            TypeSpecifier::Unsigned => IrType::I32,
+            TypeSpecifier::Unsigned => IrType::U32,
         }
     }
 

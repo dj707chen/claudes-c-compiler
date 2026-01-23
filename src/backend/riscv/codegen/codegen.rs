@@ -126,14 +126,14 @@ impl RiscvCodegen {
 
     fn emit_const_data(&mut self, c: &IrConst, ty: IrType) {
         match c {
-            IrConst::I8(v) => self.emit(&format!("    .byte {}", v)),
-            IrConst::I16(v) => self.emit(&format!("    .short {}", v)),
-            IrConst::I32(v) => self.emit(&format!("    .long {}", v)),
+            IrConst::I8(v) => self.emit(&format!("    .byte {}", *v as u8)),
+            IrConst::I16(v) => self.emit(&format!("    .short {}", *v as u16)),
+            IrConst::I32(v) => self.emit(&format!("    .long {}", *v as u32)),
             IrConst::I64(v) => {
                 match ty {
-                    IrType::I8 => self.emit(&format!("    .byte {}", *v as i8)),
-                    IrType::I16 => self.emit(&format!("    .short {}", *v as i16)),
-                    IrType::I32 => self.emit(&format!("    .long {}", *v as i32)),
+                    IrType::I8 | IrType::U8 => self.emit(&format!("    .byte {}", *v as u8)),
+                    IrType::I16 | IrType::U16 => self.emit(&format!("    .short {}", *v as u16)),
+                    IrType::I32 | IrType::U32 => self.emit(&format!("    .long {}", *v as u32)),
                     _ => self.emit(&format!("    .dword {}", v)),
                 }
             }
@@ -483,21 +483,25 @@ impl RiscvCodegen {
     /// Get the store instruction for a given type (RISC-V).
     fn store_for_type(ty: IrType) -> &'static str {
         match ty {
-            IrType::I8 => "sb",
-            IrType::I16 => "sh",
-            IrType::I32 => "sw",
-            IrType::I64 | IrType::Ptr => "sd",
+            IrType::I8 | IrType::U8 => "sb",
+            IrType::I16 | IrType::U16 => "sh",
+            IrType::I32 | IrType::U32 => "sw",
+            IrType::I64 | IrType::U64 | IrType::Ptr => "sd",
             _ => "sd",
         }
     }
 
-    /// Get the load instruction for a given type (with sign extension, RISC-V).
+    /// Get the load instruction for a given type.
+    /// Uses sign-extension for signed types, zero-extension for unsigned types.
     fn load_for_type(ty: IrType) -> &'static str {
         match ty {
-            IrType::I8 => "lb",     // sign-extend byte
-            IrType::I16 => "lh",    // sign-extend halfword
-            IrType::I32 => "lw",    // sign-extend word to 64-bit
-            IrType::I64 | IrType::Ptr => "ld",
+            IrType::I8 => "lb",      // sign-extend byte
+            IrType::U8 => "lbu",     // zero-extend byte
+            IrType::I16 => "lh",     // sign-extend halfword
+            IrType::U16 => "lhu",    // zero-extend halfword
+            IrType::I32 => "lw",     // sign-extend word to 64-bit
+            IrType::U32 => "lwu",    // zero-extend word to 64-bit
+            IrType::I64 | IrType::U64 | IrType::Ptr => "ld",
             _ => "ld",
         }
     }

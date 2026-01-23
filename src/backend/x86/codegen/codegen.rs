@@ -145,15 +145,15 @@ impl X86Codegen {
 
     fn emit_const_data(&mut self, c: &IrConst, ty: IrType) {
         match c {
-            IrConst::I8(v) => self.emit_line(&format!("    .byte {}", v)),
-            IrConst::I16(v) => self.emit_line(&format!("    .short {}", v)),
-            IrConst::I32(v) => self.emit_line(&format!("    .long {}", v)),
+            IrConst::I8(v) => self.emit_line(&format!("    .byte {}", *v as u8)),
+            IrConst::I16(v) => self.emit_line(&format!("    .short {}", *v as u16)),
+            IrConst::I32(v) => self.emit_line(&format!("    .long {}", *v as u32)),
             IrConst::I64(v) => {
-                // Use the type to determine whether to emit .long or .quad
+                // Use the type to determine whether to emit .byte/.short/.long/.quad
                 match ty {
-                    IrType::I8 => self.emit_line(&format!("    .byte {}", *v as i8)),
-                    IrType::I16 => self.emit_line(&format!("    .short {}", *v as i16)),
-                    IrType::I32 => self.emit_line(&format!("    .long {}", *v as i32)),
+                    IrType::I8 | IrType::U8 => self.emit_line(&format!("    .byte {}", *v as u8)),
+                    IrType::I16 | IrType::U16 => self.emit_line(&format!("    .short {}", *v as u16)),
+                    IrType::I32 | IrType::U32 => self.emit_line(&format!("    .long {}", *v as u32)),
                     _ => self.emit_line(&format!("    .quad {}", v)),
                 }
             }
@@ -344,16 +344,18 @@ impl X86Codegen {
             }
             Instruction::Load { dest, ptr, ty } => {
                 if let Some(ValueLocation::Stack(ptr_offset)) = self.value_locations.get(&ptr.0).cloned() {
+                    let load_instr = self.mov_load_for_type(*ty);
+                    // For U32 loads (movl), the destination must be %eax (32-bit reg)
+                    // which automatically zero-extends into %rax on x86-64.
+                    let dest_reg = self.load_dest_reg(*ty);
                     if self.alloca_values.contains(&ptr.0) {
                         // Load directly from the alloca's stack slot with type-aware size
-                        let load_instr = self.mov_load_for_type(*ty);
-                        self.emit_line(&format!("    {} {}(%rbp), %rax", load_instr, ptr_offset));
+                        self.emit_line(&format!("    {} {}(%rbp), {}", load_instr, ptr_offset, dest_reg));
                     } else {
                         // ptr is a computed address (e.g., from GEP).
                         // Load the pointer, then load through it with proper type.
                         self.emit_line(&format!("    movq {}(%rbp), %rax", ptr_offset)); // load pointer
-                        let load_instr = self.mov_load_for_type(*ty);
-                        self.emit_line(&format!("    {} (%rax), %rax", load_instr));
+                        self.emit_line(&format!("    {} (%rax), {}", load_instr, dest_reg));
                     }
                     if let Some(ValueLocation::Stack(dest_offset)) = self.value_locations.get(&dest.0) {
                         self.emit_line(&format!("    movq %rax, {}(%rbp)", dest_offset));
@@ -369,15 +371,16 @@ impl X86Codegen {
                 self.emit_line("    movq %rax, %rcx"); // rhs in rcx
                 self.emit_line("    popq %rax"); // lhs in rax
 
-                // Use 32-bit operations for I32 type (most common in C)
-                let use_32bit = *ty == IrType::I32;
+                // Use 32-bit operations for I32/U32 types (most common in C)
+                let use_32bit = *ty == IrType::I32 || *ty == IrType::U32;
+                let is_unsigned = ty.is_unsigned();
 
                 match op {
                     IrBinOp::Add => {
                         if use_32bit {
                             self.emit_line("    addl %ecx, %eax");
-                            // Sign-extend result to 64-bit for consistent handling
-                            self.emit_line("    cltq");
+                            // Sign-extend for signed, zero-extend is implicit for unsigned
+                            if !is_unsigned { self.emit_line("    cltq"); }
                         } else {
                             self.emit_line("    addq %rcx, %rax");
                         }
@@ -385,7 +388,7 @@ impl X86Codegen {
                     IrBinOp::Sub => {
                         if use_32bit {
                             self.emit_line("    subl %ecx, %eax");
-                            self.emit_line("    cltq");
+                            if !is_unsigned { self.emit_line("    cltq"); }
                         } else {
                             self.emit_line("    subq %rcx, %rax");
                         }
@@ -393,7 +396,7 @@ impl X86Codegen {
                     IrBinOp::Mul => {
                         if use_32bit {
                             self.emit_line("    imull %ecx, %eax");
-                            self.emit_line("    cltq");
+                            if !is_unsigned { self.emit_line("    cltq"); }
                         } else {
                             self.emit_line("    imulq %rcx, %rax");
                         }
@@ -412,7 +415,7 @@ impl X86Codegen {
                         if use_32bit {
                             self.emit_line("    xorl %edx, %edx");
                             self.emit_line("    divl %ecx");
-                            self.emit_line("    cltq");
+                            // movl into eax already zero-extends
                         } else {
                             self.emit_line("    xorq %rdx, %rdx");
                             self.emit_line("    divq %rcx");
@@ -435,7 +438,7 @@ impl X86Codegen {
                             self.emit_line("    xorl %edx, %edx");
                             self.emit_line("    divl %ecx");
                             self.emit_line("    movl %edx, %eax");
-                            self.emit_line("    cltq");
+                            // movl into eax already zero-extends
                         } else {
                             self.emit_line("    xorq %rdx, %rdx");
                             self.emit_line("    divq %rcx");
@@ -692,22 +695,35 @@ impl X86Codegen {
     /// Get the store instruction name for a given type.
     fn mov_store_for_type(&self, ty: IrType) -> &'static str {
         match ty {
-            IrType::I8 => "movb",
-            IrType::I16 => "movw",
-            IrType::I32 => "movl",
-            IrType::I64 | IrType::Ptr => "movq",
+            IrType::I8 | IrType::U8 => "movb",
+            IrType::I16 | IrType::U16 => "movw",
+            IrType::I32 | IrType::U32 => "movl",
+            IrType::I64 | IrType::U64 | IrType::Ptr => "movq",
             _ => "movq", // default to 64-bit for other types
         }
     }
 
-    /// Get the load instruction name for a given type (with sign extension to 64-bit).
+    /// Get the load instruction name for a given type.
+    /// Uses sign-extension for signed types, zero-extension for unsigned types.
     fn mov_load_for_type(&self, ty: IrType) -> &'static str {
         match ty {
-            IrType::I8 => "movsbq",   // sign-extend byte to 64-bit
-            IrType::I16 => "movswq",  // sign-extend word to 64-bit
-            IrType::I32 => "movslq",  // sign-extend dword to 64-bit
-            IrType::I64 | IrType::Ptr => "movq",
+            IrType::I8 => "movsbq",    // sign-extend byte to 64-bit
+            IrType::U8 => "movzbq",    // zero-extend byte to 64-bit
+            IrType::I16 => "movswq",   // sign-extend word to 64-bit
+            IrType::U16 => "movzwq",   // zero-extend word to 64-bit
+            IrType::I32 => "movslq",   // sign-extend dword to 64-bit
+            IrType::U32 => "movl",     // movl zero-extends to 64-bit implicitly
+            IrType::I64 | IrType::U64 | IrType::Ptr => "movq",
             _ => "movq",
+        }
+    }
+
+    /// Get the destination register for a load instruction.
+    /// Most loads target %rax (64-bit), but U32 uses movl which needs %eax (32-bit).
+    fn load_dest_reg(&self, ty: IrType) -> &'static str {
+        match ty {
+            IrType::U32 => "%eax",  // movl needs 32-bit register; zero-extends to rax
+            _ => "%rax",
         }
     }
 
@@ -715,45 +731,45 @@ impl X86Codegen {
     fn reg_for_type(&self, base_reg: &str, ty: IrType) -> &'static str {
         match base_reg {
             "rax" => match ty {
-                IrType::I8 => "al",
-                IrType::I16 => "ax",
-                IrType::I32 => "eax",
+                IrType::I8 | IrType::U8 => "al",
+                IrType::I16 | IrType::U16 => "ax",
+                IrType::I32 | IrType::U32 => "eax",
                 _ => "rax",
             },
             "rcx" => match ty {
-                IrType::I8 => "cl",
-                IrType::I16 => "cx",
-                IrType::I32 => "ecx",
+                IrType::I8 | IrType::U8 => "cl",
+                IrType::I16 | IrType::U16 => "cx",
+                IrType::I32 | IrType::U32 => "ecx",
                 _ => "rcx",
             },
             "rdx" => match ty {
-                IrType::I8 => "dl",
-                IrType::I16 => "dx",
-                IrType::I32 => "edx",
+                IrType::I8 | IrType::U8 => "dl",
+                IrType::I16 | IrType::U16 => "dx",
+                IrType::I32 | IrType::U32 => "edx",
                 _ => "rdx",
             },
             "rdi" => match ty {
-                IrType::I8 => "dil",
-                IrType::I16 => "di",
-                IrType::I32 => "edi",
+                IrType::I8 | IrType::U8 => "dil",
+                IrType::I16 | IrType::U16 => "di",
+                IrType::I32 | IrType::U32 => "edi",
                 _ => "rdi",
             },
             "rsi" => match ty {
-                IrType::I8 => "sil",
-                IrType::I16 => "si",
-                IrType::I32 => "esi",
+                IrType::I8 | IrType::U8 => "sil",
+                IrType::I16 | IrType::U16 => "si",
+                IrType::I32 | IrType::U32 => "esi",
                 _ => "rsi",
             },
             "r8" => match ty {
-                IrType::I8 => "r8b",
-                IrType::I16 => "r8w",
-                IrType::I32 => "r8d",
+                IrType::I8 | IrType::U8 => "r8b",
+                IrType::I16 | IrType::U16 => "r8w",
+                IrType::I32 | IrType::U32 => "r8d",
                 _ => "r8",
             },
             "r9" => match ty {
-                IrType::I8 => "r9b",
-                IrType::I16 => "r9w",
-                IrType::I32 => "r9d",
+                IrType::I8 | IrType::U8 => "r9b",
+                IrType::I16 | IrType::U16 => "r9w",
+                IrType::I32 | IrType::U32 => "r9d",
                 _ => "r9",
             },
             // Default: return 64-bit register name
@@ -763,36 +779,53 @@ impl X86Codegen {
 
     /// Emit a type cast instruction sequence.
     fn emit_cast(&mut self, from_ty: IrType, to_ty: IrType) {
-        // If same type or both are 64-bit+, no cast needed
+        // If same type, no cast needed
         if from_ty == to_ty {
             return;
         }
-        match (from_ty, to_ty) {
-            // Widening: sign-extend
-            (IrType::I8, IrType::I16) | (IrType::I8, IrType::I32) | (IrType::I8, IrType::I64) => {
-                self.emit_line("    movsbq %al, %rax");
+        // If same size and both integer, no-op (just reinterpret signedness)
+        if from_ty.size() == to_ty.size() && from_ty.is_integer() && to_ty.is_integer() {
+            return;
+        }
+
+        let from_size = from_ty.size();
+        let to_size = to_ty.size();
+
+        if to_size > from_size {
+            // Widening cast
+            if from_ty.is_unsigned() {
+                // Zero-extend for unsigned types
+                match from_ty {
+                    IrType::U8 => self.emit_line("    movzbq %al, %rax"),
+                    IrType::U16 => self.emit_line("    movzwq %ax, %rax"),
+                    IrType::U32 => self.emit_line("    movl %eax, %eax"), // implicit zero-extend
+                    _ => {}
+                }
+            } else {
+                // Sign-extend for signed types
+                match from_ty {
+                    IrType::I8 => self.emit_line("    movsbq %al, %rax"),
+                    IrType::I16 => self.emit_line("    movswq %ax, %rax"),
+                    IrType::I32 => self.emit_line("    cltq"), // sign-extend eax to rax
+                    _ => {}
+                }
             }
-            (IrType::I16, IrType::I32) | (IrType::I16, IrType::I64) => {
-                self.emit_line("    movswq %ax, %rax");
-            }
-            (IrType::I32, IrType::I64) => {
-                self.emit_line("    cltq"); // sign-extend eax to rax
-            }
-            // Narrowing: just truncate (upper bits are ignored)
-            (IrType::I64, IrType::I32) | (IrType::I64, IrType::I16) | (IrType::I64, IrType::I8) => {
-                // No-op: value is already in rax, smaller reg aliases access the lower bits
-            }
-            (IrType::I32, IrType::I16) | (IrType::I32, IrType::I8) => {}
-            (IrType::I16, IrType::I8) => {}
-            // Pointer conversions
-            (IrType::Ptr, IrType::I64) | (IrType::I64, IrType::Ptr) => {} // no-op on x86-64
-            (IrType::Ptr, IrType::I32) => {} // truncate
-            (IrType::I32, IrType::Ptr) => {
-                // zero-extend 32-bit to 64-bit for pointer
-                self.emit_line("    movl %eax, %eax"); // zero-extends to 64-bit
-            }
-            _ => {
-                // TODO: float conversions, etc.
+        } else if to_size < from_size {
+            // Narrowing: just truncate (upper bits are ignored on x86-64)
+            // No instruction needed; smaller register aliases access lower bits.
+        } else {
+            // Same size: pointer <-> integer conversions
+            match (from_ty, to_ty) {
+                (IrType::Ptr, IrType::I64) | (IrType::Ptr, IrType::U64) => {} // no-op
+                (IrType::I64, IrType::Ptr) | (IrType::U64, IrType::Ptr) => {} // no-op
+                (IrType::I32, IrType::Ptr) | (IrType::U32, IrType::Ptr) => {
+                    // zero-extend 32-bit to 64-bit for pointer
+                    self.emit_line("    movl %eax, %eax"); // zero-extends to 64-bit
+                }
+                (IrType::Ptr, IrType::I32) | (IrType::Ptr, IrType::U32) => {} // truncate
+                _ => {
+                    // TODO: float conversions, etc.
+                }
             }
         }
     }

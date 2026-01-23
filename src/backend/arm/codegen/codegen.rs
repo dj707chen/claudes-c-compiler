@@ -127,14 +127,14 @@ impl ArmCodegen {
 
     fn emit_const_data(&mut self, c: &IrConst, ty: IrType) {
         match c {
-            IrConst::I8(v) => self.emit(&format!("    .byte {}", v)),
-            IrConst::I16(v) => self.emit(&format!("    .short {}", v)),
-            IrConst::I32(v) => self.emit(&format!("    .long {}", v)),
+            IrConst::I8(v) => self.emit(&format!("    .byte {}", *v as u8)),
+            IrConst::I16(v) => self.emit(&format!("    .short {}", *v as u16)),
+            IrConst::I32(v) => self.emit(&format!("    .long {}", *v as u32)),
             IrConst::I64(v) => {
                 match ty {
-                    IrType::I8 => self.emit(&format!("    .byte {}", *v as i8)),
-                    IrType::I16 => self.emit(&format!("    .short {}", *v as i16)),
-                    IrType::I32 => self.emit(&format!("    .long {}", *v as i32)),
+                    IrType::I8 | IrType::U8 => self.emit(&format!("    .byte {}", *v as u8)),
+                    IrType::I16 | IrType::U16 => self.emit(&format!("    .short {}", *v as u16)),
+                    IrType::I32 | IrType::U32 => self.emit(&format!("    .long {}", *v as u32)),
                     _ => self.emit(&format!("    .xword {}", v)),
                 }
             }
@@ -298,15 +298,18 @@ impl ArmCodegen {
             }
             Instruction::Load { dest, ptr, ty } => {
                 if let Some(&ptr_off) = self.value_locations.get(&ptr.0) {
+                    let load_instr = Self::ldr_for_type(*ty);
+                    // On AArch64, unsigned loads (ldrb, ldrh, ldr w-reg) need w-register
+                    // destinations, while signed loads (ldrsb, ldrsh, ldrsw) use x-registers.
+                    let dest_reg = Self::load_dest_reg(*ty);
                     if self.alloca_values.contains(&ptr.0) {
-                        // Load directly from the alloca's stack slot with type-aware size
-                        let load_instr = Self::ldr_for_type(*ty);
-                        self.emit(&format!("    {} x0, [sp, #{}]", load_instr, ptr_off));
+                        self.emit(&format!("    {} {}, [sp, #{}]", load_instr, dest_reg, ptr_off));
                     } else {
                         // ptr is a computed address. Load the pointer, then deref.
                         self.emit(&format!("    ldr x0, [sp, #{}]", ptr_off)); // load pointer
-                        let load_instr = Self::ldr_for_type(*ty);
-                        self.emit(&format!("    {} x0, [x0]", load_instr));
+                        // Use x1 as temp to hold the address since x0 might be overwritten
+                        self.emit("    mov x1, x0");
+                        self.emit(&format!("    {} {}, [x1]", load_instr, dest_reg));
                     }
                     if let Some(&dest_off) = self.value_locations.get(&dest.0) {
                         self.emit(&format!("    str x0, [sp, #{}]", dest_off));
@@ -488,22 +491,36 @@ impl ArmCodegen {
     /// Get the store instruction for a given type.
     fn str_for_type(ty: IrType) -> &'static str {
         match ty {
-            IrType::I8 => "strb",
-            IrType::I16 => "strh",
-            IrType::I32 => "str",   // str w-reg
-            IrType::I64 | IrType::Ptr => "str",   // str x-reg
+            IrType::I8 | IrType::U8 => "strb",
+            IrType::I16 | IrType::U16 => "strh",
+            IrType::I32 | IrType::U32 => "str",   // str w-reg
+            IrType::I64 | IrType::U64 | IrType::Ptr => "str",   // str x-reg
             _ => "str",
         }
     }
 
-    /// Get the load instruction for a given type (with sign extension).
+    /// Get the load instruction for a given type.
+    /// Uses sign-extension for signed types, zero-extension for unsigned types.
     fn ldr_for_type(ty: IrType) -> &'static str {
         match ty {
-            IrType::I8 => "ldrsb",   // sign-extend byte
-            IrType::I16 => "ldrsh",  // sign-extend halfword
-            IrType::I32 => "ldrsw",  // sign-extend word to 64-bit
-            IrType::I64 | IrType::Ptr => "ldr",
+            IrType::I8 => "ldrsb",    // sign-extend byte to 64-bit
+            IrType::U8 => "ldrb",     // zero-extend byte (needs w-reg dest)
+            IrType::I16 => "ldrsh",   // sign-extend halfword to 64-bit
+            IrType::U16 => "ldrh",    // zero-extend halfword (needs w-reg dest)
+            IrType::I32 => "ldrsw",   // sign-extend word to 64-bit
+            IrType::U32 => "ldr",     // ldr w-reg (zero-extends to 64-bit, needs w-reg dest)
+            IrType::I64 | IrType::U64 | IrType::Ptr => "ldr",
             _ => "ldr",
+        }
+    }
+
+    /// Get the destination register for a load instruction.
+    /// On AArch64, unsigned byte/half/word loads use w-register destination
+    /// (which implicitly zero-extends to x-register).
+    fn load_dest_reg(ty: IrType) -> &'static str {
+        match ty {
+            IrType::U8 | IrType::U16 | IrType::U32 => "w0",  // zero-extending loads use w-reg
+            _ => "x0",  // sign-extending and 64-bit loads use x-reg
         }
     }
 
@@ -513,11 +530,13 @@ impl ArmCodegen {
         // For byte/halfword stores, we still use w-reg (strb/strh use 32-bit reg)
         match base {
             "x0" => match ty {
-                IrType::I8 | IrType::I16 | IrType::I32 => "w0",
+                IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 |
+                IrType::I32 | IrType::U32 => "w0",
                 _ => "x0",
             },
             "x1" => match ty {
-                IrType::I8 | IrType::I16 | IrType::I32 => "w1",
+                IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 |
+                IrType::I32 | IrType::U32 => "w1",
                 _ => "x1",
             },
             _ => "x0",

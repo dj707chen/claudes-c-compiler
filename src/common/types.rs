@@ -220,12 +220,18 @@ impl CType {
 }
 
 /// IR-level types (simpler than C types).
+/// Signed and unsigned variants are tracked separately so that the backend
+/// can choose sign-extension vs zero-extension appropriately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IrType {
     I8,
     I16,
     I32,
     I64,
+    U8,
+    U16,
+    U32,
+    U64,
     F32,
     F64,
     Ptr,
@@ -235,23 +241,69 @@ pub enum IrType {
 impl IrType {
     pub fn size(&self) -> usize {
         match self {
-            IrType::I8 => 1,
-            IrType::I16 => 2,
-            IrType::I32 => 4,
-            IrType::I64 | IrType::Ptr => 8,
+            IrType::I8 | IrType::U8 => 1,
+            IrType::I16 | IrType::U16 => 2,
+            IrType::I32 | IrType::U32 => 4,
+            IrType::I64 | IrType::U64 | IrType::Ptr => 8,
             IrType::F32 => 4,
             IrType::F64 => 8,
             IrType::Void => 0,
         }
     }
 
+    /// Whether this is an unsigned integer type.
+    pub fn is_unsigned(&self) -> bool {
+        matches!(self, IrType::U8 | IrType::U16 | IrType::U32 | IrType::U64)
+    }
+
+    /// Whether this is a signed integer type.
+    pub fn is_signed(&self) -> bool {
+        matches!(self, IrType::I8 | IrType::I16 | IrType::I32 | IrType::I64)
+    }
+
+    /// Whether this is any integer type (signed or unsigned).
+    pub fn is_integer(&self) -> bool {
+        self.is_signed() || self.is_unsigned()
+    }
+
+    /// Get the unsigned counterpart of this type.
+    pub fn to_unsigned(&self) -> Self {
+        match self {
+            IrType::I8 => IrType::U8,
+            IrType::I16 => IrType::U16,
+            IrType::I32 => IrType::U32,
+            IrType::I64 => IrType::U64,
+            other => *other,
+        }
+    }
+
+    /// Get the signed counterpart of this type.
+    pub fn to_signed(&self) -> Self {
+        match self {
+            IrType::U8 => IrType::I8,
+            IrType::U16 => IrType::I16,
+            IrType::U32 => IrType::I32,
+            IrType::U64 => IrType::I64,
+            other => *other,
+        }
+    }
+
+    /// Get the bit width of this type, ignoring signedness.
+    pub fn bit_width(&self) -> usize {
+        self.size() * 8
+    }
+
     pub fn from_ctype(ct: &CType) -> Self {
         match ct {
             CType::Void => IrType::Void,
-            CType::Char | CType::UChar => IrType::I8,
-            CType::Short | CType::UShort => IrType::I16,
-            CType::Int | CType::UInt | CType::Enum(_) => IrType::I32,
-            CType::Long | CType::ULong | CType::LongLong | CType::ULongLong => IrType::I64,
+            CType::Char => IrType::I8,
+            CType::UChar => IrType::U8,
+            CType::Short => IrType::I16,
+            CType::UShort => IrType::U16,
+            CType::Int | CType::Enum(_) => IrType::I32,
+            CType::UInt => IrType::U32,
+            CType::Long | CType::LongLong => IrType::I64,
+            CType::ULong | CType::ULongLong => IrType::U64,
             CType::Float => IrType::F32,
             CType::Double => IrType::F64,
             CType::Pointer(_) | CType::Array(_, _) | CType::Function(_) => IrType::Ptr,
