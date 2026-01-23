@@ -203,9 +203,13 @@ impl RiscvCodegen {
             return;
         }
 
-        if from_ty.size() == to_ty.size() && from_ty.is_integer() && to_ty.is_integer() {
+        if from_ty.size() == to_ty.size() && (from_ty.is_integer() || from_ty == IrType::Ptr) && (to_ty.is_integer() || to_ty == IrType::Ptr) {
             return;
         }
+
+        // Ptr is 64-bit; treat as I64/U64 for cast purposes
+        let from_ty = if from_ty == IrType::Ptr { IrType::I64 } else { from_ty };
+        let to_ty = if to_ty == IrType::Ptr { IrType::I64 } else { to_ty };
 
         let from_size = from_ty.size();
         let to_size = to_ty.size();

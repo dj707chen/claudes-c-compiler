@@ -522,14 +522,31 @@ impl Lowerer {
             }
             Expr::Cast(ref target_type, inner, _) => {
                 let src = self.lower_expr(inner);
-                let from_ty = self.get_expr_type(inner);
+                let mut from_ty = self.get_expr_type(inner);
                 let to_ty = self.type_spec_to_ir(target_type);
+                // If the inner expression is an array or struct identifier, it decays
+                // to a pointer (lower_expr returns the address), but get_expr_type
+                // returns the element type. Correct from_ty to reflect the actual
+                // runtime value type.
+                if let Expr::Identifier(name, _) = inner.as_ref() {
+                    if let Some(info) = self.locals.get(name) {
+                        if info.is_array || info.is_struct {
+                            from_ty = IrType::Ptr;
+                        }
+                    } else if let Some(ginfo) = self.globals.get(name) {
+                        if ginfo.is_array {
+                            from_ty = IrType::Ptr;
+                        }
+                    }
+                }
                 // For pointer casts or same-type casts, just pass through.
-                // Ptr <-> I64/U64 are all no-ops since they're the same size on 64-bit.
-                // Ptr -> Ptr is always a no-op (e.g., void* to int*).
+                // Casting TO Ptr is always a no-op (reinterpret bits), since lower_expr
+                // already produces the correct 64-bit value (address for arrays/structs,
+                // loaded value for scalars). Casting FROM Ptr to a 64-bit integer is
+                // also a no-op. Ptr <-> I64/U64 are no-ops since they're same size.
                 if to_ty == from_ty
-                    || (to_ty == IrType::Ptr && (from_ty == IrType::I64 || from_ty == IrType::U64))
-                    || ((to_ty == IrType::I64 || to_ty == IrType::U64) && from_ty == IrType::Ptr) {
+                    || to_ty == IrType::Ptr
+                    || (from_ty == IrType::Ptr && to_ty.size() == 8) {
                     src
                 } else if to_ty.is_float() || from_ty.is_float() {
                     // Float<->int or float<->float cast

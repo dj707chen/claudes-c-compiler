@@ -16,4 +16,4 @@ stores the string pointer instead of copying the string bytes into the array.
 Fix: When initializing a char array from a StringLiteral, emit byte-by-byte
 stores into the alloca instead of a single pointer store.
 
-Status: In Progress
+Status: Complete
