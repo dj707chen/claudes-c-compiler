@@ -1,0 +1,12 @@
+Fix macro argument prescan and asm declaration handling.
+
+Bug: When a macro appears in its own arguments (e.g., CAST(int, CAST(unsigned, 42))),
+the inner invocation is not expanded. The C standard requires that macro arguments
+are fully expanded BEFORE substitution, including expanding calls to the same macro.
+The suppression of self-recursive expansion should only apply during the final rescan
+of the body, not during argument prescan.
+
+Also: The parser needs to skip __asm__("...") annotations on function declarations
+in system headers (glibc pattern).
+
+This blocks Lua compilation and all other target projects.
