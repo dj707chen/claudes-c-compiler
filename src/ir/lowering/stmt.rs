@@ -63,6 +63,7 @@ impl Lowerer {
                     let is_pointer = declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
                     let var_ty = if is_pointer { IrType::Ptr } else { ty };
                     let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
+                    let c_type = Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
                     self.globals.insert(declarator.name.clone(), GlobalInfo {
                         ty: var_ty,
                         elem_size: 0,
@@ -71,6 +72,7 @@ impl Lowerer {
                         struct_layout: None,
                         is_struct: false,
                         array_dim_strides: vec![],
+                        c_type,
                     });
                 }
                 continue;
@@ -162,6 +164,7 @@ impl Lowerer {
 
                 // Track as a global for access via GlobalAddr
                 let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
+                let c_type = Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
                 self.globals.insert(static_name.clone(), GlobalInfo {
                     ty: var_ty,
                     elem_size,
@@ -170,6 +173,7 @@ impl Lowerer {
                     struct_layout: struct_layout.clone(),
                     is_struct,
                     array_dim_strides: array_dim_strides.clone(),
+                    c_type: c_type.clone(),
                 });
 
                 // Also add an alias so the local name resolves to the global
@@ -191,6 +195,7 @@ impl Lowerer {
                     is_struct,
                     alloc_size: actual_alloc_size,
                     array_dim_strides: array_dim_strides.clone(),
+                    c_type,
                 });
 
                 self.next_static_local += 1;
@@ -206,6 +211,7 @@ impl Lowerer {
                 size: actual_alloc_size,
             });
             let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
+            let c_type = Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
             self.locals.insert(declarator.name.clone(), LocalInfo {
                 alloca,
                 elem_size,
@@ -216,6 +222,7 @@ impl Lowerer {
                 is_struct,
                 alloc_size: actual_alloc_size,
                 array_dim_strides: array_dim_strides.clone(),
+                c_type,
             });
 
             if let Some(ref init) = declarator.init {

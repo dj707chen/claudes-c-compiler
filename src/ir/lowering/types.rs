@@ -402,8 +402,23 @@ impl Lowerer {
                 IrType::I64
             }
             Expr::ArraySubscript(base, index, _) => {
-                // For multi-dim arrays, find the root identifier.
-                // Handle reverse subscript (3[arr]) by checking both operands.
+                // First try CType-based resolution (handles float arrays correctly)
+                if let Some(base_ctype) = self.get_expr_ctype(base) {
+                    match base_ctype {
+                        CType::Array(elem, _) => return IrType::from_ctype(&elem),
+                        CType::Pointer(pointee) => return IrType::from_ctype(&pointee),
+                        _ => {}
+                    }
+                }
+                // Also check reverse subscript (index[base])
+                if let Some(idx_ctype) = self.get_expr_ctype(index) {
+                    match idx_ctype {
+                        CType::Array(elem, _) => return IrType::from_ctype(&elem),
+                        CType::Pointer(pointee) => return IrType::from_ctype(&pointee),
+                        _ => {}
+                    }
+                }
+                // Fallback: For multi-dim arrays, find the root identifier
                 let root_name = self.get_array_root_name(expr);
                 if let Some(name) = root_name {
                     if let Some(info) = self.locals.get(&name) {
@@ -450,7 +465,15 @@ impl Lowerer {
                 IrType::I64
             }
             Expr::Deref(inner, _) => {
-                // Dereference of pointer - resolve pointee type from inner expression
+                // Dereference: use CType-based resolution for multi-level pointers
+                if let Some(inner_ctype) = self.get_expr_ctype(inner) {
+                    match inner_ctype {
+                        CType::Pointer(pointee) => return IrType::from_ctype(&pointee),
+                        CType::Array(elem, _) => return IrType::from_ctype(&elem),
+                        _ => {}
+                    }
+                }
+                // Fallback: use heuristic-based approach
                 if let Some(pt) = self.get_pointee_type_of_expr(inner) {
                     return pt;
                 }
@@ -1070,6 +1093,135 @@ impl Lowerer {
                 name: None,
                 fields: Vec::new(),
             })
+        }
+    }
+
+    /// Build a full CType from a TypeSpecifier and DerivedDeclarator chain.
+    /// For `int **p`, type_spec=Int, derived=[Pointer, Pointer] -> Pointer(Pointer(Int)).
+    pub(super) fn build_full_ctype(&self, type_spec: &TypeSpecifier, derived: &[DerivedDeclarator]) -> CType {
+        let resolved = self.resolve_type_spec(type_spec);
+        let base = self.type_spec_to_ctype(resolved);
+        let mut result = base;
+        // Derived declarators are in reverse order: `int *p[]` has [Pointer, Array]
+        // but semantically it's Array of Pointer to Int, so process in reverse.
+        for d in derived.iter().rev() {
+            match d {
+                DerivedDeclarator::Pointer => {
+                    result = CType::Pointer(Box::new(result));
+                }
+                DerivedDeclarator::Array(size_expr) => {
+                    let size = size_expr.as_ref().and_then(|e| {
+                        self.expr_as_array_size(e).map(|n| n as usize)
+                    });
+                    result = CType::Array(Box::new(result), size);
+                }
+                DerivedDeclarator::Function(_, _) => {
+                    // Function declarator - treat as pointer to function
+                    result = CType::Pointer(Box::new(result));
+                }
+            }
+        }
+        result
+    }
+
+    /// Get the full CType of an expression by recursion.
+    /// Returns None if the type cannot be determined from CType tracking.
+    pub(super) fn get_expr_ctype(&self, expr: &Expr) -> Option<CType> {
+        match expr {
+            Expr::Identifier(name, _) => {
+                if let Some(info) = self.locals.get(name) {
+                    return info.c_type.clone();
+                }
+                if let Some(ginfo) = self.globals.get(name) {
+                    return ginfo.c_type.clone();
+                }
+                None
+            }
+            Expr::Deref(inner, _) => {
+                // Dereferencing peels off one Pointer/Array layer
+                if let Some(inner_ct) = self.get_expr_ctype(inner) {
+                    match inner_ct {
+                        CType::Pointer(pointee) => return Some(*pointee),
+                        CType::Array(elem, _) => return Some(*elem),
+                        _ => {}
+                    }
+                }
+                None
+            }
+            Expr::AddressOf(inner, _) => {
+                // Address-of wraps in Pointer
+                if let Some(inner_ct) = self.get_expr_ctype(inner) {
+                    return Some(CType::Pointer(Box::new(inner_ct)));
+                }
+                None
+            }
+            Expr::ArraySubscript(base, index, _) => {
+                // Subscript peels off one Array/Pointer layer
+                if let Some(base_ct) = self.get_expr_ctype(base) {
+                    match base_ct {
+                        CType::Array(elem, _) => return Some(*elem),
+                        CType::Pointer(pointee) => return Some(*pointee),
+                        _ => {}
+                    }
+                }
+                // Reverse subscript: index[base]
+                if let Some(idx_ct) = self.get_expr_ctype(index) {
+                    match idx_ct {
+                        CType::Array(elem, _) => return Some(*elem),
+                        CType::Pointer(pointee) => return Some(*pointee),
+                        _ => {}
+                    }
+                }
+                None
+            }
+            Expr::Cast(ref type_spec, _, _) => {
+                let resolved = self.resolve_type_spec(type_spec);
+                Some(self.type_spec_to_ctype(resolved))
+            }
+            Expr::MemberAccess(base_expr, field_name, _) => {
+                self.get_field_ctype(base_expr, field_name, false)
+            }
+            Expr::PointerMemberAccess(base_expr, field_name, _) => {
+                self.get_field_ctype(base_expr, field_name, true)
+            }
+            Expr::UnaryOp(UnaryOp::Plus, inner, _)
+            | Expr::UnaryOp(UnaryOp::Neg, inner, _)
+            | Expr::UnaryOp(UnaryOp::PreInc, inner, _)
+            | Expr::UnaryOp(UnaryOp::PreDec, inner, _) => {
+                self.get_expr_ctype(inner)
+            }
+            Expr::PostfixOp(_, inner, _) => self.get_expr_ctype(inner),
+            Expr::Assign(lhs, _, _) | Expr::CompoundAssign(_, lhs, _, _) => {
+                self.get_expr_ctype(lhs)
+            }
+            Expr::Conditional(_, then_expr, _, _) => self.get_expr_ctype(then_expr),
+            Expr::Comma(_, last, _) => self.get_expr_ctype(last),
+            _ => None,
+        }
+    }
+
+    /// Get the CType of a struct/union field.
+    fn get_field_ctype(&self, base_expr: &Expr, field_name: &str, is_pointer_access: bool) -> Option<CType> {
+        let base_ctype = if is_pointer_access {
+            // For p->field, get CType of p, then dereference
+            match self.get_expr_ctype(base_expr)? {
+                CType::Pointer(inner) => *inner,
+                _ => return None,
+            }
+        } else {
+            self.get_expr_ctype(base_expr)?
+        };
+        // Look up field in the struct/union type
+        match base_ctype {
+            CType::Struct(st) | CType::Union(st) => {
+                for field in &st.fields {
+                    if field.name == field_name {
+                        return Some(field.ty.clone());
+                    }
+                }
+                None
+            }
+            _ => None,
         }
     }
 }

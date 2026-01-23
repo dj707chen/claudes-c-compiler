@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{IrType, StructLayout};
+use crate::common::types::{IrType, StructLayout, CType};
 
 /// Information about a local variable stored in an alloca.
 #[derive(Debug, Clone)]
@@ -29,6 +29,8 @@ pub(super) struct LocalInfo {
     /// E.g., for int a[2][3][4], strides = [48, 16, 4] (row_size, inner_row, elem).
     /// Empty for non-arrays or 1D arrays (use elem_size instead).
     pub array_dim_strides: Vec<usize>,
+    /// Full C type for precise multi-level pointer type resolution.
+    pub c_type: Option<CType>,
 }
 
 /// Information about a global variable tracked by the lowerer.
@@ -48,6 +50,8 @@ pub(super) struct GlobalInfo {
     pub is_struct: bool,
     /// For multi-dimensional arrays: stride per dimension level.
     pub array_dim_strides: Vec<usize>,
+    /// Full C type for precise multi-level pointer type resolution.
+    pub c_type: Option<CType>,
 }
 
 /// Represents an lvalue - something that can be assigned to.
@@ -314,6 +318,7 @@ impl Lowerer {
                         func.params.get(i).and_then(|p| self.get_struct_layout_for_pointer_param(&p.type_spec))
                     } else { None };
 
+                    let c_type = func.params.get(i).map(|p| self.type_spec_to_ctype(&p.type_spec));
                     self.locals.insert(param.name.clone(), LocalInfo {
                         alloca,
                         elem_size,
@@ -324,6 +329,7 @@ impl Lowerer {
                         is_struct: false,
                         alloc_size: ty.size(),
                         array_dim_strides: vec![],
+                        c_type,
                     });
                 }
             }
@@ -364,6 +370,7 @@ impl Lowerer {
                 is_struct: true,
                 alloc_size: sp.struct_size,
                 array_dim_strides: vec![],
+                c_type: None,
             });
         }
 
@@ -451,6 +458,7 @@ impl Lowerer {
                     let struct_layout = self.get_struct_layout_for_type(&decl.type_spec);
                     let is_struct = struct_layout.is_some() && !is_pointer && !is_array;
                     let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
+                    let c_type = Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
                     self.globals.insert(declarator.name.clone(), GlobalInfo {
                         ty: var_ty,
                         elem_size,
@@ -459,6 +467,7 @@ impl Lowerer {
                         struct_layout,
                         is_struct,
                         array_dim_strides,
+                        c_type,
                     });
                 }
                 continue;
@@ -541,6 +550,7 @@ impl Lowerer {
 
             // Track this global variable
             let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
+            let c_type = Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
             self.globals.insert(declarator.name.clone(), GlobalInfo {
                 ty: var_ty,
                 elem_size,
@@ -549,6 +559,7 @@ impl Lowerer {
                 struct_layout,
                 is_struct,
                 array_dim_strides,
+                c_type,
             });
 
             // Determine alignment based on type
@@ -1067,6 +1078,14 @@ impl Lowerer {
 
     /// Get the pointee type for a pointer expression - i.e., what type you get when dereferencing it.
     pub(super) fn get_pointee_type_of_expr(&self, expr: &Expr) -> Option<IrType> {
+        // First try CType-based resolution (handles multi-level pointers correctly)
+        if let Some(ctype) = self.get_expr_ctype(expr) {
+            match ctype {
+                CType::Pointer(inner) => return Some(IrType::from_ctype(&inner)),
+                CType::Array(elem, _) => return Some(IrType::from_ctype(&elem)),
+                _ => {}
+            }
+        }
         match expr {
             Expr::Identifier(name, _) => {
                 if let Some(info) = self.locals.get(name) {
