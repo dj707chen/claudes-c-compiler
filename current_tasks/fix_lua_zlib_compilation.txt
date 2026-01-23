@@ -1,0 +1,15 @@
+Task: Fix Lua and zlib compilation (in progress)
+
+Fixes:
+1. Preprocessor char literal evaluation in #if directives
+2. Computed goto support (&&label / goto *expr) - GCC extension
+3. Pointer-to-pointer chained subscript stride computation
+4. 2D array dimension ordering in struct field declarations
+5. Struct pointer dereference not skipping Load for aggregates
+6. Labels-as-values in static initializers (emit as GlobalAddr)
+7. offsetof not evaluatable as compile-time constant
+8. sizeof(struct_member_array) returning pointer size instead of full array
+
+Results:
+- Lua: 6/6 tests pass
+- zlib: 2/2 tests pass

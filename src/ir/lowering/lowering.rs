@@ -199,15 +199,30 @@ impl Lowerer {
                     for declarator in &decl.declarators {
                         if !declarator.name.is_empty() {
                             let mut resolved_type = decl.type_spec.clone();
-                            for d in &declarator.derived {
-                                match d {
+                            // Apply derived declarators, but collect consecutive Array
+                            // dims and apply in reverse for correct multi-dim ordering.
+                            let mut i = 0;
+                            while i < declarator.derived.len() {
+                                match &declarator.derived[i] {
                                     DerivedDeclarator::Pointer => {
                                         resolved_type = TypeSpecifier::Pointer(Box::new(resolved_type));
+                                        i += 1;
                                     }
-                                    DerivedDeclarator::Array(size) => {
-                                        resolved_type = TypeSpecifier::Array(Box::new(resolved_type), size.clone());
+                                    DerivedDeclarator::Array(_) => {
+                                        let mut array_sizes: Vec<Option<Box<Expr>>> = Vec::new();
+                                        while i < declarator.derived.len() {
+                                            if let DerivedDeclarator::Array(size) = &declarator.derived[i] {
+                                                array_sizes.push(size.clone());
+                                                i += 1;
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        for size in array_sizes.into_iter().rev() {
+                                            resolved_type = TypeSpecifier::Array(Box::new(resolved_type), size);
+                                        }
                                     }
-                                    _ => {}
+                                    _ => { i += 1; }
                                 }
                             }
                             self.typedefs.insert(declarator.name.clone(), resolved_type);
@@ -675,16 +690,31 @@ impl Lowerer {
             for declarator in &decl.declarators {
                 if !declarator.name.is_empty() {
                     // For pointer typedefs (e.g., typedef int *intptr;), wrap in Pointer
+                    // For multi-dim arrays, collect consecutive Array dims and apply
+                    // in reverse for correct type nesting.
                     let mut resolved_type = decl.type_spec.clone();
-                    for d in &declarator.derived {
-                        match d {
+                    let mut i = 0;
+                    while i < declarator.derived.len() {
+                        match &declarator.derived[i] {
                             DerivedDeclarator::Pointer => {
                                 resolved_type = TypeSpecifier::Pointer(Box::new(resolved_type));
+                                i += 1;
                             }
-                            DerivedDeclarator::Array(size) => {
-                                resolved_type = TypeSpecifier::Array(Box::new(resolved_type), size.clone());
+                            DerivedDeclarator::Array(_) => {
+                                let mut array_sizes: Vec<Option<Box<Expr>>> = Vec::new();
+                                while i < declarator.derived.len() {
+                                    if let DerivedDeclarator::Array(size) = &declarator.derived[i] {
+                                        array_sizes.push(size.clone());
+                                        i += 1;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                for size in array_sizes.into_iter().rev() {
+                                    resolved_type = TypeSpecifier::Array(Box::new(resolved_type), size);
+                                }
                             }
-                            _ => {}
+                            _ => { i += 1; }
                         }
                     }
                     self.typedefs.insert(declarator.name.clone(), resolved_type);
@@ -1037,7 +1067,8 @@ impl Lowerer {
                             if matches!(expr, Expr::StringLiteral(_, _)) {
                                 !is_multidim_char_array
                             } else {
-                                self.eval_const_expr(expr).is_none() && self.eval_global_addr_expr(expr).is_some()
+                                matches!(expr, Expr::LabelAddr(_, _))
+                                    || (self.eval_const_expr(expr).is_none() && self.eval_global_addr_expr(expr).is_some())
                             }
                         } else {
                             false
@@ -1055,6 +1086,10 @@ impl Lowerer {
                                     self.next_string += 1;
                                     self.module.string_literals.push((label.clone(), s.clone()));
                                     elements.push(GlobalInit::GlobalAddr(label));
+                                } else if let Expr::LabelAddr(label_name, _) = expr {
+                                    // GCC &&label extension: emit label address as GlobalAddr
+                                    let scoped_label = self.get_or_create_user_label(label_name);
+                                    elements.push(GlobalInit::GlobalAddr(scoped_label));
                                 } else if let Some(val) = self.eval_const_expr(expr) {
                                     elements.push(GlobalInit::Scalar(val));
                                 } else if let Some(addr) = self.eval_global_addr_expr(expr) {
@@ -2545,7 +2580,9 @@ impl Lowerer {
     /// For a pointer-to-struct parameter type (e.g., `struct TAG *p`), get the
     /// pointed-to struct's layout. This enables `p->field` access.
     pub(super) fn get_struct_layout_for_pointer_param(&self, type_spec: &TypeSpecifier) -> Option<StructLayout> {
-        match type_spec {
+        // Resolve typedefs first (e.g., typedef union Outer *OuterPtr)
+        let resolved = self.resolve_type_spec(type_spec);
+        match resolved {
             TypeSpecifier::Pointer(inner) => self.get_struct_layout_for_type(inner),
             _ => None,
         }

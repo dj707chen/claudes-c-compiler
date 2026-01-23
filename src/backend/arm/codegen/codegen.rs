@@ -1294,6 +1294,19 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit("    brk #0");
     }
 
+    fn emit_label_addr(&mut self, dest: &Value, label: &str) {
+        // Load address of a label for computed goto (GCC &&label extension)
+        self.state.emit(&format!("    adrp x0, {}", label));
+        self.state.emit(&format!("    add x0, x0, :lo12:{}", label));
+        self.store_x0_to(dest);
+    }
+
+    fn emit_indirect_branch(&mut self, target: &Operand) {
+        // Computed goto: goto *target
+        self.operand_to_x0(target);
+        self.state.emit("    br x0");
+    }
+
     fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, _ordering: AtomicOrdering) {
         // Load ptr into x1, val into x2
         self.operand_to_x0(ptr);

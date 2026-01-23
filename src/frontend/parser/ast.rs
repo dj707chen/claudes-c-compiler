@@ -163,6 +163,8 @@ pub enum Stmt {
     Case(Expr, Box<Stmt>, Span),
     Default(Box<Stmt>, Span),
     Goto(String, Span),
+    /// Computed goto: goto *expr (GCC extension, labels-as-values)
+    GotoIndirect(Box<Expr>, Span),
     Label(String, Box<Stmt>, Span),
 }
 
@@ -208,6 +210,8 @@ pub enum Expr {
     Deref(Box<Expr>, Span),
     /// _Generic(controlling_expr, type1: expr1, type2: expr2, ..., default: exprN)
     GenericSelection(Box<Expr>, Vec<GenericAssociation>, Span),
+    /// GCC extension: &&label (address of label, for computed goto)
+    LabelAddr(String, Span),
 }
 
 /// A _Generic association: either a type-expression pair, or a default expression.
@@ -288,7 +292,7 @@ impl Expr {
             | Expr::Cast(_, _, s) | Expr::CompoundLiteral(_, _, s) | Expr::StmtExpr(_, s)
             | Expr::Sizeof(_, s) | Expr::VaArg(_, _, s) | Expr::Alignof(_, s) | Expr::Comma(_, _, s)
             | Expr::AddressOf(_, s) | Expr::Deref(_, s)
-            | Expr::GenericSelection(_, _, s) => *s,
+            | Expr::GenericSelection(_, _, s) | Expr::LabelAddr(_, s) => *s,
         }
     }
 }

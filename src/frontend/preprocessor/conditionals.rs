@@ -93,6 +93,7 @@ pub fn evaluate_condition(expr: &str, macros: &MacroTable) -> bool {
 }
 
 /// Expand macros in a condition expression, handling `defined(X)` and `defined X` specially.
+/// Character and string literals are preserved verbatim (not subject to macro expansion).
 fn expand_condition_macros(expr: &str, macros: &MacroTable) -> String {
     let mut result = String::new();
     let chars: Vec<char> = expr.chars().collect();
@@ -100,36 +101,85 @@ fn expand_condition_macros(expr: &str, macros: &MacroTable) -> String {
     let mut i = 0;
 
     while i < len {
-        if i + 7 <= len && &expr[i..i + 7] == "defined" {
-            result.push_str("defined");
-            i += 7;
-
-            // Skip whitespace
-            while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+        // Skip character literals verbatim (don't expand macros inside)
+        if chars[i] == '\'' {
+            result.push(chars[i]);
+            i += 1;
+            while i < len && chars[i] != '\'' {
+                if chars[i] == '\\' && i + 1 < len {
+                    result.push(chars[i]);
+                    i += 1;
+                    result.push(chars[i]);
+                    i += 1;
+                } else {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+            }
+            if i < len && chars[i] == '\'' {
                 result.push(chars[i]);
                 i += 1;
             }
+            continue;
+        }
 
-            if i < len && chars[i] == '(' {
-                // defined(MACRO)
-                result.push('(');
-                i += 1;
-                while i < len && chars[i] != ')' {
+        // Skip string literals verbatim
+        if chars[i] == '"' {
+            result.push(chars[i]);
+            i += 1;
+            while i < len && chars[i] != '"' {
+                if chars[i] == '\\' && i + 1 < len {
                     result.push(chars[i]);
                     i += 1;
-                }
-                if i < len {
-                    result.push(')');
+                    result.push(chars[i]);
                     i += 1;
-                }
-            } else if i < len && is_ident_start(chars[i]) {
-                // defined MACRO
-                while i < len && is_ident_cont(chars[i]) {
+                } else {
                     result.push(chars[i]);
                     i += 1;
                 }
             }
+            if i < len && chars[i] == '"' {
+                result.push(chars[i]);
+                i += 1;
+            }
             continue;
+        }
+
+        if i + 7 <= len && &expr[i..i + 7] == "defined" {
+            // Check it's not part of a larger identifier
+            let before_ok = i == 0 || !is_ident_cont(chars[i - 1]);
+            let after_ok = i + 7 >= len || !is_ident_cont(chars[i + 7]);
+            if before_ok && after_ok {
+                result.push_str("defined");
+                i += 7;
+
+                // Skip whitespace
+                while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+
+                if i < len && chars[i] == '(' {
+                    // defined(MACRO)
+                    result.push('(');
+                    i += 1;
+                    while i < len && chars[i] != ')' {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                    if i < len {
+                        result.push(')');
+                        i += 1;
+                    }
+                } else if i < len && is_ident_start(chars[i]) {
+                    // defined MACRO
+                    while i < len && is_ident_cont(chars[i]) {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                continue;
+            }
         }
 
         if is_ident_start(chars[i]) {

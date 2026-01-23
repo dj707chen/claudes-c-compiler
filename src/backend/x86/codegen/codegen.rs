@@ -1088,6 +1088,18 @@ impl ArchCodegen for X86Codegen {
         self.state.emit("    ud2");
     }
 
+    fn emit_label_addr(&mut self, dest: &Value, label: &str) {
+        // Load address of a label for computed goto (GCC &&label extension)
+        self.state.emit(&format!("    leaq {}(%rip), %rax", label));
+        self.store_rax_to(dest);
+    }
+
+    fn emit_indirect_branch(&mut self, target: &Operand) {
+        // Computed goto: goto *target
+        self.operand_to_rax(target);
+        self.state.emit("    jmpq *%rax");
+    }
+
     fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, _ordering: AtomicOrdering) {
         // Load ptr into rcx, val into rax/rdx
         self.operand_to_rax(ptr);

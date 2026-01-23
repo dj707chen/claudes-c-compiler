@@ -167,6 +167,7 @@ fn collect_instruction_uses(inst: &Instruction, used: &mut HashSet<u32>) {
                 collect_operand_uses(op, used);
             }
         }
+        Instruction::LabelAddr { .. } => {}
     }
 }
 
@@ -180,6 +181,9 @@ fn collect_terminator_uses(term: &Terminator, used: &mut HashSet<u32>) {
         Terminator::Branch(_) => {}
         Terminator::CondBranch { cond, .. } => {
             collect_operand_uses(cond, used);
+        }
+        Terminator::IndirectBranch { target, .. } => {
+            collect_operand_uses(target, used);
         }
         Terminator::Unreachable => {}
     }
@@ -241,6 +245,7 @@ fn get_dest(inst: &Instruction) -> Option<Value> {
         Instruction::AtomicStore { .. } => None,
         Instruction::Fence { .. } => None,
         Instruction::Phi { dest, .. } => Some(*dest),
+        Instruction::LabelAddr { dest, .. } => Some(*dest),
     }
 }
 

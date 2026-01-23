@@ -309,6 +309,9 @@ impl SemanticAnalyzer {
                 self.analyze_stmt(body);
             }
             Stmt::Break(_) | Stmt::Continue(_) | Stmt::Goto(_, _) => {}
+            Stmt::GotoIndirect(expr, _) => {
+                self.analyze_expr(expr);
+            }
         }
     }
 
@@ -423,6 +426,8 @@ impl SemanticAnalyzer {
             | Expr::FloatLiteralLongDouble(_, _)
             | Expr::StringLiteral(_, _)
             | Expr::CharLiteral(_, _) => {}
+            // Label address (&&label) - just a compile-time address
+            Expr::LabelAddr(_, _) => {}
         }
     }
 
@@ -522,16 +527,36 @@ impl SemanticAnalyzer {
 
     /// Apply derived declarators (pointers, arrays, function params) to a base type.
     fn apply_derived_declarators(&mut self, base: &CType, derived: &[DerivedDeclarator]) -> CType {
+        // For multi-dimensional arrays like int arr[N][M], the derived list
+        // contains [Array(N), Array(M)]. To build the correct type
+        // Array(Array(int, M), N), we must apply consecutive array dimensions
+        // in reverse order (innermost/rightmost first).
         let mut ty = base.clone();
-        for d in derived {
-            match d {
+        let mut i = 0;
+        while i < derived.len() {
+            match &derived[i] {
                 DerivedDeclarator::Pointer => {
                     ty = CType::Pointer(Box::new(ty));
+                    i += 1;
                 }
-                DerivedDeclarator::Array(size_expr) => {
-                    let size = size_expr.as_ref()
-                        .and_then(|e| self.eval_const_expr(e).map(|v| v as usize));
-                    ty = CType::Array(Box::new(ty), size);
+                DerivedDeclarator::Array(_) => {
+                    // Collect consecutive array dimensions
+                    let start = i;
+                    let mut array_sizes: Vec<Option<usize>> = Vec::new();
+                    while i < derived.len() {
+                        if let DerivedDeclarator::Array(size_expr) = &derived[i] {
+                            let size = size_expr.as_ref()
+                                .and_then(|e| self.eval_const_expr(e).map(|v| v as usize));
+                            array_sizes.push(size);
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    // Apply in reverse: innermost (rightmost) dimension wraps first
+                    for size in array_sizes.into_iter().rev() {
+                        ty = CType::Array(Box::new(ty), size);
+                    }
                 }
                 DerivedDeclarator::Function(params, variadic)
                 | DerivedDeclarator::FunctionPointer(params, variadic) => {
@@ -539,11 +564,13 @@ impl SemanticAnalyzer {
                         let pt = self.type_spec_to_ctype(&p.type_spec);
                         (pt, p.name.clone())
                     }).collect();
+                    let variadic = *variadic;
                     ty = CType::Function(Box::new(FunctionType {
                         return_type: ty,
                         params: param_types,
-                        variadic: *variadic,
+                        variadic,
                     }));
+                    i += 1;
                 }
             }
         }

@@ -63,6 +63,13 @@ impl Lowerer {
             Expr::GenericSelection(controlling, associations, _) => {
                 self.lower_generic_selection(controlling, associations)
             }
+            Expr::LabelAddr(label_name, _) => {
+                // GCC extension: &&label - get address of a label for computed goto
+                let scoped_label = self.get_or_create_user_label(label_name);
+                let dest = self.fresh_value();
+                self.emit(Instruction::LabelAddr { dest, label: scoped_label });
+                Operand::Value(dest)
+            }
         }
     }
 
@@ -1896,6 +1903,11 @@ impl Lowerer {
         if let Some(ctype) = self.get_expr_ctype(inner) {
             if let CType::Pointer(ref pointee) = ctype {
                 if matches!(pointee.as_ref(), CType::Array(_, _)) {
+                    return self.lower_expr(inner);
+                }
+                // Dereferencing a pointer-to-struct/union yields the struct/union
+                // value, which is represented by its address. No load needed.
+                if matches!(pointee.as_ref(), CType::Struct(_) | CType::Union(_)) {
                     return self.lower_expr(inner);
                 }
             }

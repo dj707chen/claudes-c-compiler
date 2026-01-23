@@ -557,8 +557,21 @@ impl Lowerer {
                                 return Some(StructLayout::for_union(&st.fields));
                             }
                         }
+                        CType::Pointer(pointee) => {
+                            // ptr[i] where ptr points to a struct/union
+                            if let CType::Struct(st) = pointee.as_ref() {
+                                return Some(StructLayout::for_struct(&st.fields));
+                            }
+                            if let CType::Union(st) = pointee.as_ref() {
+                                return Some(StructLayout::for_union(&st.fields));
+                            }
+                        }
                         _ => {}
                     }
+                }
+                // Also try: base is a pointer to struct/union (for ptr[i] patterns)
+                if let Some(layout) = self.get_pointed_struct_layout(base) {
+                    return Some(layout);
                 }
                 None
             }

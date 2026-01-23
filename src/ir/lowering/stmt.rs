@@ -36,15 +36,30 @@ impl Lowerer {
             for declarator in &decl.declarators {
                 if !declarator.name.is_empty() {
                     let mut resolved_type = decl.type_spec.clone();
-                    for d in &declarator.derived {
-                        match d {
+                    // Apply derived declarators, collecting consecutive Array dims
+                    // and applying in reverse for correct multi-dim ordering.
+                    let mut i = 0;
+                    while i < declarator.derived.len() {
+                        match &declarator.derived[i] {
                             DerivedDeclarator::Pointer => {
                                 resolved_type = TypeSpecifier::Pointer(Box::new(resolved_type));
+                                i += 1;
                             }
-                            DerivedDeclarator::Array(size) => {
-                                resolved_type = TypeSpecifier::Array(Box::new(resolved_type), size.clone());
+                            DerivedDeclarator::Array(_) => {
+                                let mut array_sizes: Vec<Option<Box<Expr>>> = Vec::new();
+                                while i < declarator.derived.len() {
+                                    if let DerivedDeclarator::Array(size) = &declarator.derived[i] {
+                                        array_sizes.push(size.clone());
+                                        i += 1;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                for size in array_sizes.into_iter().rev() {
+                                    resolved_type = TypeSpecifier::Array(Box::new(resolved_type), size);
+                                }
                             }
-                            _ => {}
+                            _ => { i += 1; }
                         }
                     }
                     self.typedefs.insert(declarator.name.clone(), resolved_type);
@@ -1091,6 +1106,14 @@ impl Lowerer {
                 let scoped_label = self.get_or_create_user_label(label);
                 self.terminate(Terminator::Branch(scoped_label));
                 let dead = self.fresh_label("post_goto");
+                self.start_block(dead);
+            }
+            Stmt::GotoIndirect(expr, _span) => {
+                let target = self.lower_expr(expr);
+                // Collect all known user labels as possible targets
+                let possible_targets: Vec<String> = self.user_labels.values().cloned().collect();
+                self.terminate(Terminator::IndirectBranch { target, possible_targets });
+                let dead = self.fresh_label("post_indirect_goto");
                 self.start_block(dead);
             }
             Stmt::Label(name, stmt, _span) => {

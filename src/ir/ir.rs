@@ -191,6 +191,9 @@ pub enum Instruction {
         ty: IrType,
         incoming: Vec<(Operand, String)>,
     },
+
+    /// Get the address of a label (GCC computed goto extension: &&label)
+    LabelAddr { dest: Value, label: String },
 }
 
 /// Block terminator.
@@ -204,6 +207,10 @@ pub enum Terminator {
 
     /// Conditional branch
     CondBranch { cond: Operand, true_label: String, false_label: String },
+
+    /// Indirect branch (computed goto): goto *addr
+    /// possible_targets lists all labels that could be jumped to (for optimization/validation)
+    IndirectBranch { target: Operand, possible_targets: Vec<String> },
 
     /// Unreachable (e.g., after noreturn call)
     Unreachable,

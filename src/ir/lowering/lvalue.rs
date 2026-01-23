@@ -305,13 +305,28 @@ impl Lowerer {
                     if depth < info.array_dim_strides.len() {
                         return info.array_dim_strides[depth];
                     }
+                    // depth exceeds array dimensions: the element type might be a
+                    // pointer (e.g., char *arr[] at depth 1). Use c_type to resolve
+                    // the correct pointee element size rather than the array stride.
+                    if let Some(ref ctype) = info.c_type {
+                        if let Some(sz) = Self::peel_pointer_elem_size(ctype, depth) {
+                            return sz;
+                        }
+                    }
                     return *info.array_dim_strides.last().unwrap_or(&info.elem_size.max(1));
                 }
-                // Only use elem_size at depth 0 (direct subscript into this array).
-                // At depth > 0, the subscript is into a loaded pointer value (e.g.,
-                // ptrs[0][1] where ptrs is char*[]), so we need the pointee's element
-                // size, not the array's element size. Fall through to CType resolution.
-                if depth == 0 && info.elem_size > 0 {
+                // For pointer-to-pointer types (e.g., char **argv), when depth > 0,
+                // we need to peel off pointer levels to get the correct element size.
+                // argv[i] strides by sizeof(char*) = 8, but argv[i][j] should stride
+                // by sizeof(char) = 1. Use c_type to resolve the correct pointee size.
+                if depth > 0 {
+                    if let Some(ref ctype) = info.c_type {
+                        if let Some(sz) = Self::peel_pointer_elem_size(ctype, depth) {
+                            return sz;
+                        }
+                    }
+                }
+                if info.elem_size > 0 {
                     return info.elem_size;
                 }
             }
@@ -320,9 +335,23 @@ impl Lowerer {
                     if depth < ginfo.array_dim_strides.len() {
                         return ginfo.array_dim_strides[depth];
                     }
+                    // depth exceeds array dimensions: use c_type to resolve pointee size
+                    if let Some(ref ctype) = ginfo.c_type {
+                        if let Some(sz) = Self::peel_pointer_elem_size(ctype, depth) {
+                            return sz;
+                        }
+                    }
                     return *ginfo.array_dim_strides.last().unwrap_or(&ginfo.elem_size.max(1));
                 }
-                if depth == 0 && ginfo.elem_size > 0 {
+                // For pointer-to-pointer types, peel pointer levels for correct stride.
+                if depth > 0 {
+                    if let Some(ref ctype) = ginfo.c_type {
+                        if let Some(sz) = Self::peel_pointer_elem_size(ctype, depth) {
+                            return sz;
+                        }
+                    }
+                }
+                if ginfo.elem_size > 0 {
                     return ginfo.elem_size;
                 }
             }
@@ -445,6 +474,35 @@ impl Lowerer {
         match base {
             Expr::ArraySubscript(inner, _, _) => 1 + self.count_subscript_depth(inner),
             _ => 0,
+        }
+    }
+
+    /// Peel `depth` levels of pointer/array indirection from a CType,
+    /// then return the element size of the resulting pointer or array type.
+    /// For `char **` at depth 1: Pointer(Pointer(Char)) -> Pointer(Char) -> pointee is Char -> size 1.
+    /// For `int **` at depth 1: Pointer(Pointer(Int)) -> Pointer(Int) -> pointee is Int -> size 4.
+    /// For `char *arr[]` at depth 1: Array(Pointer(Char), _) -> Pointer(Char) -> pointee is Char -> size 1.
+    fn peel_pointer_elem_size(ctype: &CType, depth: usize) -> Option<usize> {
+        let mut ty = ctype;
+        for _ in 0..depth {
+            match ty {
+                CType::Pointer(inner) => ty = inner,
+                CType::Array(inner, _) => ty = inner,
+                _ => return None,
+            }
+        }
+        // ty is now the type after peeling `depth` levels.
+        // It should be a pointer or array; return the size of what it points to.
+        match ty {
+            CType::Pointer(pointee) => {
+                let sz = pointee.size();
+                if sz > 0 { Some(sz) } else { None }
+            }
+            CType::Array(elem, _) => {
+                let sz = elem.size();
+                if sz > 0 { Some(sz) } else { None }
+            }
+            _ => None,
         }
     }
 

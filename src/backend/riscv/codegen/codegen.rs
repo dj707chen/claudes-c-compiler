@@ -881,6 +881,18 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    ebreak");
     }
 
+    fn emit_label_addr(&mut self, dest: &Value, label: &str) {
+        // Load address of a label for computed goto (GCC &&label extension)
+        self.state.emit(&format!("    la t0, {}", label));
+        self.store_t0_to(dest);
+    }
+
+    fn emit_indirect_branch(&mut self, target: &Operand) {
+        // Computed goto: goto *target
+        self.operand_to_t0(target);
+        self.state.emit("    jr t0");
+    }
+
     fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, ordering: AtomicOrdering) {
         // Load ptr into t1, val into t2
         self.operand_to_t0(ptr);

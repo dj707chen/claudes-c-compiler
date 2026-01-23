@@ -148,7 +148,87 @@ impl Lowerer {
                 let val = self.eval_const_expr(inner)?;
                 Some(IrConst::I64(if val.is_nonzero() { 0 } else { 1 }))
             }
+            // Handle &((type*)0)->member pattern (offsetof)
+            Expr::AddressOf(inner, _) => {
+                self.eval_offsetof_pattern(inner)
+            }
             _ => None,
+        }
+    }
+
+    /// Evaluate the offsetof pattern: &((type*)0)->member
+    /// Returns Some(IrConst::I64(offset)) if the expression matches the pattern.
+    fn eval_offsetof_pattern(&self, expr: &Expr) -> Option<IrConst> {
+        // Pattern: ((type*)0)->member or ((type*)0)->member.submember
+        // Also handle: (*((type*)0)).member
+        match expr {
+            Expr::PointerMemberAccess(base, field_name, _) => {
+                // base should be (type*)0 - a cast of 0 to a pointer type
+                let (type_spec, base_offset) = self.extract_null_pointer_cast_with_offset(base)?;
+                let layout = self.get_struct_layout_for_type(&type_spec)?;
+                let (field_offset, _field_ty) = layout.field_offset(field_name)?;
+                Some(IrConst::I64((base_offset + field_offset) as i64))
+            }
+            Expr::MemberAccess(base, field_name, _) => {
+                // base might be *((type*)0)
+                if let Expr::Deref(inner, _) = base.as_ref() {
+                    let (type_spec, base_offset) = self.extract_null_pointer_cast_with_offset(inner)?;
+                    let layout = self.get_struct_layout_for_type(&type_spec)?;
+                    let (field_offset, _field_ty) = layout.field_offset(field_name)?;
+                    Some(IrConst::I64((base_offset + field_offset) as i64))
+                } else {
+                    None
+                }
+            }
+            Expr::ArraySubscript(base, index, _) => {
+                // Handle &((type*)0)->member[index] pattern
+                // base is PointerMemberAccess or MemberAccess that results in an array
+                let base_offset = self.eval_offsetof_pattern(base)?;
+                if let IrConst::I64(boff) = base_offset {
+                    if let Some(idx_val) = self.eval_const_expr(index) {
+                        if let IrConst::I64(idx) = idx_val {
+                            // Get the element size of the array member
+                            if let Some(ctype) = self.get_expr_ctype(base) {
+                                let elem_size = match &ctype {
+                                    CType::Array(elem, _) => elem.size(),
+                                    _ => return None,
+                                };
+                                return Some(IrConst::I64(boff + idx * elem_size as i64));
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract the struct type from a (type*)0 pattern, returning the base TypeSpecifier
+    /// for the struct type and any accumulated offset from nested member access.
+    fn extract_null_pointer_cast_with_offset(&self, expr: &Expr) -> Option<(TypeSpecifier, usize)> {
+        match expr {
+            Expr::Cast(ref type_spec, inner, _) => {
+                // The type should be a Pointer to a struct
+                if let TypeSpecifier::Pointer(inner_ts) = type_spec {
+                    // Check that the inner expression is 0
+                    if self.is_zero_expr(inner) {
+                        return Some((*inner_ts.clone(), 0));
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Check if an expression evaluates to 0 (integer literal 0 or cast of 0).
+    fn is_zero_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::IntLiteral(0, _) | Expr::UIntLiteral(0, _)
+            | Expr::LongLiteral(0, _) | Expr::ULongLiteral(0, _) => true,
+            Expr::Cast(_, inner, _) => self.is_zero_expr(inner),
+            _ => false,
         }
     }
 
@@ -1516,12 +1596,20 @@ impl Lowerer {
                 self.sizeof_type(target_type)
             }
 
-            // Member access: member field size
+            // Member access: member field size (use CType for accurate array/struct sizes)
             Expr::MemberAccess(base_expr, field_name, _) => {
+                if let Some(ctype) = self.resolve_member_field_ctype(base_expr, field_name) {
+                    let sz = ctype.size();
+                    if sz > 0 { return sz; }
+                }
                 let (_, field_ty) = self.resolve_member_access(base_expr, field_name);
                 field_ty.size()
             }
             Expr::PointerMemberAccess(base_expr, field_name, _) => {
+                if let Some(ctype) = self.resolve_pointer_member_field_ctype(base_expr, field_name) {
+                    let sz = ctype.size();
+                    if sz > 0 { return sz; }
+                }
                 let (_, field_ty) = self.resolve_pointer_member_access(base_expr, field_name);
                 field_ty.size()
             }
@@ -1614,9 +1702,19 @@ impl Lowerer {
         // Handle pointer and array combinations
         if has_pointer && !has_array {
             // Simple pointer: int *p, or typedef'd pointer (e.g., typedef struct Foo *FooPtr)
+            let ptr_count = derived.iter().filter(|d| matches!(d, DerivedDeclarator::Pointer)).count();
             let elem_size = if let TypeSpecifier::Pointer(inner) = ts {
                 // Pointer is in the type spec itself (typedef'd pointer)
-                self.sizeof_type(self.resolve_type_spec(inner))
+                // If there are also pointer levels in derived, each derived pointer adds
+                // a level of indirection (e.g., typedef int *intptr; intptr *pp -> int **pp)
+                if ptr_count >= 1 {
+                    8 // element is a pointer itself
+                } else {
+                    self.sizeof_type(self.resolve_type_spec(inner))
+                }
+            } else if ptr_count >= 2 {
+                // Multiple pointer levels (e.g., char **p): element type is a pointer (size 8)
+                8
             } else {
                 self.sizeof_type(ts)
             };

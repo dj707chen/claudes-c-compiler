@@ -241,6 +241,7 @@ fn instruction_used_values(inst: &Instruction) -> Vec<u32> {
                 add_operand_values(op, &mut used);
             }
         }
+        Instruction::LabelAddr { .. } => {}
     }
     used
 }
@@ -250,6 +251,7 @@ fn terminator_used_values(term: &Terminator) -> Vec<u32> {
     match term {
         Terminator::Return(Some(op)) => add_operand_values(op, &mut used),
         Terminator::CondBranch { cond, .. } => add_operand_values(cond, &mut used),
+        Terminator::IndirectBranch { target, .. } => add_operand_values(target, &mut used),
         _ => {}
     }
     used
@@ -298,6 +300,16 @@ fn build_cfg(
                         succs[i].push(f);
                     }
                     preds[f].push(i);
+                }
+            }
+            Terminator::IndirectBranch { possible_targets, .. } => {
+                for label in possible_targets {
+                    if let Some(&t) = label_to_idx.get(label) {
+                        if !succs[i].contains(&t) {
+                            succs[i].push(t);
+                        }
+                        preds[t].push(i);
+                    }
                 }
             }
             Terminator::Return(_) | Terminator::Unreachable => {}
@@ -690,6 +702,7 @@ fn get_successor_labels(term: &Terminator) -> Vec<String> {
                 vec![true_label.clone(), false_label.clone()]
             }
         }
+        Terminator::IndirectBranch { possible_targets, .. } => possible_targets.clone(),
         Terminator::Return(_) | Terminator::Unreachable => Vec::new(),
     }
 }
@@ -752,7 +765,8 @@ fn instruction_dest_value(inst: &Instruction) -> Option<Value> {
         | Instruction::Copy { dest, .. }
         | Instruction::GlobalAddr { dest, .. }
         | Instruction::VaArg { dest, .. }
-        | Instruction::Phi { dest, .. } => Some(*dest),
+        | Instruction::Phi { dest, .. }
+        | Instruction::LabelAddr { dest, .. } => Some(*dest),
         Instruction::Call { dest, .. }
         | Instruction::CallIndirect { dest, .. } => *dest,
         Instruction::AtomicRmw { dest, .. } => Some(*dest),

@@ -184,6 +184,12 @@ pub trait ArchCodegen {
     /// Emit an unreachable trap instruction.
     fn emit_unreachable(&mut self);
 
+    /// Emit a label address load (GCC &&label extension for computed goto).
+    fn emit_label_addr(&mut self, dest: &Value, label: &str);
+
+    /// Emit an indirect branch (computed goto: goto *addr).
+    fn emit_indirect_branch(&mut self, target: &Operand);
+
     /// Emit the function directive for the function type attribute.
     /// x86 uses "@function", ARM uses "%function".
     fn function_type_directive(&self) -> &'static str { "@function" }
@@ -318,6 +324,9 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
             // at the end of predecessor blocks. This case should not be reached
             // in normal operation, but is a no-op for safety.
         }
+        Instruction::LabelAddr { dest, label } => {
+            cg.emit_label_addr(dest, label);
+        }
     }
 }
 
@@ -332,6 +341,9 @@ fn generate_terminator(cg: &mut dyn ArchCodegen, term: &Terminator, frame_size: 
         }
         Terminator::CondBranch { cond, true_label, false_label } => {
             cg.emit_cond_branch(cond, true_label, false_label);
+        }
+        Terminator::IndirectBranch { target, .. } => {
+            cg.emit_indirect_branch(target);
         }
         Terminator::Unreachable => {
             cg.emit_unreachable();

@@ -1003,7 +1003,12 @@ impl Parser {
                         } else {
                             None
                         };
-                        // Parse array dimensions and wrap the type
+                        // Parse array dimensions: collect all dims first, then wrap
+                        // in reverse order so that for T field[N][M], the innermost
+                        // dimension (M) wraps the base type first, producing
+                        // Array(Array(T, M), N) which correctly represents
+                        // "array of N arrays of M elements of type T".
+                        let mut array_dims: Vec<Option<Box<Expr>>> = Vec::new();
                         while matches!(self.peek(), TokenKind::LBracket) {
                             self.advance(); // consume '['
                             let size = if matches!(self.peek(), TokenKind::RBracket) {
@@ -1012,7 +1017,11 @@ impl Parser {
                                 Some(Box::new(self.parse_expr()))
                             };
                             self.expect(&TokenKind::RBracket);
-                            field_type = TypeSpecifier::Array(Box::new(field_type), size);
+                            array_dims.push(size);
+                        }
+                        // Apply dimensions in reverse: innermost (rightmost) first
+                        for dim in array_dims.into_iter().rev() {
+                            field_type = TypeSpecifier::Array(Box::new(field_type), dim);
                         }
                         // Bit field
                         let bit_width = if self.consume_if(&TokenKind::Colon) {
@@ -1736,14 +1745,22 @@ impl Parser {
             TokenKind::Goto => {
                 let span = self.peek_span();
                 self.advance();
-                let label = if let TokenKind::Identifier(name) = self.peek().clone() {
-                    self.advance();
-                    name
+                // Check for computed goto: goto *expr;
+                if matches!(self.peek(), TokenKind::Star) {
+                    self.advance(); // consume '*'
+                    let expr = self.parse_expr();
+                    self.expect(&TokenKind::Semicolon);
+                    Stmt::GotoIndirect(Box::new(expr), span)
                 } else {
-                    String::new()
-                };
-                self.expect(&TokenKind::Semicolon);
-                Stmt::Goto(label, span)
+                    let label = if let TokenKind::Identifier(name) = self.peek().clone() {
+                        self.advance();
+                        name
+                    } else {
+                        String::new()
+                    };
+                    self.expect(&TokenKind::Semicolon);
+                    Stmt::Goto(label, span)
+                }
             }
             TokenKind::Identifier(ref name) => {
                 // Check for label (identifier followed by colon)
@@ -2035,6 +2052,20 @@ impl Parser {
 
     fn parse_unary_expr(&mut self) -> Expr {
         match self.peek().clone() {
+            TokenKind::AmpAmp => {
+                // GCC extension: &&label (address of label, for computed goto)
+                let span = self.peek_span();
+                if self.pos + 1 < self.tokens.len() {
+                    if let TokenKind::Identifier(ref name) = self.tokens[self.pos + 1].kind {
+                        let label_name = name.clone();
+                        self.advance(); // consume &&
+                        self.advance(); // consume identifier
+                        return Expr::LabelAddr(label_name, span);
+                    }
+                }
+                // If not followed by identifier, fall through to parse as expression
+                self.parse_postfix_expr()
+            }
             TokenKind::PlusPlus => {
                 let span = self.peek_span();
                 self.advance();

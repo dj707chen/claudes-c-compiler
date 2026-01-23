@@ -1015,6 +1015,50 @@ impl Preprocessor {
         let mut i = 0;
 
         while i < len {
+            // Skip character literals verbatim (don't treat contents as identifiers)
+            if chars[i] == '\'' {
+                result.push(chars[i]);
+                i += 1;
+                // Copy contents of char literal, handling escape sequences
+                while i < len && chars[i] != '\'' {
+                    if chars[i] == '\\' && i + 1 < len {
+                        result.push(chars[i]);
+                        i += 1;
+                        result.push(chars[i]);
+                        i += 1;
+                    } else {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                // Copy closing quote
+                if i < len && chars[i] == '\'' {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+                continue;
+            }
+            // Skip string literals verbatim
+            if chars[i] == '"' {
+                result.push(chars[i]);
+                i += 1;
+                while i < len && chars[i] != '"' {
+                    if chars[i] == '\\' && i + 1 < len {
+                        result.push(chars[i]);
+                        i += 1;
+                        result.push(chars[i]);
+                        i += 1;
+                    } else {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                if i < len && chars[i] == '"' {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+                continue;
+            }
             if chars[i].is_ascii_digit() {
                 // Skip entire number literal (hex 0x..., binary 0b..., octal, decimal)
                 // including suffixes like ULL, u, l, etc.
