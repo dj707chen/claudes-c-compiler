@@ -301,6 +301,11 @@ impl Lowerer {
                 };
                 return (fl.offset, ir_ty, bf);
             }
+            // Fallback: search anonymous struct/union members recursively
+            // (field_layout only does flat lookup; field_offset searches anonymous members)
+            if let Some((offset, ctype)) = layout.field_offset(field_name) {
+                return (offset, IrType::from_ctype(ctype), None);
+            }
         }
         (0, IrType::I32, None)
     }
@@ -328,6 +333,10 @@ impl Lowerer {
                     _ => None,
                 };
                 return (fl.offset, ir_ty, bf);
+            }
+            // Fallback: search anonymous struct/union members recursively
+            if let Some((offset, ctype)) = layout.field_offset(field_name) {
+                return (offset, IrType::from_ctype(ctype), None);
             }
         }
         (0, IrType::I32, None)
