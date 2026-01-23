@@ -1,0 +1,13 @@
+Implementing driver compilation modes (-S, -c, -E, -D flags)
+
+These are fundamental GCC-compatible driver features currently marked as TODO.
+- -S: Output assembly text to file (no assemble/link)
+- -c: Compile to object file (no link)
+- -E: Preprocess only, output to stdout
+- -D: Command-line macro defines (passed to preprocessor)
+
+This involves:
+1. Adding CompilationMode enum to driver
+2. Updating main.rs arg parsing
+3. Updating driver.rs pipeline to stop at the right phase
+4. Updating preprocessor to accept external defines
