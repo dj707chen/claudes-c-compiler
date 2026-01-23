@@ -166,6 +166,23 @@ pub enum Stmt {
     /// Computed goto: goto *expr (GCC extension, labels-as-values)
     GotoIndirect(Box<Expr>, Span),
     Label(String, Box<Stmt>, Span),
+    InlineAsm {
+        template: String,
+        outputs: Vec<AsmOperand>,
+        inputs: Vec<AsmOperand>,
+        clobbers: Vec<String>,
+    },
+}
+
+/// An operand in an inline asm statement.
+#[derive(Debug, Clone)]
+pub struct AsmOperand {
+    /// Symbolic name (e.g., [name]) if present
+    pub name: Option<String>,
+    /// Constraint string (e.g., "=r", "+r", "r")
+    pub constraint: String,
+    /// The C expression for the operand
+    pub expr: Expr,
 }
 
 /// For loop initializer.

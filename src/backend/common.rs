@@ -396,5 +396,6 @@ pub fn instruction_dest(inst: &Instruction) -> Option<Value> {
         Instruction::Fence { .. } => None,
         Instruction::Phi { dest, .. } => Some(*dest),
         Instruction::LabelAddr { dest, .. } => Some(*dest),
+        Instruction::InlineAsm { .. } => None,
     }
 }

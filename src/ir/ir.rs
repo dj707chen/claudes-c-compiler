@@ -194,6 +194,18 @@ pub enum Instruction {
 
     /// Get the address of a label (GCC computed goto extension: &&label)
     LabelAddr { dest: Value, label: String },
+
+    /// Inline assembly statement
+    InlineAsm {
+        /// Assembly template string (with \n\t separators)
+        template: String,
+        /// Output operands: (constraint, value_ptr, optional_name)
+        outputs: Vec<(String, Value, Option<String>)>,
+        /// Input operands: (constraint, operand, optional_name)
+        inputs: Vec<(String, Operand, Option<String>)>,
+        /// Clobber list (register names and "memory", "cc")
+        clobbers: Vec<String>,
+    },
 }
 
 /// Block terminator.

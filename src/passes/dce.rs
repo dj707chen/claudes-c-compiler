@@ -168,6 +168,14 @@ fn collect_instruction_uses(inst: &Instruction, used: &mut HashSet<u32>) {
             }
         }
         Instruction::LabelAddr { .. } => {}
+        Instruction::InlineAsm { outputs, inputs, .. } => {
+            for (_, ptr, _) in outputs {
+                used.insert(ptr.0);
+            }
+            for (_, op, _) in inputs {
+                collect_operand_uses(op, used);
+            }
+        }
     }
 }
 
@@ -215,7 +223,8 @@ fn has_side_effects(inst: &Instruction) -> bool {
         Instruction::AtomicCmpxchg { .. } |
         Instruction::AtomicLoad { .. } |
         Instruction::AtomicStore { .. } |
-        Instruction::Fence { .. }
+        Instruction::Fence { .. } |
+        Instruction::InlineAsm { .. }
     )
 }
 
@@ -246,6 +255,7 @@ fn get_dest(inst: &Instruction) -> Option<Value> {
         Instruction::Fence { .. } => None,
         Instruction::Phi { dest, .. } => Some(*dest),
         Instruction::LabelAddr { dest, .. } => Some(*dest),
+        Instruction::InlineAsm { .. } => None,
     }
 }
 
