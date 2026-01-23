@@ -1,0 +1,30 @@
+Task: Fix preprocessor #if expression evaluation for unsigned integer arithmetic
+Status: IN PROGRESS
+
+Problem:
+The preprocessor #if expression evaluator uses only signed i64 for all values and
+completely ignores 'u'/'U' suffixes on integer literals. This causes incorrect
+evaluation of:
+1. Unsigned comparisons: `2147483647u < -2147483648` should be true (unsigned comparison)
+   but evaluates as false (signed comparison)
+2. Unsigned arithmetic: `(2u - 1) * (-2147483648)` should give unsigned multiplication
+   result but gives signed result
+3. Type promotions: mixing signed and unsigned in preprocessor expressions
+
+Root cause:
+In conditionals.rs, ExprToken::Num is i64 and the tokenizer skips 'u'/'U' suffixes
+without recording them. All arithmetic and comparisons use signed i64 operations.
+
+Fix:
+1. Add ExprToken::UNum(u64) for unsigned literals
+2. Track unsigned-ness through expression evaluation using (i64, bool) pairs
+3. Apply C99 "usual arithmetic conversions" in preprocessor:
+   - If either operand is unsigned, convert both to unsigned for the operation
+   - Use wrapping unsigned arithmetic where appropriate
+4. Fix comparisons to use unsigned comparison when either operand is unsigned
+
+Expected impact: Fixes preprocessor #if evaluation tests involving unsigned arithmetic,
+including compiler_suite_0125_0028 and potentially other tests.
+
+Affected files:
+- src/frontend/preprocessor/conditionals.rs
