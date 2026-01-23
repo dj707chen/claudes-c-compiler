@@ -855,6 +855,19 @@ impl Lowerer {
         items: &[InitializerItem],
         layout: &StructLayout,
     ) -> GlobalInit {
+        // Check if any field has an address expression (needs relocation)
+        let has_addr_fields = items.iter().any(|item| {
+            if let Initializer::Expr(expr) = &item.init {
+                self.eval_const_expr(expr).is_none() && self.eval_global_addr_expr(expr).is_some()
+            } else {
+                false
+            }
+        });
+
+        if has_addr_fields {
+            return self.lower_struct_global_init_compound(items, layout);
+        }
+
         let total_size = layout.size;
         let mut bytes = vec![0u8; total_size];
 
@@ -862,51 +875,13 @@ impl Lowerer {
         let mut current_field_idx = 0usize;
 
         for item in items {
-            // Determine which field this initializer targets
-            let field_idx = if let Some(Designator::Field(ref name)) = item.designators.first() {
-                // Designated initializer: find field by name
-                layout.fields.iter().position(|f| f.name == *name).unwrap_or(current_field_idx)
-            } else {
-                // Positional: skip unnamed fields (anonymous bitfields)
-                let mut idx = current_field_idx;
-                while idx < layout.fields.len() && layout.fields[idx].name.is_empty() {
-                    idx += 1;
-                }
-                idx
-            };
-
-            if field_idx >= layout.fields.len() {
-                break;
-            }
-
+            let field_idx = self.resolve_struct_init_field_idx(item, layout, current_field_idx);
+            if field_idx >= layout.fields.len() { break; }
             let field_layout = &layout.fields[field_idx];
-
-            // Evaluate the initializer and place at field offset
             let field_offset = field_layout.offset;
-            match &item.init {
-                Initializer::Expr(expr) => {
-                    let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
-                    let field_ir_ty = IrType::from_ctype(&field_layout.ty);
-                    self.write_const_to_bytes(&mut bytes, field_offset, &val, field_ir_ty);
-                }
-                Initializer::List(sub_items) => {
-                    // Nested struct/union initializer: get sub-struct layout and recurse
-                    if let Some(sub_layout) = self.get_struct_layout_for_ctype(&field_layout.ty) {
-                        self.write_struct_init_to_bytes(&mut bytes, field_offset, sub_items, &sub_layout);
-                    } else {
-                        // Not a struct field; try first item as scalar fallback
-                        if let Some(first) = sub_items.first() {
-                            if let Initializer::Expr(expr) = &first.init {
-                                let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
-                                let field_ir_ty = IrType::from_ctype(&field_layout.ty);
-                                self.write_const_to_bytes(&mut bytes, field_offset, &val, field_ir_ty);
-                            }
-                        }
-                    }
-                }
-            }
 
-            // Advance positional counter past this field
+            self.write_init_item_to_bytes(&mut bytes, field_offset, &item.init, &field_layout.ty);
+
             current_field_idx = field_idx + 1;
         }
 
@@ -915,6 +890,163 @@ impl Lowerer {
         GlobalInit::Array(values)
     }
 
+    /// Lower a struct global init that contains address expressions.
+    /// Emits field-by-field using Compound, with padding bytes between fields.
+    fn lower_struct_global_init_compound(
+        &self,
+        items: &[InitializerItem],
+        layout: &StructLayout,
+    ) -> GlobalInit {
+        let total_size = layout.size;
+        let mut elements: Vec<GlobalInit> = Vec::new();
+        let mut current_offset = 0usize;
+        let mut current_field_idx = 0usize;
+
+        // Build a map of field_idx -> initializer value
+        let mut field_inits: Vec<Option<&InitializerItem>> = vec![None; layout.fields.len()];
+        for item in items {
+            let field_idx = self.resolve_struct_init_field_idx(item, layout, current_field_idx);
+            if field_idx >= layout.fields.len() { break; }
+            field_inits[field_idx] = Some(item);
+            current_field_idx = field_idx + 1;
+        }
+
+        for (fi, field) in layout.fields.iter().enumerate() {
+            // Emit padding before this field
+            if field.offset > current_offset {
+                let pad = field.offset - current_offset;
+                for _ in 0..pad {
+                    elements.push(GlobalInit::Scalar(IrConst::I8(0)));
+                }
+                current_offset = field.offset;
+            }
+
+            let field_size = field.ty.size();
+            if let Some(item) = field_inits[fi] {
+                match &item.init {
+                    Initializer::Expr(expr) => {
+                        if let Some(val) = self.eval_const_expr(expr) {
+                            // Scalar constant - emit as bytes
+                            self.push_const_as_bytes(&mut elements, &val, field_size);
+                        } else if let Some(addr_init) = self.eval_global_addr_expr(expr) {
+                            // Address expression - emit as relocation
+                            elements.push(addr_init);
+                        } else {
+                            // Unknown - zero fill
+                            for _ in 0..field_size {
+                                elements.push(GlobalInit::Scalar(IrConst::I8(0)));
+                            }
+                        }
+                    }
+                    _ => {
+                        // Nested list - zero fill for now (nested struct with addr not handled)
+                        for _ in 0..field_size {
+                            elements.push(GlobalInit::Scalar(IrConst::I8(0)));
+                        }
+                    }
+                }
+            } else {
+                // No initializer for this field - zero fill
+                for _ in 0..field_size {
+                    elements.push(GlobalInit::Scalar(IrConst::I8(0)));
+                }
+            }
+            current_offset += field_size;
+        }
+
+        // Trailing padding
+        while current_offset < total_size {
+            elements.push(GlobalInit::Scalar(IrConst::I8(0)));
+            current_offset += 1;
+        }
+
+        GlobalInit::Compound(elements)
+    }
+
+    /// Push a constant value as individual bytes into a compound init element list.
+    fn push_const_as_bytes(&self, elements: &mut Vec<GlobalInit>, val: &IrConst, size: usize) {
+        let int_val = match val {
+            IrConst::I8(v) => *v as i64,
+            IrConst::I16(v) => *v as i64,
+            IrConst::I32(v) => *v as i64,
+            IrConst::I64(v) => *v,
+            IrConst::Zero => 0,
+            IrConst::F32(v) => {
+                let bits = v.to_bits().to_le_bytes();
+                for &b in &bits {
+                    elements.push(GlobalInit::Scalar(IrConst::I8(b as i8)));
+                }
+                return;
+            }
+            IrConst::F64(v) => {
+                let bits = v.to_bits().to_le_bytes();
+                for &b in &bits {
+                    elements.push(GlobalInit::Scalar(IrConst::I8(b as i8)));
+                }
+                return;
+            }
+        };
+        let le_bytes = int_val.to_le_bytes();
+        for i in 0..size {
+            elements.push(GlobalInit::Scalar(IrConst::I8(le_bytes[i] as i8)));
+        }
+    }
+
+    /// Resolve which struct field a positional or designated initializer targets.
+    fn resolve_struct_init_field_idx(
+        &self,
+        item: &InitializerItem,
+        layout: &StructLayout,
+        current_field_idx: usize,
+    ) -> usize {
+        if let Some(Designator::Field(ref name)) = item.designators.first() {
+            layout.fields.iter().position(|f| f.name == *name).unwrap_or(current_field_idx)
+        } else {
+            let mut idx = current_field_idx;
+            while idx < layout.fields.len() && layout.fields[idx].name.is_empty() {
+                idx += 1;
+            }
+            idx
+        }
+    }
+
+    /// Write an initializer item to a byte buffer at the given offset.
+    fn write_init_item_to_bytes(&self, bytes: &mut [u8], offset: usize, init: &Initializer, field_ty: &CType) {
+        match init {
+            Initializer::Expr(expr) => {
+                let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                let field_ir_ty = IrType::from_ctype(field_ty);
+                self.write_const_to_bytes(bytes, offset, &val, field_ir_ty);
+            }
+            Initializer::List(sub_items) => {
+                // Try struct/union layout first
+                if let Some(sub_layout) = self.get_struct_layout_for_ctype(field_ty) {
+                    self.write_struct_init_to_bytes(bytes, offset, sub_items, &sub_layout);
+                } else if let CType::Array(elem_ty, count) = field_ty {
+                    let elem_size = elem_ty.size();
+                    for (idx, sub_item) in sub_items.iter().enumerate() {
+                        if count.map_or(false, |c| idx >= c) { break; }
+                        if let Initializer::Expr(expr) = &sub_item.init {
+                            let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                            let elem_ir_ty = IrType::from_ctype(elem_ty);
+                            self.write_const_to_bytes(bytes, offset + idx * elem_size, &val, elem_ir_ty);
+                        }
+                    }
+                } else {
+                    // Scalar in braces
+                    if let Some(first) = sub_items.first() {
+                        if let Initializer::Expr(expr) = &first.init {
+                            let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
+                            let field_ir_ty = IrType::from_ctype(field_ty);
+                            self.write_const_to_bytes(bytes, offset, &val, field_ir_ty);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Recursively write a nested struct initializer list to a byte buffer.
     /// Write an IrConst value to a byte buffer at the given offset using the field's IR type.
     fn write_const_to_bytes(&self, bytes: &mut [u8], offset: usize, val: &IrConst, ty: IrType) {
         let int_val = match val {

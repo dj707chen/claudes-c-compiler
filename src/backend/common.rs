@@ -234,7 +234,14 @@ fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
             for elem in elements {
                 match elem {
                     GlobalInit::Scalar(c) => {
-                        emit_const_data(out, c, g.ty, ptr_dir);
+                        // Use the const's own type for non-I64 scalars (e.g., I8 in struct byte init)
+                        let elem_ty = match c {
+                            IrConst::I8(_) => IrType::I8,
+                            IrConst::I16(_) => IrType::I16,
+                            IrConst::I32(_) => IrType::I32,
+                            _ => g.ty,
+                        };
+                        emit_const_data(out, c, elem_ty, ptr_dir);
                     }
                     GlobalInit::GlobalAddr(label) => {
                         out.emit(&format!("    {} {}", ptr_dir.as_str(), label));
