@@ -39,6 +39,7 @@ pub struct Declaration {
     pub declarators: Vec<InitDeclarator>,
     pub is_static: bool,
     pub is_extern: bool,
+    pub is_typedef: bool,
     pub span: Span,
 }
 

@@ -177,6 +177,7 @@ impl Parser {
                 declarators: Vec::new(),
                 is_static: false,
                 is_extern: false,
+                is_typedef: false,
                 span: Span::dummy(),
             }));
         }
@@ -199,6 +200,7 @@ impl Parser {
                 declarators: Vec::new(),
                 is_static: self.parsing_static,
                 is_extern: self.parsing_extern,
+                is_typedef: self.parsing_typedef,
                 span: start,
             }));
         }
@@ -302,6 +304,7 @@ impl Parser {
             }
 
             // Register typedef names if this was a typedef declaration
+            let is_typedef = self.parsing_typedef;
             if self.parsing_typedef {
                 for decl in &declarators {
                     if !decl.name.is_empty() {
@@ -317,6 +320,7 @@ impl Parser {
                 declarators,
                 is_static: self.parsing_static,
                 is_extern: self.parsing_extern,
+                is_typedef,
                 span: start,
             }))
         }
@@ -1243,7 +1247,7 @@ impl Parser {
         // Handle case where type is followed by semicolon (struct/enum/union def)
         if matches!(self.peek(), TokenKind::Semicolon) {
             self.advance();
-            return Some(Declaration { type_spec, declarators, is_static, is_extern, span: start });
+            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, span: start });
         }
 
         loop {
@@ -1267,6 +1271,7 @@ impl Parser {
         }
 
         // Register typedef names if this was a typedef declaration
+        let is_typedef = self.parsing_typedef;
         if self.parsing_typedef {
             for decl in &declarators {
                 if !decl.name.is_empty() {
@@ -1277,7 +1282,7 @@ impl Parser {
         }
 
         self.expect(&TokenKind::Semicolon);
-        Some(Declaration { type_spec, declarators, is_static, is_extern, span: start })
+        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, span: start })
     }
 
     fn parse_initializer(&mut self) -> Initializer {

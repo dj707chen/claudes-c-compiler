@@ -183,7 +183,143 @@ impl Lowerer {
         }
     }
 
+    /// Resolve a TypeSpecifier, following typedef chains.
+    /// Returns the underlying TypeSpecifier (non-TypedefName).
+    pub(super) fn resolve_type_spec<'a>(&'a self, ts: &'a TypeSpecifier) -> &'a TypeSpecifier {
+        let mut current = ts;
+        // Follow typedef chains (limit depth to prevent infinite loops)
+        for _ in 0..32 {
+            if let TypeSpecifier::TypedefName(name) = current {
+                if let Some(resolved) = self.typedefs.get(name) {
+                    current = resolved;
+                    continue;
+                }
+            }
+            break;
+        }
+        current
+    }
+
+    /// Pre-populate typedef mappings for builtin/standard types.
+    pub(super) fn seed_builtin_typedefs(&mut self) {
+        use TypeSpecifier::*;
+        let builtins: &[(&str, TypeSpecifier)] = &[
+            // <stddef.h>
+            ("size_t", UnsignedLong),
+            ("ssize_t", Long),
+            ("ptrdiff_t", Long),
+            ("wchar_t", Int),
+            ("wint_t", UnsignedInt),
+            // <stdint.h> - exact width types
+            ("int8_t", Char),
+            ("int16_t", Short),
+            ("int32_t", Int),
+            ("int64_t", Long),
+            ("uint8_t", UnsignedChar),
+            ("uint16_t", UnsignedShort),
+            ("uint32_t", UnsignedInt),
+            ("uint64_t", UnsignedLong),
+            ("intptr_t", Long),
+            ("uintptr_t", UnsignedLong),
+            ("intmax_t", Long),
+            ("uintmax_t", UnsignedLong),
+            // least types
+            ("int_least8_t", Char),
+            ("int_least16_t", Short),
+            ("int_least32_t", Int),
+            ("int_least64_t", Long),
+            ("uint_least8_t", UnsignedChar),
+            ("uint_least16_t", UnsignedShort),
+            ("uint_least32_t", UnsignedInt),
+            ("uint_least64_t", UnsignedLong),
+            // fast types
+            ("int_fast8_t", Char),
+            ("int_fast16_t", Long),
+            ("int_fast32_t", Long),
+            ("int_fast64_t", Long),
+            ("uint_fast8_t", UnsignedChar),
+            ("uint_fast16_t", UnsignedLong),
+            ("uint_fast32_t", UnsignedLong),
+            ("uint_fast64_t", UnsignedLong),
+            // <signal.h>
+            ("sig_atomic_t", Int),
+            // <time.h>
+            ("time_t", Long),
+            ("clock_t", Long),
+            ("timer_t", Pointer(Box::new(Void))),
+            ("clockid_t", Int),
+            // <sys/types.h>
+            ("off_t", Long),
+            ("pid_t", Int),
+            ("uid_t", UnsignedInt),
+            ("gid_t", UnsignedInt),
+            ("mode_t", UnsignedInt),
+            ("dev_t", UnsignedLong),
+            ("ino_t", UnsignedLong),
+            ("nlink_t", UnsignedLong),
+            ("blksize_t", Long),
+            ("blkcnt_t", Long),
+            // GNU/glibc common
+            ("ulong", UnsignedLong),
+            ("ushort", UnsignedShort),
+            ("uint", UnsignedInt),
+            ("__u8", UnsignedChar),
+            ("__u16", UnsignedShort),
+            ("__u32", UnsignedInt),
+            ("__u64", UnsignedLong),
+            ("__s8", Char),
+            ("__s16", Short),
+            ("__s32", Int),
+            ("__s64", Long),
+            // <stdarg.h> - va_list is a pointer-like type
+            ("va_list", Pointer(Box::new(Void))),
+            ("__builtin_va_list", Pointer(Box::new(Void))),
+            ("__gnuc_va_list", Pointer(Box::new(Void))),
+            // <locale.h>
+            ("locale_t", Pointer(Box::new(Void))),
+            // <pthread.h> - opaque types, treat as unsigned long or pointer
+            ("pthread_t", UnsignedLong),
+            ("pthread_mutex_t", Pointer(Box::new(Void))),
+            ("pthread_cond_t", Pointer(Box::new(Void))),
+            ("pthread_key_t", UnsignedInt),
+            ("pthread_attr_t", Pointer(Box::new(Void))),
+            ("pthread_once_t", Int),
+            ("pthread_mutexattr_t", Pointer(Box::new(Void))),
+            ("pthread_condattr_t", Pointer(Box::new(Void))),
+            // <setjmp.h>
+            ("jmp_buf", Pointer(Box::new(Void))),
+            ("sigjmp_buf", Pointer(Box::new(Void))),
+            // <stdio.h>
+            ("FILE", Pointer(Box::new(Void))),
+            ("fpos_t", Long),
+            // <dirent.h>
+            ("DIR", Pointer(Box::new(Void))),
+        ];
+        for (name, ts) in builtins {
+            self.typedefs.insert(name.to_string(), ts.clone());
+        }
+        // Also add the __u_char etc. POSIX internal names
+        let posix_extras: &[(&str, TypeSpecifier)] = &[
+            ("__u_char", UnsignedChar),
+            ("__u_short", UnsignedShort),
+            ("__u_int", UnsignedInt),
+            ("__u_long", UnsignedLong),
+            ("__int8_t", Char),
+            ("__int16_t", Short),
+            ("__int32_t", Int),
+            ("__int64_t", Long),
+            ("__uint8_t", UnsignedChar),
+            ("__uint16_t", UnsignedShort),
+            ("__uint32_t", UnsignedInt),
+            ("__uint64_t", UnsignedLong),
+        ];
+        for (name, ts) in posix_extras {
+            self.typedefs.insert(name.to_string(), ts.clone());
+        }
+    }
+
     pub(super) fn type_spec_to_ir(&self, ts: &TypeSpecifier) -> IrType {
+        let ts = self.resolve_type_spec(ts);
         match ts {
             TypeSpecifier::Void => IrType::Void,
             TypeSpecifier::Char => IrType::I8,
@@ -200,13 +336,14 @@ impl Lowerer {
             TypeSpecifier::Array(_, _) => IrType::Ptr,
             TypeSpecifier::Struct(_, _) | TypeSpecifier::Union(_, _) => IrType::Ptr,
             TypeSpecifier::Enum(_, _) => IrType::I32,
-            TypeSpecifier::TypedefName(_) => IrType::I64, // TODO: resolve typedef
+            TypeSpecifier::TypedefName(_) => IrType::I64, // fallback for unresolved typedef
             TypeSpecifier::Signed => IrType::I32,
             TypeSpecifier::Unsigned => IrType::U32,
         }
     }
 
     pub(super) fn sizeof_type(&self, ts: &TypeSpecifier) -> usize {
+        let ts = self.resolve_type_spec(ts);
         match ts {
             TypeSpecifier::Void => 0,
             TypeSpecifier::Char | TypeSpecifier::UnsignedChar => 1,
@@ -412,6 +549,7 @@ impl Lowerer {
     /// For multi-dimensional arrays like int a[2][3], array_dim_strides = [12, 4]
     /// (stride for dim 0 = 3*4=12, stride for dim 1 = 4).
     pub(super) fn compute_decl_info(&self, ts: &TypeSpecifier, derived: &[DerivedDeclarator]) -> (usize, usize, bool, bool, Vec<usize>) {
+        let ts = self.resolve_type_spec(ts);
         // Check for pointer declarators
         let has_pointer = derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
         let has_array = derived.iter().any(|d| matches!(d, DerivedDeclarator::Array(_)));
@@ -512,6 +650,7 @@ impl Lowerer {
 
     /// Convert a TypeSpecifier to CType (for struct layout computation).
     pub(super) fn type_spec_to_ctype(&self, ts: &TypeSpecifier) -> CType {
+        let ts = self.resolve_type_spec(ts);
         match ts {
             TypeSpecifier::Void => CType::Void,
             TypeSpecifier::Char => CType::Char,

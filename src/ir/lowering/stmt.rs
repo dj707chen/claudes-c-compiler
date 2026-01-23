@@ -27,6 +27,28 @@ impl Lowerer {
         // First, register any struct/union definition from the type specifier
         self.register_struct_type(&decl.type_spec);
 
+        // If this is a typedef, register the mapping and skip variable emission
+        if decl.is_typedef {
+            for declarator in &decl.declarators {
+                if !declarator.name.is_empty() {
+                    let mut resolved_type = decl.type_spec.clone();
+                    for d in &declarator.derived {
+                        match d {
+                            DerivedDeclarator::Pointer => {
+                                resolved_type = TypeSpecifier::Pointer(Box::new(resolved_type));
+                            }
+                            DerivedDeclarator::Array(size) => {
+                                resolved_type = TypeSpecifier::Array(Box::new(resolved_type), size.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.typedefs.insert(declarator.name.clone(), resolved_type);
+                }
+            }
+            return;
+        }
+
         for declarator in &decl.declarators {
             if declarator.name.is_empty() {
                 continue; // Skip anonymous declarations (e.g., bare struct definitions)

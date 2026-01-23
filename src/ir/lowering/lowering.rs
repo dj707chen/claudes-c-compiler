@@ -98,6 +98,8 @@ pub struct Lowerer {
     pub(super) enum_constants: HashMap<String, i64>,
     /// User-defined goto labels mapped to unique IR labels (scoped per function).
     pub(super) user_labels: HashMap<String, String>,
+    /// Typedef mappings (name -> underlying TypeSpecifier).
+    pub(super) typedefs: HashMap<String, TypeSpecifier>,
 }
 
 impl Lowerer {
@@ -126,10 +128,14 @@ impl Lowerer {
             struct_layouts: HashMap::new(),
             enum_constants: HashMap::new(),
             user_labels: HashMap::new(),
+            typedefs: HashMap::new(),
         }
     }
 
     pub fn lower(mut self, tu: &TranslationUnit) -> IrModule {
+        // Seed builtin typedefs (matching the parser's pre-seeded typedef names)
+        self.seed_builtin_typedefs();
+
         // First pass: collect all function names so we can distinguish
         // function references from global variable references
         for decl in &tu.decls {
@@ -298,6 +304,29 @@ impl Lowerer {
 
         // Collect enum constants from top-level enum type declarations
         self.collect_enum_constants(&decl.type_spec);
+
+        // If this is a typedef, register the mapping and skip variable emission
+        if decl.is_typedef {
+            for declarator in &decl.declarators {
+                if !declarator.name.is_empty() {
+                    // For pointer typedefs (e.g., typedef int *intptr;), wrap in Pointer
+                    let mut resolved_type = decl.type_spec.clone();
+                    for d in &declarator.derived {
+                        match d {
+                            DerivedDeclarator::Pointer => {
+                                resolved_type = TypeSpecifier::Pointer(Box::new(resolved_type));
+                            }
+                            DerivedDeclarator::Array(size) => {
+                                resolved_type = TypeSpecifier::Array(Box::new(resolved_type), size.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.typedefs.insert(declarator.name.clone(), resolved_type);
+                }
+            }
+            return;
+        }
 
         for declarator in &decl.declarators {
             if declarator.name.is_empty() {

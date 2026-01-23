@@ -1,23 +1,23 @@
-Task: Fix unsigned char/short widening (zero-extend vs sign-extend)
+Task: Fix typedef resolution and unsigned type widening
 
-Problem: When loading unsigned char or unsigned short global/local variables and
-comparing/promoting them to int, the compiler sign-extends instead of zero-extending.
+Problem: TypedefName was never resolved in IR lowering, causing:
+1. All typedef-typed variables treated as I64 (8 bytes) regardless of actual type
+2. Typedef names (e.g., size_t, uint8_t, user-defined) emitted as global variables in .bss
+3. sizeof(typedef_name) always returned 8 instead of the correct size
+4. unsigned char/short typedefs used sign-extension instead of zero-extension
 
-Example:
-  unsigned char g = -1;  // stores 0xFF = 255
-  void test(int v) {
-    if (g != v) printf("NG\n");  // g should zero-extend to 255, not sign-extend to -1
-  }
-  test(0xff);  // Should not print "NG" but does
+Root cause: The Declaration AST node had no is_typedef flag, so the lowerer couldn't
+distinguish typedef declarations from variable declarations. Additionally, TypedefName
+was mapped to I64 in type_spec_to_ir without any resolution mechanism.
 
-Root cause: The IR Load instruction loads with type I8 for char, but when the value
-is then used in a comparison or arithmetic with I32/I64 operands, the sign-extension
-is applied uniformly. For unsigned types (U8, U16), zero-extension should be used.
+Fix applied:
+- Added is_typedef field to Declaration AST struct
+- Set is_typedef in parser for both global and local declarations
+- Added typedefs HashMap<String, TypeSpecifier> to Lowerer struct
+- Added seed_builtin_typedefs() for standard C typedef names (size_t, uint8_t, etc.)
+- Added resolve_type_spec() to follow typedef chains
+- Skip typedef declarations in lower_global_decl and lower_local_decl (register mapping instead)
+- Updated type_spec_to_ir, type_spec_to_ctype, sizeof_type, compute_decl_info,
+  and get_struct_layout_for_type to resolve typedefs before processing
 
-Fix needed:
-- In backend codegen (x86/arm/riscv), when loading I8/I16 values that are unsigned
-  (U8/U16 types), use movzx/uxtb instead of movsx/sxtb for widening
-- Alternatively, fix in IR lowering to emit explicit ZExt/SExt instructions based
-  on the type's signedness
-
-Status: In progress
+Status: Complete

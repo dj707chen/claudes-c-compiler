@@ -53,6 +53,7 @@ impl Lowerer {
 
     /// Get the cached struct layout for a TypeSpecifier, if it's a struct/union type.
     pub(super) fn get_struct_layout_for_type(&self, ts: &TypeSpecifier) -> Option<StructLayout> {
+        let ts = self.resolve_type_spec(ts);
         match ts {
             TypeSpecifier::Struct(tag, Some(fields)) => {
                 // Inline struct definition: compute layout directly
