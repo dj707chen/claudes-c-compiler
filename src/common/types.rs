@@ -221,19 +221,33 @@ impl StructLayout {
     }
 
     /// Resolve which field index an initializer targets, given either a field designator
-    /// or a positional index that skips unnamed (anonymous) fields.
+    /// or a positional index that skips unnamed bitfield fields.
     ///
     /// `designator_name`: If Some, look up the field by name.
     /// `current_idx`: The current positional index (used when no designator).
+    ///
+    /// Per C11 6.7.9p9, unnamed members of structure types do not participate in
+    /// initialization. Anonymous struct/union members (empty name, no bit_width) DO
+    /// participate. Unnamed bitfields (empty name, has bit_width) do NOT.
     ///
     /// Returns the resolved field index, or `None` if no valid field found.
     pub fn resolve_init_field_idx(&self, designator_name: Option<&str>, current_idx: usize) -> Option<usize> {
         if let Some(name) = designator_name {
             self.fields.iter().position(|f| f.name == name)
         } else {
-            // Positional init: include anonymous struct/union members (they receive
-            // initializer data like any other field in C).
-            if current_idx < self.fields.len() { Some(current_idx) } else { None }
+            // Positional init: skip unnamed bitfields (empty name + has bit_width).
+            // Anonymous struct/union members (empty name, no bit_width) still participate.
+            let mut idx = current_idx;
+            while idx < self.fields.len() {
+                let f = &self.fields[idx];
+                if f.name.is_empty() && f.bit_width.is_some() {
+                    // Unnamed bitfield: skip it
+                    idx += 1;
+                } else {
+                    return Some(idx);
+                }
+            }
+            None
         }
     }
 

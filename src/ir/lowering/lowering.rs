@@ -1449,10 +1449,13 @@ impl Lowerer {
                             match &item.init {
                                 Initializer::List(sub_items) => {
                                     // Check if this is a sub-array (multi-dim array of structs).
-                                    // If sub_items contain Lists, they are struct inits for a row.
-                                    // Otherwise, sub_items are field inits for a single struct.
-                                    let is_subarray = !sub_items.is_empty()
-                                        && sub_items.iter().any(|si| matches!(&si.init, Initializer::List(_)));
+                                    // A sub-array means outer_stride > struct_size (multi-dim array)
+                                    // AND all sub_items are Lists (each representing a full struct init).
+                                    // For 1D arrays where struct fields include sub-struct braces,
+                                    // outer_stride == struct_size, so we don't misidentify them.
+                                    let is_subarray = outer_stride > struct_size
+                                        && !sub_items.is_empty()
+                                        && sub_items.iter().all(|si| matches!(&si.init, Initializer::List(_)));
                                     if is_subarray {
                                         // Multi-dimensional: sub_items are struct elements in a row.
                                         // base_offset is the start of this row in the byte buffer.

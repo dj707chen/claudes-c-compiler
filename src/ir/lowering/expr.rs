@@ -1947,6 +1947,10 @@ impl Lowerer {
                             src: src_val,
                             size: field.ty.size(),
                         });
+                    } else if let (Some(bit_offset), Some(bit_width)) = (field.bit_offset, field.bit_width) {
+                        // Bitfield: use read-modify-write to pack value at correct bit position
+                        let val = self.lower_and_cast_init_expr(expr, field_ty);
+                        self.store_bitfield(field_addr, field_ty, bit_offset, bit_width, val);
                     } else {
                         let val = self.lower_and_cast_init_expr(expr, field_ty);
                         self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
