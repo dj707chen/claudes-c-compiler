@@ -1,0 +1,13 @@
+Task: Deduplicate backend codegen logic across x86/arm/riscv
+Status: IN PROGRESS
+
+Goal: Extract shared cast classification logic, parameter classification helpers,
+and float detection patterns from all three backend codegen files into the shared
+codegen_shared.rs module. This eliminates ~300+ lines of duplicated code and
+fixes the latent bug where all three backends silently emit fadd for unsupported
+float ops.
+
+Approach:
+1. Add CastKind enum to classify_cast() - shared classification, arch-specific emission
+2. Extract shared float detection patterns in emit_binop
+3. Clean up completed task files (fix_long_double_variadic_passing is DONE)
