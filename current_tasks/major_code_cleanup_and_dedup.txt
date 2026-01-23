@@ -1,0 +1,16 @@
+Task: Major Code Cleanup and Deduplication
+Status: In Progress
+
+Goal: Reduce code duplication, remove dead code, extract helper functions,
+and fix spaghetti patterns across the compiler codebase.
+
+Key areas:
+1. Remove dead code (unused functions in types.rs, lvalue.rs, preprocessor)
+2. Extract duplicated preprocessor helpers (is_ident_start/cont, literal skip)
+3. Extract parser helpers (skip_cv_qualifiers, skip_array_brackets, precedence climbing)
+4. Consolidate expr.rs duplicated patterns (short_circuit, inc_dec, maybe_narrow)
+5. Extract stmt.rs GEP+Store pattern into helpers
+6. Consolidate types.rs struct/union duplication
+7. Fix trivial spaghetti (identical branches, pointless if/else)
+
+This is a refactoring-only change that preserves behavior.
