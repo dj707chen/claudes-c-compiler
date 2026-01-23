@@ -1101,11 +1101,15 @@ impl ArchCodegen for ArmCodegen {
             gp_tmp_idx += 1;
         }
 
-        // Phase 2b: Load FP register args directly into d0-d7 (or s0-s7, q0-q7 for F128).
+        // Phase 2b: Load FP register args into d0-d7 (or s0-s7, q0-q7 for F128).
         // FP regs don't conflict with GP temp regs, so this is safe.
-        // Process non-F128 float args first, then F128 args.
-        // F128 variables need __extenddftf2 which clobbers q0, so we process them last
-        // in reverse order to avoid clobbering previously set Q registers.
+        //
+        // IMPORTANT: __extenddftf2 (used for F128 variable args) clobbers all
+        // caller-saved FP registers (q0-q7). So we must:
+        // 1. First convert all F128 variable args and save results to temp stack slots
+        // 2. Then load F128 constants directly into their target Q registers
+        // 3. Then load the saved F128 results into their target Q registers
+        // 4. Finally load non-F128 float/double args (which won't be clobbered)
         let mut fp_reg_idx = 0usize;
 
         // First pass: assign FP register indices to all 'f' and 'q' args
@@ -1117,61 +1121,82 @@ impl ArchCodegen for ArmCodegen {
             fp_reg_idx += 1;
         }
 
-        // Second pass: load F128 args into Q registers FIRST.
-        // __extenddftf2 uses d0 as input and returns f128 in q0, so it clobbers d0.
-        // We must do this before loading non-F128 FP args into d0-d7.
-        // Process F128 in reverse order so __extenddftf2 result (q0) doesn't clobber
-        // previously loaded Q registers. For constants, we can load directly.
-        for &(arg_i, reg_i) in fp_reg_assignments.iter().rev() {
-            if arg_classes[arg_i] != 'q' { continue; } // only F128
-            match &args[arg_i] {
-                Operand::Const(c) => {
-                    let f64_val = match c {
-                        IrConst::LongDouble(v) => *v,
-                        IrConst::F64(v) => *v,
-                        _ => c.to_f64().unwrap_or(0.0),
-                    };
-                    let bytes = crate::ir::ir::f64_to_f128_bytes(f64_val);
-                    let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-                    let hi = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-                    // Load f128 constant into qN via x0/x1 and temp stack space
-                    self.emit_load_imm64("x0", lo as i64);
-                    self.emit_load_imm64("x1", hi as i64);
-                    self.state.emit("    stp x0, x1, [sp, #-16]!");
-                    self.state.emit(&format!("    ldr q{}, [sp]", reg_i));
-                    self.state.emit("    add sp, sp, #16");
-                }
-                Operand::Value(v) => {
-                    // Variable: load f64 bit pattern, convert to f128 via __extenddftf2
-                    if stack_arg_space > 0 {
-                        if let Some(slot) = self.state.get_slot(v.0) {
-                            let adjusted = slot.0 + stack_arg_space as i64;
-                            self.emit_load_from_sp("x0", adjusted, "ldr");
-                        } else {
-                            self.state.emit("    mov x0, #0");
-                        }
+        // Count F128 variable args that need __extenddftf2
+        let f128_var_count: usize = fp_reg_assignments.iter()
+            .filter(|&&(arg_i, _)| arg_classes[arg_i] == 'q' && matches!(&args[arg_i], Operand::Value(_)))
+            .count();
+
+        // If we have F128 variable args, allocate temp stack space for their results.
+        // Each F128 value is 16 bytes. We save to temp stack because __extenddftf2
+        // clobbers ALL caller-saved FP registers (q0-q7).
+        let f128_temp_space = f128_var_count * 16;
+        let f128_temp_space_aligned = (f128_temp_space + 15) & !15;
+        if f128_temp_space_aligned > 0 {
+            self.emit_sub_sp(f128_temp_space_aligned as i64);
+        }
+
+        // Second pass: Convert F128 variable args via __extenddftf2 and save to temp stack
+        let mut f128_temp_idx = 0usize;
+        let mut f128_temp_slots: Vec<(usize, usize)> = Vec::new(); // (fp_reg_index, temp_slot_offset)
+        for &(arg_i, reg_i) in &fp_reg_assignments {
+            if arg_classes[arg_i] != 'q' { continue; }
+            if let Operand::Value(v) = &args[arg_i] {
+                if stack_arg_space > 0 || f128_temp_space_aligned > 0 {
+                    if let Some(slot) = self.state.get_slot(v.0) {
+                        let adjusted = slot.0 + stack_arg_space as i64 + f128_temp_space_aligned as i64;
+                        self.emit_load_from_sp("x0", adjusted, "ldr");
                     } else {
-                        self.operand_to_x0(&args[arg_i]);
+                        self.state.emit("    mov x0, #0");
                     }
-                    self.state.emit("    fmov d0, x0");
-                    // Save GP temp regs (x9-x10) that may be clobbered
-                    self.state.emit("    stp x9, x10, [sp, #-16]!");
-                    self.state.emit("    bl __extenddftf2");
-                    self.state.emit("    ldp x9, x10, [sp], #16");
-                    // __extenddftf2 returns f128 in q0
-                    if reg_i != 0 {
-                        // Move q0 to target qN using NEON move
-                        self.state.emit(&format!("    mov v{}.16b, v0.16b", reg_i));
-                    }
-                    // If reg_i == 0, result is already in q0
+                } else {
+                    self.operand_to_x0(&args[arg_i]);
                 }
+                self.state.emit("    fmov d0, x0");
+                self.state.emit("    stp x9, x10, [sp, #-16]!");
+                self.state.emit("    bl __extenddftf2");
+                self.state.emit("    ldp x9, x10, [sp], #16");
+                // Save the f128 result (in q0) to temp stack slot
+                let temp_off = f128_temp_idx * 16;
+                self.state.emit(&format!("    str q0, [sp, #{}]", temp_off));
+                f128_temp_slots.push((reg_i, temp_off));
+                f128_temp_idx += 1;
             }
         }
 
-        // Third pass: load non-F128 FP args into d0-d7/s0-s7 AFTER F128 conversion.
-        // This ensures __extenddftf2 (which clobbers d0) doesn't overwrite our FP args.
+        // Third pass: Load F128 constants directly into target Q registers
         for &(arg_i, reg_i) in &fp_reg_assignments {
-            if arg_classes[arg_i] == 'q' { continue; } // skip F128 (already done)
+            if arg_classes[arg_i] != 'q' { continue; }
+            if let Operand::Const(c) = &args[arg_i] {
+                let f64_val = match c {
+                    IrConst::LongDouble(v) => *v,
+                    IrConst::F64(v) => *v,
+                    _ => c.to_f64().unwrap_or(0.0),
+                };
+                let bytes = crate::ir::ir::f64_to_f128_bytes(f64_val);
+                let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+                let hi = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+                self.emit_load_imm64("x0", lo as i64);
+                self.emit_load_imm64("x1", hi as i64);
+                self.state.emit("    stp x0, x1, [sp, #-16]!");
+                self.state.emit(&format!("    ldr q{}, [sp]", reg_i));
+                self.state.emit("    add sp, sp, #16");
+            }
+        }
+
+        // Fourth pass: Load saved F128 variable results from temp stack into target Q regs
+        for &(reg_i, temp_off) in &f128_temp_slots {
+            self.state.emit(&format!("    ldr q{}, [sp, #{}]", reg_i, temp_off));
+        }
+
+        // Deallocate F128 temp space
+        if f128_temp_space_aligned > 0 {
+            self.emit_add_sp(f128_temp_space_aligned as i64);
+        }
+
+        // Fifth pass: Load non-F128 FP args (float/double) into their target s/d registers.
+        // This is done LAST because __extenddftf2 clobbers all caller-saved FP regs (q0-q7).
+        for &(arg_i, reg_i) in &fp_reg_assignments {
+            if arg_classes[arg_i] == 'q' { continue; }
             let arg_ty = if arg_i < arg_types.len() { Some(arg_types[arg_i]) } else { None };
             if stack_arg_space > 0 {
                 match &args[arg_i] {
