@@ -1,0 +1,21 @@
+[package]
+name = "ccc"
+version = "0.1.0"
+edition = "2021"
+description = "A C compiler targeting x86-64, ARM64, and RISC-V"
+
+[[bin]]
+name = "ccc"
+path = "src/main.rs"
+
+[[bin]]
+name = "ccc-x86"
+path = "src/main.rs"
+
+[[bin]]
+name = "ccc-arm"
+path = "src/main.rs"
+
+[[bin]]
+name = "ccc-riscv"
+path = "src/main.rs"

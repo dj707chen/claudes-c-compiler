@@ -1,0 +1,10 @@
+Implement a real C preprocessor:
+- #define with macro expansion (object-like and function-like macros)
+- #include with file resolution (system headers from /usr/include)
+- #if, #ifdef, #ifndef, #elif, #else, #endif with expression evaluation
+- Predefined macros (__LINE__, __FILE__, __DATE__, __TIME__, etc.)
+- Token pasting (##) and stringification (#)
+
+This is critical for passing tests that use #include <stdio.h> properly
+rather than relying on gcc's assembler/linker to resolve symbols.
+Many test failures are due to missing preprocessor support.
