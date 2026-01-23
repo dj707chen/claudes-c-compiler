@@ -1,0 +1,21 @@
+Implement __builtin_va_arg parser and codegen support.
+
+Problem: __builtin_va_arg(ap, type) is a special construct where the second
+argument is a type, not an expression. Our parser currently doesn't handle
+this, causing the type name to be treated as an undeclared identifier.
+
+This blocks: Lua (lobject.c uses __builtin_va_arg with typedef types like
+l_uacInt and l_uacNumber).
+
+Fix needed:
+1. Parser: Recognize __builtin_va_arg as a special expression, parse the
+   second argument as a type-name (not expression).
+2. IR: Add a VaArg IR instruction that takes a va_list pointer and a type.
+3. Codegen: Implement the System V AMD64 va_arg ABI:
+   - For GP types: load from reg_save_area or overflow_arg_area
+   - For FP types: load from reg_save_area (FP area) or overflow_arg_area
+   - Update gp_offset/fp_offset/overflow_arg_area accordingly
+
+Also need: __builtin_va_start, __builtin_va_end, __builtin_va_copy with
+proper ABI support. Currently these might be mapped to libc functions
+but the actual va_list struct layout needs to match the ABI.

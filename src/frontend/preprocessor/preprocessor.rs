@@ -355,8 +355,13 @@ impl Preprocessor {
                 is_predefined: true,
             });
 
-            // Check for preprocessor directive
-            if trimmed.starts_with('#') && pending_line.is_empty() {
+            // Check for preprocessor directive.
+            // Preprocessor directives take priority even if we're accumulating
+            // a multi-line macro invocation (e.g., #ifdef inside an expression).
+            if trimmed.starts_with('#') {
+                // If we're accumulating a multi-line expression with unbalanced parens,
+                // we need to handle directives (#ifdef, #endif, etc.) while preserving
+                // the pending accumulation.
                 let include_result = self.process_directive(trimmed, line_num + 1);
                 if let Some(included_content) = include_result {
                     // An #include was processed; insert the preprocessed content
@@ -370,7 +375,12 @@ impl Preprocessor {
                     }
                 }
                 // Emit a newline to preserve line numbers
-                output.push('\n');
+                if !pending_line.is_empty() {
+                    // We're inside a multi-line accumulation; track newlines
+                    pending_newlines += 1;
+                } else {
+                    output.push('\n');
+                }
             } else if self.conditionals.is_active() {
                 // Regular line - expand macros if we're in an active conditional
                 // Handle multi-line macro invocations by checking for unbalanced parens
@@ -414,7 +424,12 @@ impl Preprocessor {
                 }
             } else {
                 // In an inactive conditional block - skip the line
-                output.push('\n');
+                if !pending_line.is_empty() {
+                    // Preserve line count for pending multi-line accumulation
+                    pending_newlines += 1;
+                } else {
+                    output.push('\n');
+                }
             }
         }
 

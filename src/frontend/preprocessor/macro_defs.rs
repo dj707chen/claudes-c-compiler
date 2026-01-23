@@ -152,6 +152,35 @@ impl MacroTable {
                             expanding.insert(ident.clone());
                             let expanded = self.expand_text(&mac.body, expanding);
                             expanding.remove(&ident);
+
+                            // Check if the expansion result is a function-like macro name
+                            // followed by '(' in the remaining text. This handles the
+                            // pattern: #define BAR FOO  then  BAR(args) -> FOO(args)
+                            let expanded_trimmed = expanded.trim();
+                            if !expanded_trimmed.is_empty() && is_ident_start(expanded_trimmed.chars().next().unwrap())
+                                && expanded_trimmed.chars().all(|c| is_ident_cont(c))
+                                && !expanding.contains(expanded_trimmed)
+                            {
+                                if let Some(target_mac) = self.macros.get(expanded_trimmed) {
+                                    if target_mac.is_function_like {
+                                        // Check if '(' follows in the remaining text
+                                        let mut j = i;
+                                        while j < len && chars[j].is_whitespace() {
+                                            j += 1;
+                                        }
+                                        if j < len && chars[j] == '(' {
+                                            // Parse arguments and expand as function-like macro
+                                            let (args, end_pos) = self.parse_macro_args(&chars, j);
+                                            i = end_pos;
+                                            let target_mac_clone = target_mac.clone();
+                                            let func_expanded = self.expand_function_macro(&target_mac_clone, &args, expanding);
+                                            result.push_str(&func_expanded);
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+
                             result.push_str(&expanded);
                             continue;
                         }
@@ -286,28 +315,160 @@ impl MacroTable {
     }
 
     /// Expand a function-like macro with given arguments.
+    ///
+    /// Per C11 §6.10.3.1: Arguments are fully macro-expanded before substitution
+    /// into the body, EXCEPT when the parameter is used with # (stringify) or
+    /// ## (token paste). After substitution, the result is rescanned with the
+    /// current macro name suppressed to prevent infinite recursion.
     fn expand_function_macro(
         &self,
         mac: &MacroDef,
         args: &[String],
         expanding: &mut HashSet<String>,
     ) -> String {
+        // Step 1: Determine which parameters are used with # or ## (these get raw args)
+        let paste_params = self.find_paste_and_stringify_params(&mac.body, &mac.params, mac.is_variadic);
+
+        // Step 2: Prescan - expand arguments that are NOT used with # or ##
+        // Per the standard, argument prescan uses the current expanding set
+        // (but NOT the macro being expanded itself - that's only suppressed during rescan)
+        let expanded_args: Vec<String> = args.iter().enumerate().map(|(idx, arg)| {
+            if idx < mac.params.len() && paste_params.contains(&idx) {
+                // Used with # or ## - don't expand
+                arg.clone()
+            } else {
+                // Normal argument - expand macros in it
+                self.expand_text(arg, expanding)
+            }
+        }).collect();
+
         let mut body = mac.body.clone();
 
-        // First handle stringification (#param) and token pasting (##)
+        // Step 3: Handle stringification (#param) and token pasting (##)
+        // These use the RAW (unexpanded) arguments
         body = self.handle_stringify_and_paste(&body, &mac.params, args, mac.is_variadic);
 
-        // Then substitute parameters
-        body = self.substitute_params(&body, &mac.params, args, mac.is_variadic);
+        // Step 4: Substitute parameters with expanded arguments
+        body = self.substitute_params(&body, &mac.params, &expanded_args, mac.is_variadic);
 
-        // Recursively expand
+        // Step 5: Rescan with the current macro name suppressed
         expanding.insert(mac.name.clone());
         let result = self.expand_text(&body, expanding);
         expanding.remove(&mac.name);
         result
     }
 
+    /// Find parameter indices that are used with # (stringify) or ## (token paste).
+    /// These parameters should receive raw (unexpanded) arguments.
+    fn find_paste_and_stringify_params(&self, body: &str, params: &[String], is_variadic: bool) -> HashSet<usize> {
+        let mut result = HashSet::new();
+        let chars: Vec<char> = body.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+
+        while i < len {
+            if chars[i] == '#' && i + 1 < len && chars[i + 1] == '#' {
+                // Token paste: ## - mark both the token before and after
+                // Find identifier before ##
+                let mut j = i;
+                // Skip whitespace before ##
+                while j > 0 && (chars[j - 1] == ' ' || chars[j - 1] == '\t') {
+                    j -= 1;
+                }
+                // Read identifier backwards
+                let end = j;
+                while j > 0 && is_ident_cont(chars[j - 1]) {
+                    j -= 1;
+                }
+                if j < end {
+                    let ident: String = chars[j..end].iter().collect();
+                    if let Some(idx) = params.iter().position(|p| p == &ident) {
+                        result.insert(idx);
+                    }
+                    if ident == "__VA_ARGS__" && is_variadic {
+                        // Mark all variadic args
+                        for idx in params.len()..100 {
+                            result.insert(idx);
+                        }
+                    }
+                }
+
+                // Find identifier after ##
+                i += 2;
+                while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+                    i += 1;
+                }
+                if i < len && is_ident_start(chars[i]) {
+                    let start = i;
+                    while i < len && is_ident_cont(chars[i]) {
+                        i += 1;
+                    }
+                    let ident: String = chars[start..i].iter().collect();
+                    if let Some(idx) = params.iter().position(|p| p == &ident) {
+                        result.insert(idx);
+                    }
+                    if ident == "__VA_ARGS__" && is_variadic {
+                        for idx in params.len()..100 {
+                            result.insert(idx);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if chars[i] == '#' && i + 1 < len && chars[i + 1] != '#' {
+                // Stringification: # - mark the parameter after it
+                i += 1;
+                while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+                    i += 1;
+                }
+                if i < len && is_ident_start(chars[i]) {
+                    let start = i;
+                    while i < len && is_ident_cont(chars[i]) {
+                        i += 1;
+                    }
+                    let ident: String = chars[start..i].iter().collect();
+                    if let Some(idx) = params.iter().position(|p| p == &ident) {
+                        result.insert(idx);
+                    }
+                    if ident == "__VA_ARGS__" && is_variadic {
+                        for idx in params.len()..100 {
+                            result.insert(idx);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Skip string/char literals
+            if chars[i] == '"' || chars[i] == '\'' {
+                let quote = chars[i];
+                i += 1;
+                while i < len && chars[i] != quote {
+                    if chars[i] == '\\' && i + 1 < len {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                if i < len {
+                    i += 1;
+                }
+                continue;
+            }
+
+            i += 1;
+        }
+
+        result
+    }
+
     /// Handle # (stringify) and ## (token paste) operators.
+    ///
+    /// Per C11 §6.10.3.2 and §6.10.3.3:
+    /// - `#param` stringifies the raw argument
+    /// - `token ## token` pastes tokens together, with parameter substitution
+    ///   using raw (unexpanded) arguments for both sides of ##
     fn handle_stringify_and_paste(
         &self,
         body: &str,
@@ -315,29 +476,103 @@ impl MacroTable {
         args: &[String],
         is_variadic: bool,
     ) -> String {
-        let mut result = String::new();
         let chars: Vec<char> = body.chars().collect();
         let len = chars.len();
+
+        // First, check if body contains ## or #. If not, short-circuit.
+        if !body.contains('#') {
+            return body.to_string();
+        }
+
+        let mut result = String::new();
         let mut i = 0;
 
         while i < len {
             if chars[i] == '#' && i + 1 < len && chars[i + 1] == '#' {
-                // Token paste: remove whitespace around ## and join
-                // Remove trailing whitespace from result
+                // Token paste operator ##
+                // Remove trailing whitespace from the left side in result
                 while result.ends_with(' ') || result.ends_with('\t') {
                     result.pop();
                 }
-                i += 2;
-                // Skip leading whitespace after ##
+
+                // The left side is the last token we added to result.
+                // Check if it was a parameter name that we should substitute.
+                // Extract the last identifier from result (if any) for parameter substitution
+                let left_token = extract_trailing_ident(&result);
+                if let Some(ref left_ident) = left_token {
+                    if left_ident == "__VA_ARGS__" && is_variadic {
+                        // Replace trailing __VA_ARGS__ with raw variadic args
+                        let va_args = self.get_va_args(params, args);
+                        let trim_len = result.len() - "__VA_ARGS__".len();
+                        result.truncate(trim_len);
+                        // For GNU extension: if VA_ARGS is empty and result ends with comma, remove comma
+                        if va_args.is_empty() {
+                            while result.ends_with(' ') || result.ends_with('\t') {
+                                result.pop();
+                            }
+                            if result.ends_with(',') {
+                                result.pop();
+                            }
+                        } else {
+                            result.push_str(&va_args);
+                        }
+                    } else if let Some(idx) = params.iter().position(|p| p == left_ident) {
+                        // Replace the left-side parameter with its raw argument
+                        let trim_len = result.len() - left_ident.len();
+                        result.truncate(trim_len);
+                        let arg = args.get(idx).map(|s| s.as_str()).unwrap_or("");
+                        result.push_str(arg);
+                    }
+                }
+
+                i += 2; // skip ##
+
+                // Skip whitespace after ##
                 while i < len && (chars[i] == ' ' || chars[i] == '\t') {
                     i += 1;
                 }
-                // The next token will be pasted directly
+
+                // Read the right-side token
+                if i < len && is_ident_start(chars[i]) {
+                    let start = i;
+                    while i < len && is_ident_cont(chars[i]) {
+                        i += 1;
+                    }
+                    let right_ident: String = chars[start..i].iter().collect();
+
+                    if right_ident == "__VA_ARGS__" && is_variadic {
+                        let va_args = self.get_va_args(params, args);
+                        if va_args.is_empty() {
+                            // GNU extension: ## __VA_ARGS__ with empty args removes preceding comma
+                            while result.ends_with(' ') || result.ends_with('\t') {
+                                result.pop();
+                            }
+                            if result.ends_with(',') {
+                                result.pop();
+                            }
+                        } else {
+                            result.push_str(&va_args);
+                        }
+                    } else if let Some(idx) = params.iter().position(|p| p == &right_ident) {
+                        // Substitute parameter with raw argument
+                        let arg = args.get(idx).map(|s| s.as_str()).unwrap_or("");
+                        result.push_str(arg);
+                    } else {
+                        // Not a parameter, paste as-is
+                        result.push_str(&right_ident);
+                    }
+                } else if i < len {
+                    // Non-identifier token (e.g., number)
+                    result.push(chars[i]);
+                    i += 1;
+                }
                 continue;
             }
 
             if chars[i] == '#' && i + 1 < len && chars[i + 1] != '#' {
-                // Stringification
+                // Check that the next # is not part of a ## later
+                // (e.g., "# param" is stringify, but in "a # ## b" it's different)
+                // Stringification operator #
                 i += 1;
                 // Skip whitespace
                 while i < len && (chars[i] == ' ' || chars[i] == '\t') {
@@ -476,6 +711,31 @@ impl MacroTable {
 impl Default for MacroTable {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Extract the trailing identifier from a string, if it ends with one.
+/// Returns Some(ident) if the string ends with an identifier.
+fn extract_trailing_ident(s: &str) -> Option<String> {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.is_empty() {
+        return None;
+    }
+    let end = chars.len();
+    // The last char must be part of an identifier
+    if !is_ident_cont(chars[end - 1]) {
+        return None;
+    }
+    // Walk back to find the start of the identifier
+    let mut start = end - 1;
+    while start > 0 && is_ident_cont(chars[start - 1]) {
+        start -= 1;
+    }
+    // Verify start is valid ident start
+    if is_ident_start(chars[start]) {
+        Some(chars[start..end].iter().collect())
+    } else {
+        None
     }
 }
 
