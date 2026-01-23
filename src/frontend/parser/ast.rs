@@ -96,6 +96,7 @@ pub enum TypeSpecifier {
     LongLong,
     Float,
     Double,
+    LongDouble,
     Signed,
     Unsigned,
     UnsignedChar,

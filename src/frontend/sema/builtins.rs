@@ -82,13 +82,31 @@ static BUILTIN_MAP: LazyLock<HashMap<&'static str, BuiltinInfo>> = LazyLock::new
     m.insert("__builtin_realloc", BuiltinInfo::simple("realloc"));
     m.insert("__builtin_free", BuiltinInfo::simple("free"));
 
+    // Stack allocation
+    m.insert("__builtin_alloca", BuiltinInfo::simple("alloca"));
+    m.insert("__builtin_alloca_with_align", BuiltinInfo::simple("alloca"));
+
+    // Return address / frame address (return 0 as approximation)
+    m.insert("__builtin_return_address", BuiltinInfo::constant_i64(0));
+    m.insert("__builtin_frame_address", BuiltinInfo::constant_i64(0));
+    m.insert("__builtin_extract_return_addr", BuiltinInfo::identity());
+
     // Compiler hints (these become no-ops or identity)
     m.insert("__builtin_expect", BuiltinInfo::identity()); // returns first arg
     m.insert("__builtin_expect_with_probability", BuiltinInfo::identity());
+    m.insert("__builtin_assume_aligned", BuiltinInfo::identity());
 
     // Type queries (compile-time constants)
     m.insert("__builtin_constant_p", BuiltinInfo::constant_i64(0)); // conservative: always 0
     m.insert("__builtin_types_compatible_p", BuiltinInfo::constant_i64(0));
+
+    // Floating-point comparison builtins
+    m.insert("__builtin_isgreater", BuiltinInfo::intrinsic(BuiltinIntrinsic::FpCompare));
+    m.insert("__builtin_isgreaterequal", BuiltinInfo::intrinsic(BuiltinIntrinsic::FpCompare));
+    m.insert("__builtin_isless", BuiltinInfo::intrinsic(BuiltinIntrinsic::FpCompare));
+    m.insert("__builtin_islessequal", BuiltinInfo::intrinsic(BuiltinIntrinsic::FpCompare));
+    m.insert("__builtin_islessgreater", BuiltinInfo::intrinsic(BuiltinIntrinsic::FpCompare));
+    m.insert("__builtin_isunordered", BuiltinInfo::intrinsic(BuiltinIntrinsic::FpCompare));
 
     // Bit manipulation
     m.insert("__builtin_clz", BuiltinInfo::intrinsic(BuiltinIntrinsic::Clz));
@@ -139,6 +157,7 @@ pub enum BuiltinIntrinsic {
     Popcount,
     Bswap,
     Fence,
+    FpCompare,
 }
 
 impl BuiltinInfo {

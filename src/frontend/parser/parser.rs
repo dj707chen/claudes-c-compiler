@@ -281,9 +281,7 @@ impl Parser {
                         loop {
                             let (pname, pderived) = self.parse_declarator();
                             if let Some(ref name) = pname {
-                                // Build the full type by applying derived declarators
-                                // e.g., for `int *a`, type_spec=Int, pderived=[Pointer]
-                                // result should be Pointer(Int)
+                                // Apply derived declarators (pointers, arrays) to the type
                                 let mut full_type = type_spec.clone();
                                 for d in &pderived {
                                     match d {
@@ -294,9 +292,12 @@ impl Parser {
                                             // Array params decay to pointers
                                             full_type = TypeSpecifier::Pointer(Box::new(full_type));
                                         }
-                                        DerivedDeclarator::Function(_, _) |
+                                        DerivedDeclarator::Function(fp, fv) => {
+                                            // Function type decays to function pointer
+                                            full_type = TypeSpecifier::Pointer(Box::new(full_type));
+                                            let _ = (fp, fv); // params tracked elsewhere
+                                        }
                                         DerivedDeclarator::FunctionPointer(_, _) => {
-                                            // Function pointer parameter
                                             full_type = TypeSpecifier::Pointer(Box::new(full_type));
                                         }
                                     }
@@ -748,7 +749,11 @@ impl Parser {
         } else if has_float {
             TypeSpecifier::Float
         } else if has_double {
-            TypeSpecifier::Double // long double -> double for now
+            if long_count > 0 {
+                TypeSpecifier::LongDouble
+            } else {
+                TypeSpecifier::Double
+            }
         } else if has_struct {
             self.skip_gcc_extensions();
             let name = if let TokenKind::Identifier(n) = self.peek().clone() {

@@ -442,6 +442,7 @@ impl SemanticAnalyzer {
             TypeSpecifier::LongLong => CType::LongLong,
             TypeSpecifier::Float => CType::Float,
             TypeSpecifier::Double => CType::Double,
+            TypeSpecifier::LongDouble => CType::LongDouble,
             TypeSpecifier::Signed => CType::Int,
             TypeSpecifier::Unsigned => CType::UInt,
             TypeSpecifier::UnsignedChar => CType::UChar,
@@ -498,10 +499,13 @@ impl SemanticAnalyzer {
         fields.iter().filter_map(|f| {
             let ty = self.type_spec_to_ctype(&f.type_spec);
             let name = f.name.clone().unwrap_or_default();
+            let bit_width = f.bit_width.as_ref().and_then(|bw| {
+                self.eval_const_expr(bw).map(|v| v as u32)
+            });
             Some(crate::common::types::StructField {
                 name,
                 ty,
-                bit_width: None, // TODO: evaluate bit width expressions
+                bit_width,
             })
         }).collect()
     }
@@ -621,6 +625,7 @@ impl SemanticAnalyzer {
             TypeSpecifier::Long | TypeSpecifier::UnsignedLong | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong => 8,
             TypeSpecifier::Float => 4,
             TypeSpecifier::Double => 8,
+            TypeSpecifier::LongDouble => 16,
             TypeSpecifier::Bool => 1,
             TypeSpecifier::Pointer(_) => 8,
             TypeSpecifier::Array(elem, Some(size)) => {

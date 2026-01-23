@@ -1065,7 +1065,7 @@ impl Lowerer {
             TypeSpecifier::Long | TypeSpecifier::LongLong => IrType::I64,
             TypeSpecifier::UnsignedLong | TypeSpecifier::UnsignedLongLong => IrType::U64,
             TypeSpecifier::Float => IrType::F32,
-            TypeSpecifier::Double => IrType::F64,
+            TypeSpecifier::Double | TypeSpecifier::LongDouble => IrType::F64,
             TypeSpecifier::Pointer(_) => IrType::Ptr,
             TypeSpecifier::Array(_, _) => IrType::Ptr,
             TypeSpecifier::Struct(_, _) | TypeSpecifier::Union(_, _) => IrType::Ptr,
@@ -1088,6 +1088,7 @@ impl Lowerer {
             | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong => 8,
             TypeSpecifier::Float => 4,
             TypeSpecifier::Double => 8,
+            TypeSpecifier::LongDouble => 16,
             TypeSpecifier::Pointer(_) => 8,
             TypeSpecifier::Array(elem, Some(size_expr)) => {
                 let elem_size = self.sizeof_type(elem);
@@ -1100,10 +1101,19 @@ impl Lowerer {
             TypeSpecifier::Struct(_, Some(fields)) | TypeSpecifier::Union(_, Some(fields)) => {
                 let is_union = matches!(ts, TypeSpecifier::Union(_, _));
                 let struct_fields: Vec<StructField> = fields.iter().map(|f| {
+                    let bit_width = f.bit_width.as_ref().and_then(|bw| {
+                        self.eval_const_expr(bw).and_then(|c| match c {
+                            IrConst::I8(v) => Some(v as u32),
+                            IrConst::I16(v) => Some(v as u32),
+                            IrConst::I32(v) => Some(v as u32),
+                            IrConst::I64(v) => Some(v as u32),
+                            _ => None,
+                        })
+                    });
                     StructField {
                         name: f.name.clone().unwrap_or_default(),
                         ty: self.type_spec_to_ctype(&f.type_spec),
-                        bit_width: None,
+                        bit_width,
                     }
                 }).collect();
                 let layout = if is_union {
@@ -1207,10 +1217,15 @@ impl Lowerer {
                     if info.is_array || info.is_struct {
                         return info.alloc_size;
                     }
-                    // GCC extension: sizeof(function_type) == 1
+                    // Use CType size if available (handles long double, function types, etc.)
                     if let Some(ref ct) = info.c_type {
                         if matches!(ct, CType::Function(_)) {
+                            // GCC extension: sizeof(function_type) == 1
                             return 1;
+                        }
+                        let ct_size = ct.size();
+                        if ct_size > 0 {
+                            return ct_size;
                         }
                     }
                     return info.ty.size();
@@ -1221,6 +1236,13 @@ impl Lowerer {
                             if g.name == *name {
                                 return g.size;
                             }
+                        }
+                    }
+                    // Use CType size if available
+                    if let Some(ref ct) = ginfo.c_type {
+                        let ct_size = ct.size();
+                        if ct_size > 0 {
+                            return ct_size;
                         }
                     }
                     return ginfo.ty.size();
@@ -1530,8 +1552,10 @@ impl Lowerer {
             return (layout.size, 0, false, false, vec![]);
         }
 
-        // Regular scalar - we use 8-byte slots for each stack value
-        (8, 0, false, false, vec![])
+        // Regular scalar - use sizeof_type for the allocation size
+        // (8 bytes for most scalars, 16 for long double)
+        let scalar_size = self.sizeof_type(ts).max(8);
+        (scalar_size, 0, false, false, vec![])
     }
 
     /// Collect array dimensions from nested Array type specifiers.
@@ -1598,6 +1622,7 @@ impl Lowerer {
             TypeSpecifier::UnsignedLongLong => CType::ULongLong,
             TypeSpecifier::Float => CType::Float,
             TypeSpecifier::Double => CType::Double,
+            TypeSpecifier::LongDouble => CType::LongDouble,
             TypeSpecifier::Pointer(inner) => CType::Pointer(Box::new(self.type_spec_to_ctype(inner))),
             TypeSpecifier::Array(elem, size_expr) => {
                 let elem_ctype = self.type_spec_to_ctype(elem);
@@ -1632,10 +1657,19 @@ impl Lowerer {
 
         if let Some(fs) = fields {
             let struct_fields: Vec<StructField> = fs.iter().map(|f| {
+                let bit_width = f.bit_width.as_ref().and_then(|bw| {
+                    self.eval_const_expr(bw).and_then(|c| match c {
+                        IrConst::I8(v) => Some(v as u32),
+                        IrConst::I16(v) => Some(v as u32),
+                        IrConst::I32(v) => Some(v as u32),
+                        IrConst::I64(v) => Some(v as u32),
+                        _ => None,
+                    })
+                });
                 StructField {
                     name: f.name.clone().unwrap_or_default(),
                     ty: self.type_spec_to_ctype(&f.type_spec),
-                    bit_width: None,
+                    bit_width,
                 }
             }).collect();
             make(crate::common::types::StructType {
@@ -1649,7 +1683,7 @@ impl Lowerer {
                     StructField {
                         name: f.name.clone(),
                         ty: f.ty.clone(),
-                        bit_width: None,
+                        bit_width: f.bit_width,
                     }
                 }).collect();
                 make(crate::common::types::StructType {

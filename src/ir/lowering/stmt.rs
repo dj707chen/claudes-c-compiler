@@ -513,7 +513,12 @@ impl Lowerer {
                         offset: Operand::Const(IrConst::I64(field_offset as i64)),
                         ty: field_ty,
                     });
-                    self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
+                    if let (Some(bit_offset), Some(bit_width)) = (field.bit_offset, field.bit_width) {
+                        // Bitfield: read-modify-write
+                        self.store_bitfield(field_addr, field_ty, bit_offset, bit_width, val);
+                    } else {
+                        self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
+                    }
                 }
                 Initializer::List(sub_items) => {
                     let field_addr = self.fresh_value();

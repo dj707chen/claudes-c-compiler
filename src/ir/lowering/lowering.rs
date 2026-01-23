@@ -379,10 +379,15 @@ impl Lowerer {
                 // Emit the alloca that receives the argument value from the register
                 let alloca = self.fresh_value();
                 let ty = param.ty;
+                // Use sizeof from TypeSpecifier for correct long double size (16 bytes)
+                let param_size = func.params.get(i)
+                    .map(|p| self.sizeof_type(&p.type_spec))
+                    .unwrap_or(ty.size())
+                    .max(ty.size());
                 self.emit(Instruction::Alloca {
                     dest: alloca,
                     ty,
-                    size: ty.size(),
+                    size: param_size,
                 });
 
                 if is_struct_param {
@@ -429,7 +434,7 @@ impl Lowerer {
                         pointee_type,
                         struct_layout,
                         is_struct: false,
-                        alloc_size: ty.size(),
+                        alloc_size: param_size,
                         array_dim_strides,
                         c_type,
                         is_bool,
@@ -1185,7 +1190,7 @@ impl Lowerer {
                     }
                 }
                 _ => {
-                    // Scalar field
+                    // Scalar field (possibly bitfield)
                     let field_ir_ty = IrType::from_ctype(&field_layout.ty);
                     let val = match &item.init {
                         Initializer::Expr(expr) => {
@@ -1200,7 +1205,13 @@ impl Lowerer {
                             } else { IrConst::I64(0) }
                         }
                     };
-                    self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
+
+                    if let (Some(bit_offset), Some(bit_width)) = (field_layout.bit_offset, field_layout.bit_width) {
+                        // Bitfield: pack into the storage unit bytes using read-modify-write
+                        self.write_bitfield_to_bytes(bytes, field_offset, &val, field_ir_ty, bit_offset, bit_width);
+                    } else {
+                        self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
+                    }
                     item_idx += 1;
                 }
             }
@@ -1443,6 +1454,44 @@ impl Lowerer {
         }
     }
 
+    /// Write a bitfield value into a byte buffer at the given offset.
+    /// Uses read-modify-write to pack the value at the correct bit position.
+    fn write_bitfield_to_bytes(&self, bytes: &mut [u8], offset: usize, val: &IrConst, ty: IrType, bit_offset: u32, bit_width: u32) {
+        let int_val = match val {
+            IrConst::I8(v) => *v as u64,
+            IrConst::I16(v) => *v as u64,
+            IrConst::I32(v) => *v as u64,
+            IrConst::I64(v) => *v as u64,
+            IrConst::Zero => 0,
+            IrConst::F32(v) => *v as u64,
+            IrConst::F64(v) => *v as u64,
+        };
+
+        let size = ty.size();
+        let mask = if bit_width >= 64 { u64::MAX } else { (1u64 << bit_width) - 1 };
+        let field_val = (int_val & mask) << bit_offset;
+        let clear_mask = !(mask << bit_offset);
+
+        // Read current storage unit value (little-endian)
+        let mut current = 0u64;
+        for i in 0..size {
+            if offset + i < bytes.len() {
+                current |= (bytes[offset + i] as u64) << (i * 8);
+            }
+        }
+
+        // Modify: clear field bits and OR in new value
+        let new_val = (current & clear_mask) | field_val;
+
+        // Write back (little-endian)
+        let le = new_val.to_le_bytes();
+        for i in 0..size {
+            if offset + i < bytes.len() {
+                bytes[offset + i] = le[i];
+            }
+        }
+    }
+
     /// Write a struct initializer list to a byte buffer at the given base offset.
     /// Handles nested struct fields recursively.
     fn write_struct_init_to_bytes(
@@ -1492,7 +1541,11 @@ impl Lowerer {
                     } else {
                         let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
                         let field_ir_ty = IrType::from_ctype(&field_layout.ty);
-                        self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
+                        if let (Some(bit_offset), Some(bit_width)) = (field_layout.bit_offset, field_layout.bit_width) {
+                            self.write_bitfield_to_bytes(bytes, field_offset, &val, field_ir_ty, bit_offset, bit_width);
+                        } else {
+                            self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
+                        }
                     }
                 }
                 Initializer::List(sub_items) => {

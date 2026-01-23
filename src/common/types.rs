@@ -14,6 +14,7 @@ pub enum CType {
     ULongLong,
     Float,
     Double,
+    LongDouble,
     Pointer(Box<CType>),
     Array(Box<CType>, Option<usize>),
     Function(Box<FunctionType>),
@@ -67,30 +68,91 @@ pub struct StructFieldLayout {
     pub name: String,
     pub offset: usize,
     pub ty: CType,
+    /// For bitfields: bit offset within the storage unit at `offset`.
+    pub bit_offset: Option<u32>,
+    /// For bitfields: width in bits.
+    pub bit_width: Option<u32>,
 }
 
 impl StructLayout {
     /// Compute the layout for a struct (fields laid out sequentially with alignment padding).
+    /// Supports bitfield packing: adjacent bitfields share storage units.
     pub fn for_struct(fields: &[StructField]) -> Self {
         let mut offset = 0usize;
         let mut max_align = 1usize;
         let mut field_layouts = Vec::with_capacity(fields.len());
+
+        // Track current bitfield storage unit
+        let mut bf_unit_offset = 0usize; // byte offset of current bitfield storage unit
+        let mut bf_bit_pos = 0u32;       // current bit position within the storage unit
+        let mut bf_unit_size = 0usize;   // size of the current storage unit in bytes
+        let mut in_bitfield = false;
 
         for field in fields {
             let field_align = field.ty.align();
             let field_size = field.ty.size();
             max_align = max_align.max(field_align);
 
-            // Align the current offset
-            offset = align_up(offset, field_align);
+            if let Some(bw) = field.bit_width {
+                if bw == 0 {
+                    // Zero-width bitfield: force alignment to next storage unit boundary
+                    if in_bitfield {
+                        offset = bf_unit_offset + bf_unit_size;
+                    }
+                    offset = align_up(offset, field_align);
+                    in_bitfield = false;
+                    bf_bit_pos = 0;
+                    // Don't emit a field layout for zero-width bitfields
+                    continue;
+                }
 
-            field_layouts.push(StructFieldLayout {
-                name: field.name.clone(),
-                offset,
-                ty: field.ty.clone(),
-            });
+                let unit_bits = (field_size * 8) as u32;
 
-            offset += field_size;
+                if !in_bitfield || bf_bit_pos + bw > unit_bits || bf_unit_size != field_size {
+                    // Start a new storage unit
+                    if in_bitfield {
+                        offset = bf_unit_offset + bf_unit_size;
+                    }
+                    offset = align_up(offset, field_align);
+                    bf_unit_offset = offset;
+                    bf_unit_size = field_size;
+                    bf_bit_pos = 0;
+                    in_bitfield = true;
+                }
+
+                field_layouts.push(StructFieldLayout {
+                    name: field.name.clone(),
+                    offset: bf_unit_offset,
+                    ty: field.ty.clone(),
+                    bit_offset: Some(bf_bit_pos),
+                    bit_width: Some(bw),
+                });
+
+                bf_bit_pos += bw;
+            } else {
+                // Regular (non-bitfield) field
+                if in_bitfield {
+                    offset = bf_unit_offset + bf_unit_size;
+                    in_bitfield = false;
+                }
+
+                offset = align_up(offset, field_align);
+
+                field_layouts.push(StructFieldLayout {
+                    name: field.name.clone(),
+                    offset,
+                    ty: field.ty.clone(),
+                    bit_offset: None,
+                    bit_width: None,
+                });
+
+                offset += field_size;
+            }
+        }
+
+        // Account for trailing bitfield
+        if in_bitfield {
+            offset = bf_unit_offset + bf_unit_size;
         }
 
         // Pad total size to struct alignment
@@ -120,6 +182,8 @@ impl StructLayout {
                 name: field.name.clone(),
                 offset: 0, // All union fields start at offset 0
                 ty: field.ty.clone(),
+                bit_offset: None,
+                bit_width: None,
             });
         }
 
@@ -202,6 +266,11 @@ impl StructLayout {
         }
         None
     }
+
+    /// Look up a field by name, returning full layout info including bitfield details.
+    pub fn field_layout(&self, name: &str) -> Option<&StructFieldLayout> {
+        self.fields.iter().find(|f| f.name == name)
+    }
 }
 
 /// Align `offset` up to the next multiple of `align`.
@@ -222,6 +291,7 @@ impl CType {
             CType::LongLong | CType::ULongLong => 8,
             CType::Float => 4,
             CType::Double => 8,
+            CType::LongDouble => 16,
             CType::Pointer(_) => 8,
             CType::Array(elem, Some(n)) => elem.size() * n,
             CType::Array(_, None) => 8, // incomplete array treated as pointer
@@ -249,6 +319,7 @@ impl CType {
             CType::LongLong | CType::ULongLong => 8,
             CType::Float => 4,
             CType::Double => 8,
+            CType::LongDouble => 16,
             CType::Pointer(_) => 8,
             CType::Array(elem, _) => elem.align(),
             CType::Function(_) => 8,
@@ -357,7 +428,7 @@ impl IrType {
             CType::Long | CType::LongLong => IrType::I64,
             CType::ULong | CType::ULongLong => IrType::U64,
             CType::Float => IrType::F32,
-            CType::Double => IrType::F64,
+            CType::Double | CType::LongDouble => IrType::F64,
             CType::Pointer(_) | CType::Array(_, _) | CType::Function(_) => IrType::Ptr,
             CType::Struct(_) | CType::Union(_) => IrType::Ptr, // TODO: handle aggregates properly
         }

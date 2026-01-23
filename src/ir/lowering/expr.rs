@@ -4,7 +4,7 @@
 //! for each expression category. This keeps each function small and testable.
 
 use crate::frontend::parser::ast::*;
-use crate::frontend::sema::builtins::{self, BuiltinKind};
+use crate::frontend::sema::builtins::{self, BuiltinKind, BuiltinIntrinsic};
 use crate::ir::ir::*;
 use crate::common::types::{IrType, CType};
 use super::lowering::Lowerer;
@@ -69,10 +69,16 @@ impl Lowerer {
     }
 
     fn lower_identifier(&mut self, name: &str) -> Operand {
-        // Predefined identifiers: __func__, __FUNCTION__, __PRETTY_FUNCTION__
+        // Predefined function name identifiers: __func__, __FUNCTION__, __PRETTY_FUNCTION__
         if name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__" {
             return self.lower_string_literal(&self.current_function_name.clone());
         }
+
+        // NULL - treat as integer constant 0 (fallback when preprocessor doesn't expand it)
+        if name == "NULL" {
+            return Operand::Const(IrConst::I64(0));
+        }
+
 
         // Enum constants are compile-time integer values
         if let Some(&val) = self.enum_constants.get(name) {
@@ -378,6 +384,11 @@ impl Lowerer {
             return self.lower_struct_assign(lhs, rhs);
         }
 
+        // Check for bitfield assignment
+        if let Some(result) = self.try_lower_bitfield_assign(lhs, rhs) {
+            return result;
+        }
+
         let rhs_val = self.lower_expr(rhs);
         let lhs_ty = self.get_expr_type(lhs);
         let rhs_ty = self.get_expr_type(rhs);
@@ -395,6 +406,183 @@ impl Lowerer {
             return rhs_val;
         }
         rhs_val
+    }
+
+    /// Try to lower assignment to a bitfield member. Returns Some if the LHS is a bitfield.
+    fn try_lower_bitfield_assign(&mut self, lhs: &Expr, rhs: &Expr) -> Option<Operand> {
+        let (base_expr, field_name, is_pointer) = match lhs {
+            Expr::MemberAccess(base, field, _) => (base.as_ref(), field.as_str(), false),
+            Expr::PointerMemberAccess(base, field, _) => (base.as_ref(), field.as_str(), true),
+            _ => return None,
+        };
+
+        let (field_offset, storage_ty, bitfield) = if is_pointer {
+            self.resolve_pointer_member_access_full(base_expr, field_name)
+        } else {
+            self.resolve_member_access_full(base_expr, field_name)
+        };
+
+        let (bit_offset, bit_width) = bitfield?;
+
+        // Compute base address
+        let base_addr = if is_pointer {
+            let ptr_val = self.lower_expr(base_expr);
+            self.operand_to_value(ptr_val)
+        } else {
+            self.get_struct_base_addr(base_expr)
+        };
+
+        let field_addr = self.fresh_value();
+        self.emit(Instruction::GetElementPtr {
+            dest: field_addr,
+            base: base_addr,
+            offset: Operand::Const(IrConst::I64(field_offset as i64)),
+            ty: storage_ty,
+        });
+
+        // Evaluate RHS
+        let rhs_val = self.lower_expr(rhs);
+
+        // Read-modify-write the storage unit
+        self.store_bitfield(field_addr, storage_ty, bit_offset, bit_width, rhs_val.clone());
+
+        // Return the masked value (what was actually stored)
+        let mask = (1u64 << bit_width) - 1;
+        let masked = self.fresh_value();
+        self.emit(Instruction::BinOp {
+            dest: masked,
+            op: IrBinOp::And,
+            ty: IrType::I64,
+            lhs: rhs_val,
+            rhs: Operand::Const(IrConst::I64(mask as i64)),
+        });
+        Some(Operand::Value(masked))
+    }
+
+    /// Try to lower compound assignment to a bitfield member (e.g., s.bf += val).
+    fn try_lower_bitfield_compound_assign(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> Option<Operand> {
+        let (base_expr, field_name, is_pointer) = match lhs {
+            Expr::MemberAccess(base, field, _) => (base.as_ref(), field.as_str(), false),
+            Expr::PointerMemberAccess(base, field, _) => (base.as_ref(), field.as_str(), true),
+            _ => return None,
+        };
+
+        let (field_offset, storage_ty, bitfield) = if is_pointer {
+            self.resolve_pointer_member_access_full(base_expr, field_name)
+        } else {
+            self.resolve_member_access_full(base_expr, field_name)
+        };
+
+        let (bit_offset, bit_width) = bitfield?;
+
+        // Compute base address
+        let base_addr = if is_pointer {
+            let ptr_val = self.lower_expr(base_expr);
+            self.operand_to_value(ptr_val)
+        } else {
+            self.get_struct_base_addr(base_expr)
+        };
+
+        let field_addr = self.fresh_value();
+        self.emit(Instruction::GetElementPtr {
+            dest: field_addr,
+            base: base_addr,
+            offset: Operand::Const(IrConst::I64(field_offset as i64)),
+            ty: storage_ty,
+        });
+
+        // Load and extract current bitfield value
+        let loaded = self.fresh_value();
+        self.emit(Instruction::Load { dest: loaded, ptr: field_addr, ty: storage_ty });
+        let current_val = self.extract_bitfield(loaded, storage_ty, bit_offset, bit_width);
+
+        // Evaluate RHS
+        let rhs_val = self.lower_expr(rhs);
+
+        // Perform the operation
+        let is_unsigned = storage_ty.is_unsigned();
+        let ir_op = Self::compound_assign_to_ir(op, is_unsigned);
+        let result = self.fresh_value();
+        self.emit(Instruction::BinOp {
+            dest: result,
+            op: ir_op,
+            lhs: current_val,
+            rhs: rhs_val,
+            ty: IrType::I64,
+        });
+
+        // Store back via read-modify-write
+        self.store_bitfield(field_addr, storage_ty, bit_offset, bit_width, Operand::Value(result));
+
+        // Return the new value masked to bit_width
+        let mask = (1u64 << bit_width) - 1;
+        let masked = self.fresh_value();
+        self.emit(Instruction::BinOp {
+            dest: masked,
+            op: IrBinOp::And,
+            ty: IrType::I64,
+            lhs: Operand::Value(result),
+            rhs: Operand::Const(IrConst::I64(mask as i64)),
+        });
+        Some(Operand::Value(masked))
+    }
+
+    /// Store a value into a bitfield: load storage unit, clear field bits, OR in new value, store back.
+    pub(super) fn store_bitfield(&mut self, addr: Value, storage_ty: IrType, bit_offset: u32, bit_width: u32, val: Operand) {
+        let mask = (1u64 << bit_width) - 1;
+
+        // Mask the value to bit_width bits (use I64 since backend uses 64-bit regs)
+        let masked_val = self.fresh_value();
+        self.emit(Instruction::BinOp {
+            dest: masked_val,
+            op: IrBinOp::And,
+            ty: IrType::I64,
+            lhs: val,
+            rhs: Operand::Const(IrConst::I64(mask as i64)),
+        });
+
+        // Shift value to position
+        let shifted_val = if bit_offset > 0 {
+            let s = self.fresh_value();
+            self.emit(Instruction::BinOp {
+                dest: s,
+                op: IrBinOp::Shl,
+                ty: IrType::I64,
+                lhs: Operand::Value(masked_val),
+                rhs: Operand::Const(IrConst::I64(bit_offset as i64)),
+            });
+            s
+        } else {
+            masked_val
+        };
+
+        // Load current storage unit
+        let old_val = self.fresh_value();
+        self.emit(Instruction::Load { dest: old_val, ptr: addr, ty: storage_ty });
+
+        // Clear the bitfield bits: old & ~(mask << bit_offset)
+        let clear_mask = !(mask << bit_offset);
+        let cleared = self.fresh_value();
+        self.emit(Instruction::BinOp {
+            dest: cleared,
+            op: IrBinOp::And,
+            ty: IrType::I64,
+            lhs: Operand::Value(old_val),
+            rhs: Operand::Const(IrConst::I64(clear_mask as i64)),
+        });
+
+        // OR in the new value
+        let new_val = self.fresh_value();
+        self.emit(Instruction::BinOp {
+            dest: new_val,
+            op: IrBinOp::Or,
+            ty: IrType::I64,
+            lhs: Operand::Value(cleared),
+            rhs: Operand::Value(shifted_val),
+        });
+
+        // Store back
+        self.emit(Instruction::Store { val: Operand::Value(new_val), ptr: addr, ty: storage_ty });
     }
 
     /// Lower struct/union assignment using memcpy.
@@ -474,17 +662,43 @@ impl Lowerer {
             }
             BuiltinKind::ConstantI64(val) => Some(Operand::Const(IrConst::I64(*val))),
             BuiltinKind::ConstantF64(_) => Some(Operand::Const(IrConst::I64(0))), // TODO: handle float constants
-            BuiltinKind::Intrinsic(_) => {
-                let cleaned_name = name.strip_prefix("__builtin_").unwrap_or(name).to_string();
-                let arg_types: Vec<IrType> = args.iter().map(|a| self.get_expr_type(a)).collect();
-                let arg_vals: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
-                let dest = self.fresh_value();
-                let variadic = self.function_variadic.contains(cleaned_name.as_str());
-                self.emit(Instruction::Call {
-                    dest: Some(dest), func: cleaned_name,
-                    args: arg_vals, arg_types, return_type: IrType::I64, is_variadic: variadic,
-                });
-                Some(Operand::Value(dest))
+            BuiltinKind::Intrinsic(intrinsic) => {
+                match intrinsic {
+                    BuiltinIntrinsic::FpCompare => {
+                        // __builtin_isgreater(a,b) -> a > b, etc.
+                        if args.len() >= 2 {
+                            let lhs = self.lower_expr(&args[0]);
+                            let rhs = self.lower_expr(&args[1]);
+                            let cmp_op = match name {
+                                "__builtin_isgreater" => IrCmpOp::Sgt,
+                                "__builtin_isgreaterequal" => IrCmpOp::Sge,
+                                "__builtin_isless" => IrCmpOp::Slt,
+                                "__builtin_islessequal" => IrCmpOp::Sle,
+                                "__builtin_islessgreater" => IrCmpOp::Ne,
+                                "__builtin_isunordered" => IrCmpOp::Ne, // approximate
+                                _ => IrCmpOp::Eq,
+                            };
+                            let dest = self.fresh_value();
+                            self.emit(Instruction::Cmp {
+                                dest, op: cmp_op, lhs, rhs, ty: IrType::F64,
+                            });
+                            return Some(Operand::Value(dest));
+                        }
+                        Some(Operand::Const(IrConst::I64(0)))
+                    }
+                    _ => {
+                        let cleaned_name = name.strip_prefix("__builtin_").unwrap_or(name).to_string();
+                        let arg_types: Vec<IrType> = args.iter().map(|a| self.get_expr_type(a)).collect();
+                        let arg_vals: Vec<Operand> = args.iter().map(|a| self.lower_expr(a)).collect();
+                        let dest = self.fresh_value();
+                        let variadic = self.function_variadic.contains(cleaned_name.as_str());
+                        self.emit(Instruction::Call {
+                            dest: Some(dest), func: cleaned_name,
+                            args: arg_vals, arg_types, return_type: IrType::I64, is_variadic: variadic,
+                        });
+                        Some(Operand::Value(dest))
+                    }
+                }
             }
         }
     }
@@ -944,7 +1158,7 @@ impl Lowerer {
     // -----------------------------------------------------------------------
 
     fn lower_member_access(&mut self, base_expr: &Expr, field_name: &str) -> Operand {
-        let (field_offset, field_ty) = self.resolve_member_access(base_expr, field_name);
+        let (field_offset, field_ty, bitfield) = self.resolve_member_access_full(base_expr, field_name);
         let base_addr = self.get_struct_base_addr(base_expr);
         let field_addr = self.fresh_value();
         self.emit(Instruction::GetElementPtr {
@@ -961,13 +1175,18 @@ impl Lowerer {
         }
         let dest = self.fresh_value();
         self.emit(Instruction::Load { dest, ptr: field_addr, ty: field_ty });
+
+        // Bitfield: extract the relevant bits
+        if let Some((bit_offset, bit_width)) = bitfield {
+            return self.extract_bitfield(dest, field_ty, bit_offset, bit_width);
+        }
         Operand::Value(dest)
     }
 
     fn lower_pointer_member_access(&mut self, base_expr: &Expr, field_name: &str) -> Operand {
         let ptr_val = self.lower_expr(base_expr);
         let base_addr = self.operand_to_value(ptr_val);
-        let (field_offset, field_ty) = self.resolve_pointer_member_access(base_expr, field_name);
+        let (field_offset, field_ty, bitfield) = self.resolve_pointer_member_access_full(base_expr, field_name);
         let field_addr = self.fresh_value();
         self.emit(Instruction::GetElementPtr {
             dest: field_addr, base: base_addr,
@@ -983,7 +1202,87 @@ impl Lowerer {
         }
         let dest = self.fresh_value();
         self.emit(Instruction::Load { dest, ptr: field_addr, ty: field_ty });
+
+        // Bitfield: extract the relevant bits
+        if let Some((bit_offset, bit_width)) = bitfield {
+            return self.extract_bitfield(dest, field_ty, bit_offset, bit_width);
+        }
         Operand::Value(dest)
+    }
+
+    /// Extract a bitfield value from a loaded storage unit.
+    /// Shifts right by bit_offset, then masks to bit_width bits.
+    /// For signed bitfields, sign-extends the result using shl+ashr in 64-bit.
+    fn extract_bitfield(&mut self, loaded: Value, storage_ty: IrType, bit_offset: u32, bit_width: u32) -> Operand {
+        let is_signed = storage_ty.is_signed();
+
+        if is_signed {
+            // For signed bitfields, use shift-left then arithmetic-shift-right in 64-bit
+            // to sign-extend properly (x86 backend uses 64-bit registers).
+            // shl by (64 - bit_offset - bit_width), then ashr by (64 - bit_width)
+            let shl_amount = 64 - bit_offset - bit_width;
+            let ashr_amount = 64 - bit_width;
+
+            let mut val = Operand::Value(loaded);
+
+            if shl_amount > 0 {
+                let shifted = self.fresh_value();
+                self.emit(Instruction::BinOp {
+                    dest: shifted,
+                    op: IrBinOp::Shl,
+                    ty: IrType::I64,
+                    lhs: val,
+                    rhs: Operand::Const(IrConst::I64(shl_amount as i64)),
+                });
+                val = Operand::Value(shifted);
+            }
+
+            let result = self.fresh_value();
+            self.emit(Instruction::BinOp {
+                dest: result,
+                op: IrBinOp::AShr,
+                ty: IrType::I64,
+                lhs: val,
+                rhs: Operand::Const(IrConst::I64(ashr_amount as i64)),
+            });
+            Operand::Value(result)
+        } else {
+            // Unsigned: logical shift right + mask (works fine in 64-bit)
+            let mut val = Operand::Value(loaded);
+
+            if bit_offset > 0 {
+                let shifted = self.fresh_value();
+                self.emit(Instruction::BinOp {
+                    dest: shifted,
+                    op: IrBinOp::LShr,
+                    ty: IrType::I64,
+                    lhs: val,
+                    rhs: Operand::Const(IrConst::I64(bit_offset as i64)),
+                });
+                val = Operand::Value(shifted);
+            }
+
+            let mask = (1u64 << bit_width) - 1;
+            let masked = self.fresh_value();
+            self.emit(Instruction::BinOp {
+                dest: masked,
+                op: IrBinOp::And,
+                ty: IrType::I64,
+                lhs: val,
+                rhs: Operand::Const(IrConst::I64(mask as i64)),
+            });
+            Operand::Value(masked)
+        }
+    }
+
+    /// Create an IrConst of the appropriate integer type.
+    fn make_int_const(&self, ty: IrType, val: i64) -> IrConst {
+        match ty {
+            IrType::I8 | IrType::U8 => IrConst::I8(val as i8),
+            IrType::I16 | IrType::U16 => IrConst::I16(val as i16),
+            IrType::I32 | IrType::U32 => IrConst::I32(val as i32),
+            _ => IrConst::I64(val),
+        }
     }
 
     /// Check if a struct field is an array type (for array-to-pointer decay).
@@ -1137,6 +1436,11 @@ impl Lowerer {
     // -----------------------------------------------------------------------
 
     pub(super) fn lower_compound_assign(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> Operand {
+        // Check for bitfield compound assignment
+        if let Some(result) = self.try_lower_bitfield_compound_assign(op, lhs, rhs) {
+            return result;
+        }
+
         let ty = self.get_expr_type(lhs);
         let lhs_ir_ty = self.infer_expr_type(lhs);
         let rhs_ty = self.get_expr_type(rhs);

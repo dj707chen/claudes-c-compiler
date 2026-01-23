@@ -74,10 +74,19 @@ impl Lowerer {
     /// Compute struct/union layout from AST field declarations.
     fn compute_struct_layout(&self, fields: &[StructFieldDecl], is_union: bool) -> StructLayout {
         let struct_fields: Vec<StructField> = fields.iter().map(|f| {
+            let bit_width = f.bit_width.as_ref().and_then(|bw| {
+                self.eval_const_expr(bw).and_then(|c| match c {
+                    IrConst::I8(v) => Some(v as u32),
+                    IrConst::I16(v) => Some(v as u32),
+                    IrConst::I32(v) => Some(v as u32),
+                    IrConst::I64(v) => Some(v as u32),
+                    _ => None,
+                })
+            });
             StructField {
                 name: f.name.clone().unwrap_or_default(),
                 ty: self.type_spec_to_ctype(&f.type_spec),
-                bit_width: None, // TODO: bitfields
+                bit_width,
             }
         }).collect();
 
@@ -95,10 +104,19 @@ impl Lowerer {
             TypeSpecifier::Struct(tag, Some(fields)) => {
                 // Inline struct definition: compute layout directly
                 let struct_fields: Vec<StructField> = fields.iter().map(|f| {
+                    let bit_width = f.bit_width.as_ref().and_then(|bw| {
+                        self.eval_const_expr(bw).and_then(|c| match c {
+                            IrConst::I8(v) => Some(v as u32),
+                            IrConst::I16(v) => Some(v as u32),
+                            IrConst::I32(v) => Some(v as u32),
+                            IrConst::I64(v) => Some(v as u32),
+                            _ => None,
+                        })
+                    });
                     StructField {
                         name: f.name.clone().unwrap_or_default(),
                         ty: self.type_spec_to_ctype(&f.type_spec),
-                        bit_width: None,
+                        bit_width,
                     }
                 }).collect();
                 Some(StructLayout::for_struct(&struct_fields))
@@ -110,10 +128,19 @@ impl Lowerer {
             }
             TypeSpecifier::Union(tag, Some(fields)) => {
                 let struct_fields: Vec<StructField> = fields.iter().map(|f| {
+                    let bit_width = f.bit_width.as_ref().and_then(|bw| {
+                        self.eval_const_expr(bw).and_then(|c| match c {
+                            IrConst::I8(v) => Some(v as u32),
+                            IrConst::I16(v) => Some(v as u32),
+                            IrConst::I32(v) => Some(v as u32),
+                            IrConst::I64(v) => Some(v as u32),
+                            _ => None,
+                        })
+                    });
                     StructField {
                         name: f.name.clone().unwrap_or_default(),
                         ty: self.type_spec_to_ctype(&f.type_spec),
-                        bit_width: None,
+                        bit_width,
                     }
                 }).collect();
                 Some(StructLayout::for_union(&struct_fields))
@@ -232,8 +259,23 @@ impl Lowerer {
             }
         }
         // Fallback: assume 4-byte aligned int fields
-        // TODO: improve fallback by tracking more type info
         (0, IrType::I32)
+    }
+
+    /// Resolve member access with full bitfield info.
+    /// Returns (byte_offset, ir_type, Option<(bit_offset, bit_width)>).
+    pub(super) fn resolve_member_access_full(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType, Option<(u32, u32)>) {
+        if let Some(layout) = self.get_layout_for_expr(base_expr) {
+            if let Some(fl) = layout.field_layout(field_name) {
+                let ir_ty = IrType::from_ctype(&fl.ty);
+                let bf = match (fl.bit_offset, fl.bit_width) {
+                    (Some(bo), Some(bw)) => Some((bo, bw)),
+                    _ => None,
+                };
+                return (fl.offset, ir_ty, bf);
+            }
+        }
+        (0, IrType::I32, None)
     }
 
     /// Resolve pointer member access (p->field): returns (byte_offset, ir_type_of_field).
@@ -247,6 +289,21 @@ impl Lowerer {
         }
         // Fallback: assume first field at offset 0
         (0, IrType::I32)
+    }
+
+    /// Resolve pointer member access with full bitfield info.
+    pub(super) fn resolve_pointer_member_access_full(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType, Option<(u32, u32)>) {
+        if let Some(layout) = self.get_pointed_struct_layout(base_expr) {
+            if let Some(fl) = layout.field_layout(field_name) {
+                let ir_ty = IrType::from_ctype(&fl.ty);
+                let bf = match (fl.bit_offset, fl.bit_width) {
+                    (Some(bo), Some(bw)) => Some((bo, bw)),
+                    _ => None,
+                };
+                return (fl.offset, ir_ty, bf);
+            }
+        }
+        (0, IrType::I32, None)
     }
 
     /// Try to determine the struct layout that an expression (a pointer) points to.
@@ -334,7 +391,12 @@ impl Lowerer {
                 self.get_layout_for_expr(base)
             }
             Expr::CompoundLiteral(type_spec, _, _) => {
+                // Compound literal: (struct tag){...} - get layout from the type specifier
                 self.get_struct_layout_for_type(type_spec)
+            }
+            Expr::Deref(inner, _) => {
+                // (*ptr) where ptr points to a struct
+                self.get_pointed_struct_layout(inner)
             }
             Expr::Cast(type_spec, inner, _) => {
                 // Cast to struct type, or cast wrapping a compound literal

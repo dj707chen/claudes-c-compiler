@@ -196,6 +196,10 @@ impl Preprocessor {
         self.define_simple_macro("__LDBL_DIG__", "18");
         self.define_simple_macro("__LDBL_MIN_EXP__", "(-16381)");
         self.define_simple_macro("__LDBL_MAX_EXP__", "16384");
+        self.define_simple_macro("__LDBL_MAX__", "1.18973149535723176502e+4932L");
+        self.define_simple_macro("__LDBL_MIN__", "3.36210314311209350626e-4932L");
+        self.define_simple_macro("__LDBL_EPSILON__", "1.08420217248550443401e-19L");
+        self.define_simple_macro("__SIZEOF_LONG_DOUBLE__", "16");
         self.define_simple_macro("__FLT_HAS_INFINITY__", "1");
         self.define_simple_macro("__FLT_HAS_QUIET_NAN__", "1");
         self.define_simple_macro("__DBL_HAS_INFINITY__", "1");
