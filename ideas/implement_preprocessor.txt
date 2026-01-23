@@ -1,10 +1,9 @@
-Implement a real C preprocessor:
-- #define with macro expansion (object-like and function-like macros)
-- #include with file resolution (system headers from /usr/include)
-- #if, #ifdef, #ifndef, #elif, #else, #endif with expression evaluation
-- Predefined macros (__LINE__, __FILE__, __DATE__, __TIME__, etc.)
-- Token pasting (##) and stringification (#)
-
-This is critical for passing tests that use #include <stdio.h> properly
-rather than relying on gcc's assembler/linker to resolve symbols.
-Many test failures are due to missing preprocessor support.
+Remaining preprocessor work:
+- #include with actual file resolution (system headers from /usr/include)
+  Currently we strip #include and provide built-in macros for common headers,
+  but we don't actually read and include header files.
+  This is critical for passing tests that use #include <stdio.h> properly
+  rather than relying on gcc's assembler/linker to resolve symbols.
+- Complete variadic macro support (named variadic params, ##__VA_ARGS__ GNU extension)
+- #line directive support for source mapping
+- _Pragma operator
