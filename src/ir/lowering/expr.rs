@@ -1669,6 +1669,19 @@ impl Lowerer {
                 }
                 IrType::I64
             }
+            Expr::Deref(_, _) | Expr::ArraySubscript(_, _, _)
+            | Expr::MemberAccess(_, _, _) | Expr::PointerMemberAccess(_, _, _) => {
+                // Delegate to get_expr_type which handles these through CType resolution
+                self.get_expr_type(expr)
+            }
+            Expr::PostfixOp(_, inner, _) => self.infer_expr_type(inner),
+            Expr::Assign(lhs, _, _) | Expr::CompoundAssign(_, lhs, _, _) => {
+                self.infer_expr_type(lhs)
+            }
+            Expr::Conditional(_, then_expr, _, _) => self.infer_expr_type(then_expr),
+            Expr::Comma(_, rhs, _) => self.infer_expr_type(rhs),
+            Expr::AddressOf(_, _) => IrType::Ptr,
+            Expr::StringLiteral(_, _) => IrType::Ptr,
             _ => IrType::I64,
         }
     }
