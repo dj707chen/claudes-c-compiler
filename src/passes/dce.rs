@@ -132,6 +132,19 @@ fn collect_instruction_uses(inst: &Instruction, used: &mut HashSet<u32>) {
             used.insert(dest.0);
             used.insert(src.0);
         }
+        Instruction::VaArg { va_list_ptr, .. } => {
+            used.insert(va_list_ptr.0);
+        }
+        Instruction::VaStart { va_list_ptr } => {
+            used.insert(va_list_ptr.0);
+        }
+        Instruction::VaEnd { va_list_ptr } => {
+            used.insert(va_list_ptr.0);
+        }
+        Instruction::VaCopy { dest_ptr, src_ptr } => {
+            used.insert(dest_ptr.0);
+            used.insert(src_ptr.0);
+        }
     }
 }
 
@@ -163,7 +176,11 @@ fn has_side_effects(inst: &Instruction) -> bool {
         Instruction::Store { .. } |
         Instruction::Call { .. } |
         Instruction::CallIndirect { .. } |
-        Instruction::Memcpy { .. }
+        Instruction::Memcpy { .. } |
+        Instruction::VaStart { .. } |
+        Instruction::VaEnd { .. } |
+        Instruction::VaCopy { .. } |
+        Instruction::VaArg { .. }
     )
 }
 
@@ -181,8 +198,12 @@ fn get_dest(inst: &Instruction) -> Option<Value> {
         Instruction::Cast { dest, .. } => Some(*dest),
         Instruction::Copy { dest, .. } => Some(*dest),
         Instruction::GlobalAddr { dest, .. } => Some(*dest),
+        Instruction::VaArg { dest, .. } => Some(*dest),
         Instruction::Store { .. } => None,
         Instruction::Memcpy { .. } => None,
+        Instruction::VaStart { .. } => None,
+        Instruction::VaEnd { .. } => None,
+        Instruction::VaCopy { .. } => None,
     }
 }
 

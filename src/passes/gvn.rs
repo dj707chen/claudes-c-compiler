@@ -216,8 +216,12 @@ fn get_inst_dest(inst: &Instruction) -> Option<Value> {
         Instruction::Cast { dest, .. } => Some(*dest),
         Instruction::Copy { dest, .. } => Some(*dest),
         Instruction::GlobalAddr { dest, .. } => Some(*dest),
+        Instruction::VaArg { dest, .. } => Some(*dest),
         Instruction::Store { .. } => None,
         Instruction::Memcpy { .. } => None,
+        Instruction::VaStart { .. } => None,
+        Instruction::VaEnd { .. } => None,
+        Instruction::VaCopy { .. } => None,
     }
 }
 

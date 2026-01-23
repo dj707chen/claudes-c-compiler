@@ -954,6 +954,83 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit(&format!("{}:", done_label));
     }
 
+    fn emit_va_arg(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType) {
+        // AArch64 AAPCS va_arg: simplified implementation using overflow area only.
+        // va_list is: { void *__stack; void *__gr_top; void *__vr_top; int __gr_offs; int __vr_offs; }
+        // For our simplified va_start (overflow-only), we just use __stack (offset 0).
+        //
+        // Load va_list pointer
+        if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
+            if self.state.is_alloca(va_list_ptr.0) {
+                self.state.emit(&format!("    add x1, x29, #{}", slot.0));
+            } else {
+                self.state.emit(&format!("    ldr x1, [x29, #{}]", slot.0));
+            }
+        }
+        // Load __stack pointer
+        self.state.emit("    ldr x2, [x1]");
+        // Load the value
+        if result_ty == IrType::F32 {
+            self.state.emit("    ldr w0, [x2]");
+        } else {
+            self.state.emit("    ldr x0, [x2]");
+        }
+        // Advance __stack by 8
+        self.state.emit("    add x2, x2, #8");
+        self.state.emit("    str x2, [x1]");
+        // Store result
+        if let Some(slot) = self.state.get_slot(dest.0) {
+            self.state.emit(&format!("    str x0, [x29, #{}]", slot.0));
+        }
+    }
+
+    fn emit_va_start(&mut self, va_list_ptr: &Value) {
+        // AArch64 simplified va_start: set __stack = sp + frame adjustment
+        // For variadic functions, stack args start at sp + frame_size (caller's stack area)
+        // Since we use rbp (x29), stack args start at x29 + 16 (saved x29 + saved lr)
+        if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
+            if self.state.is_alloca(va_list_ptr.0) {
+                self.state.emit(&format!("    add x0, x29, #{}", slot.0));
+            } else {
+                self.state.emit(&format!("    ldr x0, [x29, #{}]", slot.0));
+            }
+        }
+        // __stack = x29 + 16 (stack args area)
+        self.state.emit("    add x1, x29, #16");
+        self.state.emit("    str x1, [x0]");
+        // Set __gr_offs = 0 (force overflow path): offset 24
+        self.state.emit("    str wzr, [x0, #24]");
+        // Set __vr_offs = 0 (force overflow path): offset 28
+        self.state.emit("    str wzr, [x0, #28]");
+    }
+
+    fn emit_va_end(&mut self, _va_list_ptr: &Value) {
+        // va_end is a no-op on AArch64
+    }
+
+    fn emit_va_copy(&mut self, dest_ptr: &Value, src_ptr: &Value) {
+        // Copy va_list struct (32 bytes on AArch64)
+        if let Some(src_slot) = self.state.get_slot(src_ptr.0) {
+            if self.state.is_alloca(src_ptr.0) {
+                self.state.emit(&format!("    add x1, x29, #{}", src_slot.0));
+            } else {
+                self.state.emit(&format!("    ldr x1, [x29, #{}]", src_slot.0));
+            }
+        }
+        if let Some(dest_slot) = self.state.get_slot(dest_ptr.0) {
+            if self.state.is_alloca(dest_ptr.0) {
+                self.state.emit(&format!("    add x0, x29, #{}", dest_slot.0));
+            } else {
+                self.state.emit(&format!("    ldr x0, [x29, #{}]", dest_slot.0));
+            }
+        }
+        // Copy 32 bytes
+        self.state.emit("    ldp x2, x3, [x1]");
+        self.state.emit("    stp x2, x3, [x0]");
+        self.state.emit("    ldp x2, x3, [x1, #16]");
+        self.state.emit("    stp x2, x3, [x0, #16]");
+    }
+
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {
         if let Some(val) = val {
             self.operand_to_x0(val);

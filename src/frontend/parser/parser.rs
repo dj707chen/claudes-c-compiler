@@ -149,7 +149,8 @@ impl Parser {
             TokenKind::Register | TokenKind::Typedef | TokenKind::Inline | TokenKind::Bool |
             TokenKind::Typeof | TokenKind::Attribute | TokenKind::Extension |
             TokenKind::Noreturn | TokenKind::Restrict | TokenKind::Complex |
-            TokenKind::Atomic | TokenKind::Auto | TokenKind::Alignas => true,
+            TokenKind::Atomic | TokenKind::Auto | TokenKind::Alignas |
+            TokenKind::Builtin => true,  // __builtin_va_list is a type
             TokenKind::Identifier(name) => self.typedefs.contains(name),
             _ => false,
         }
@@ -639,6 +640,17 @@ impl Parser {
                     has_typeof = true;
                     any_base_specifier = true;
                     break;
+                }
+                TokenKind::Builtin => {
+                    // __builtin_va_list used as type name
+                    if !any_base_specifier {
+                        typedef_name = Some("__builtin_va_list".to_string());
+                        self.advance();
+                        any_base_specifier = true;
+                        break;
+                    } else {
+                        break;
+                    }
                 }
                 TokenKind::Identifier(ref name) if self.typedefs.contains(name) => {
                     // Only consume typedef name if we haven't seen any other base specifier
@@ -2127,6 +2139,24 @@ impl Parser {
                 // TODO: properly handle inline asm
                 Expr::IntLiteral(0, span)
             }
+            TokenKind::BuiltinVaArg => {
+                // __builtin_va_arg(ap_expr, type-name)
+                let span = self.peek_span();
+                self.advance();
+                self.expect(&TokenKind::LParen);
+                let ap_expr = self.parse_assignment_expr();
+                self.expect(&TokenKind::Comma);
+                // Parse type-name (same as in cast/sizeof)
+                let type_spec = self.parse_va_arg_type();
+                self.expect(&TokenKind::RParen);
+                Expr::VaArg(Box::new(ap_expr), type_spec, span)
+            }
+            TokenKind::Builtin => {
+                // __builtin_va_list used as identifier/type - treat as identifier
+                let span = self.peek_span();
+                self.advance();
+                Expr::Identifier("__builtin_va_list".to_string(), span)
+            }
             TokenKind::Extension => {
                 // __extension__ can prefix expressions
                 let span = self.peek_span();
@@ -2139,6 +2169,50 @@ impl Parser {
                 self.advance();
                 Expr::IntLiteral(0, span)
             }
+        }
+    }
+
+    /// Parse a type-name for __builtin_va_arg, similar to how cast expressions parse types.
+    fn parse_va_arg_type(&mut self) -> TypeSpecifier {
+        if let Some(type_spec) = self.parse_type_specifier() {
+            let mut result_type = type_spec;
+            // Parse pointer declarators
+            while self.consume_if(&TokenKind::Star) {
+                result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                self.skip_cv_qualifiers();
+            }
+            // Handle function pointer: type (*)(args)
+            if matches!(self.peek(), TokenKind::LParen) {
+                let save2 = self.pos;
+                self.advance();
+                if self.consume_if(&TokenKind::Star) {
+                    while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+                        self.advance();
+                    }
+                    self.consume_if(&TokenKind::RParen);
+                    if matches!(self.peek(), TokenKind::LParen) {
+                        self.skip_balanced_parens();
+                    }
+                    result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                } else {
+                    self.pos = save2;
+                }
+            }
+            // Parse array dimensions
+            while matches!(self.peek(), TokenKind::LBracket) {
+                self.advance();
+                let size = if matches!(self.peek(), TokenKind::RBracket) {
+                    None
+                } else {
+                    Some(Box::new(self.parse_expr()))
+                };
+                self.expect(&TokenKind::RBracket);
+                result_type = TypeSpecifier::Array(Box::new(result_type), size);
+            }
+            result_type
+        } else {
+            eprintln!("parser error: expected type in __builtin_va_arg");
+            TypeSpecifier::Int
         }
     }
 }

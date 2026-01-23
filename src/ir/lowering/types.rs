@@ -1,6 +1,7 @@
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, StructField, StructLayout, CType};
+use crate::common::source::Span;
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -948,10 +949,12 @@ impl Lowerer {
             ("__s16", Short),
             ("__s32", Int),
             ("__s64", Long),
-            // <stdarg.h> - va_list is a pointer-like type
-            ("va_list", Pointer(Box::new(Void))),
-            ("__builtin_va_list", Pointer(Box::new(Void))),
-            ("__gnuc_va_list", Pointer(Box::new(Void))),
+            // <stdarg.h> - va_list is an array type __va_list_tag[1] (24 bytes on x86-64).
+            // We represent it as Array(Char, 24) so it allocates 24 bytes on the stack
+            // and decays to a pointer when passed to functions.
+            ("va_list", Array(Box::new(Char), Some(Box::new(Expr::IntLiteral(24, Span::dummy()))))),
+            ("__builtin_va_list", Array(Box::new(Char), Some(Box::new(Expr::IntLiteral(24, Span::dummy()))))),
+            ("__gnuc_va_list", Array(Box::new(Char), Some(Box::new(Expr::IntLiteral(24, Span::dummy()))))),
             // <locale.h>
             ("locale_t", Pointer(Box::new(Void))),
             // <pthread.h> - opaque types, treat as unsigned long or pointer
@@ -1505,6 +1508,19 @@ impl Lowerer {
             }
             let elem_size = full_array_size;
             return (8, elem_size, false, true, strides);
+        }
+
+        // If the resolved type itself is an Array (e.g., va_list = Array(Char, 24))
+        // and there are no derived array declarators, handle it as an array type.
+        if !has_array && !has_pointer {
+            if let TypeSpecifier::Array(elem, size_expr) = ts {
+                let elem_size = self.sizeof_type(elem).max(1);
+                let dim = size_expr.as_ref().and_then(|e| {
+                    self.expr_as_array_size(e).map(|n| n as usize)
+                }).unwrap_or(1);
+                let total = dim * elem_size;
+                return (total, elem_size, true, false, vec![elem_size]);
+            }
         }
 
         // Check for array declarators - collect all dimensions

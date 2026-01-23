@@ -712,6 +712,68 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit(&format!("{}:", done_label));
     }
 
+    fn emit_va_arg(&mut self, dest: &Value, va_list_ptr: &Value, _result_ty: IrType) {
+        // RISC-V LP64D: va_list is just a void* (pointer to the next arg on stack).
+        // Load va_list pointer
+        if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
+            if self.state.is_alloca(va_list_ptr.0) {
+                self.state.emit(&format!("    addi t1, s0, {}", slot.0));
+            } else {
+                self.state.emit(&format!("    ld t1, {}(s0)", slot.0));
+            }
+        }
+        // Load the current va_list pointer value (points to next arg)
+        self.state.emit("    ld t2, 0(t1)");
+        // Load the argument value
+        self.state.emit("    ld t0, 0(t2)");
+        // Advance pointer by 8
+        self.state.emit("    addi t2, t2, 8");
+        self.state.emit("    sd t2, 0(t1)");
+        // Store result
+        if let Some(slot) = self.state.get_slot(dest.0) {
+            self.state.emit(&format!("    sd t0, {}(s0)", slot.0));
+        }
+    }
+
+    fn emit_va_start(&mut self, va_list_ptr: &Value) {
+        // RISC-V LP64D: va_list = pointer to first stack variadic arg
+        // Stack args start at s0 + 16 (after saved ra and s0)
+        if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
+            if self.state.is_alloca(va_list_ptr.0) {
+                self.state.emit(&format!("    addi t0, s0, {}", slot.0));
+            } else {
+                self.state.emit(&format!("    ld t0, {}(s0)", slot.0));
+            }
+        }
+        // Set va_list to point to s0 + 16 (stack args area)
+        self.state.emit("    addi t1, s0, 16");
+        self.state.emit("    sd t1, 0(t0)");
+    }
+
+    fn emit_va_end(&mut self, _va_list_ptr: &Value) {
+        // va_end is a no-op on RISC-V
+    }
+
+    fn emit_va_copy(&mut self, dest_ptr: &Value, src_ptr: &Value) {
+        // Copy va_list (just 8 bytes on RISC-V - a single pointer)
+        if let Some(src_slot) = self.state.get_slot(src_ptr.0) {
+            if self.state.is_alloca(src_ptr.0) {
+                self.state.emit(&format!("    addi t1, s0, {}", src_slot.0));
+            } else {
+                self.state.emit(&format!("    ld t1, {}(s0)", src_slot.0));
+            }
+        }
+        self.state.emit("    ld t2, 0(t1)");
+        if let Some(dest_slot) = self.state.get_slot(dest_ptr.0) {
+            if self.state.is_alloca(dest_ptr.0) {
+                self.state.emit(&format!("    addi t0, s0, {}", dest_slot.0));
+            } else {
+                self.state.emit(&format!("    ld t0, {}(s0)", dest_slot.0));
+            }
+        }
+        self.state.emit("    sd t2, 0(t0)");
+    }
+
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {
         if let Some(val) = val {
             self.operand_to_t0(val);

@@ -194,6 +194,8 @@ pub enum Expr {
     CompoundLiteral(TypeSpecifier, Box<Initializer>, Span),
     StmtExpr(CompoundStmt, Span),
     Sizeof(Box<SizeofArg>, Span),
+    /// __builtin_va_arg(ap, type): extract next variadic argument of given type
+    VaArg(Box<Expr>, TypeSpecifier, Span),
     Comma(Box<Expr>, Box<Expr>, Span),
     AddressOf(Box<Expr>, Span),
     Deref(Box<Expr>, Span),
@@ -268,7 +270,7 @@ impl Expr {
             | Expr::FunctionCall(_, _, s) | Expr::ArraySubscript(_, _, s)
             | Expr::MemberAccess(_, _, s) | Expr::PointerMemberAccess(_, _, s)
             | Expr::Cast(_, _, s) | Expr::CompoundLiteral(_, _, s) | Expr::StmtExpr(_, s)
-            | Expr::Sizeof(_, s) | Expr::Comma(_, _, s)
+            | Expr::Sizeof(_, s) | Expr::VaArg(_, _, s) | Expr::Comma(_, _, s)
             | Expr::AddressOf(_, s) | Expr::Deref(_, s) => *s,
         }
     }

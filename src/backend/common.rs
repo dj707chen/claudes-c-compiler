@@ -368,10 +368,14 @@ pub fn instruction_dest(inst: &Instruction) -> Option<Value> {
         | Instruction::GetElementPtr { dest, .. }
         | Instruction::Cast { dest, .. }
         | Instruction::Copy { dest, .. }
-        | Instruction::GlobalAddr { dest, .. } => Some(*dest),
+        | Instruction::GlobalAddr { dest, .. }
+        | Instruction::VaArg { dest, .. } => Some(*dest),
         Instruction::Call { dest, .. }
         | Instruction::CallIndirect { dest, .. } => *dest,
         Instruction::Store { .. } => None,
         Instruction::Memcpy { .. } => None,
+        Instruction::VaStart { .. } => None,
+        Instruction::VaEnd { .. } => None,
+        Instruction::VaCopy { .. } => None,
     }
 }

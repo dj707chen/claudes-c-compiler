@@ -404,6 +404,9 @@ impl SemanticAnalyzer {
             Expr::StmtExpr(compound, _) => {
                 self.analyze_compound_stmt(compound);
             }
+            Expr::VaArg(ap_expr, _, _) => {
+                self.analyze_expr(ap_expr);
+            }
             // Literals don't need analysis
             Expr::IntLiteral(_, _)
             | Expr::UIntLiteral(_, _)

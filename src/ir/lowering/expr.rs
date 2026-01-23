@@ -52,6 +52,7 @@ impl Lowerer {
                 self.lower_expr(rhs)
             }
             Expr::StmtExpr(compound, _) => self.lower_stmt_expr(compound),
+            Expr::VaArg(ap_expr, type_spec, _) => self.lower_va_arg(ap_expr, type_spec),
         }
     }
 
@@ -644,6 +645,40 @@ impl Lowerer {
 
     /// Try to lower a __builtin_* call. Returns Some(result) if handled.
     fn try_lower_builtin_call(&mut self, name: &str, args: &[Expr]) -> Option<Operand> {
+        // Handle va_start/va_end/va_copy specially
+        match name {
+            "__builtin_va_start" => {
+                // __builtin_va_start(va_list, last_named_param)
+                // va_list is passed by reference (it's an array type)
+                if let Some(ap_expr) = args.first() {
+                    let ap_val = self.lower_expr(ap_expr);
+                    let ap_ptr = self.operand_to_value(ap_val);
+                    self.emit(Instruction::VaStart { va_list_ptr: ap_ptr });
+                }
+                return Some(Operand::Const(IrConst::I64(0)));
+            }
+            "__builtin_va_end" => {
+                // __builtin_va_end(va_list) - typically a no-op
+                if let Some(ap_expr) = args.first() {
+                    let ap_val = self.lower_expr(ap_expr);
+                    let ap_ptr = self.operand_to_value(ap_val);
+                    self.emit(Instruction::VaEnd { va_list_ptr: ap_ptr });
+                }
+                return Some(Operand::Const(IrConst::I64(0)));
+            }
+            "__builtin_va_copy" => {
+                // __builtin_va_copy(dest, src)
+                if args.len() >= 2 {
+                    let dest_val = self.lower_expr(&args[0]);
+                    let src_val = self.lower_expr(&args[1]);
+                    let dest_ptr = self.operand_to_value(dest_val);
+                    let src_ptr = self.operand_to_value(src_val);
+                    self.emit(Instruction::VaCopy { dest_ptr, src_ptr });
+                }
+                return Some(Operand::Const(IrConst::I64(0)));
+            }
+            _ => {}
+        }
         let builtin_info = builtins::resolve_builtin(name)?;
         match &builtin_info.kind {
             BuiltinKind::LibcAlias(libc_name) => {
@@ -1806,6 +1841,54 @@ impl Lowerer {
                 }
             }
             CType::Function(ft) => IrType::from_ctype(&ft.return_type),
+            _ => IrType::I64,
+        }
+    }
+
+    /// Lower __builtin_va_arg(ap, type) expression.
+    fn lower_va_arg(&mut self, ap_expr: &Expr, type_spec: &TypeSpecifier) -> Operand {
+        // Get the va_list pointer (ap is passed by reference since va_list is an array)
+        let ap_val = self.lower_expr(ap_expr);
+        let va_list_ptr = self.operand_to_value(ap_val);
+
+        // Determine the result type from the type specifier
+        let result_ty = self.resolve_va_arg_type(type_spec);
+
+        let dest = self.fresh_value();
+        self.emit(Instruction::VaArg { dest, va_list_ptr, result_ty: result_ty.clone() });
+        Operand::Value(dest)
+    }
+
+    /// Resolve the type specified in va_arg to an IrType.
+    fn resolve_va_arg_type(&self, type_spec: &TypeSpecifier) -> IrType {
+        match type_spec {
+            TypeSpecifier::Int | TypeSpecifier::Signed => IrType::I32,
+            TypeSpecifier::Long | TypeSpecifier::LongLong => IrType::I64,
+            TypeSpecifier::Short => IrType::I16,
+            TypeSpecifier::Char => IrType::I8,
+            TypeSpecifier::UnsignedChar => IrType::U8,
+            TypeSpecifier::UnsignedInt | TypeSpecifier::Unsigned => IrType::U32,
+            TypeSpecifier::UnsignedLong | TypeSpecifier::UnsignedLongLong => IrType::U64,
+            TypeSpecifier::UnsignedShort => IrType::U16,
+            TypeSpecifier::Float => IrType::F32,
+            TypeSpecifier::Double => IrType::F64,
+            TypeSpecifier::Pointer(_) => IrType::Ptr,
+            TypeSpecifier::Void => IrType::I64,
+            TypeSpecifier::Bool => IrType::I8,
+            TypeSpecifier::TypedefName(name) => {
+                // Look up typedef to resolve actual type
+                if let Some(resolved) = self.typedefs.get(name) {
+                    self.resolve_va_arg_type(resolved)
+                } else {
+                    // Default: assume pointer-sized integer for unknown typedefs
+                    IrType::I64
+                }
+            }
+            TypeSpecifier::Struct(_, _) | TypeSpecifier::Union(_, _) => {
+                // Structs passed via va_arg: for simplicity, treat as pointer-sized
+                // The backend will load the appropriate amount of data
+                IrType::I64
+            }
             _ => IrType::I64,
         }
     }

@@ -51,6 +51,12 @@ impl CodegenState {
         id
     }
 
+    /// Generate a fresh label with the given prefix.
+    pub fn fresh_label(&mut self, prefix: &str) -> String {
+        let id = self.next_label_id();
+        format!(".L{}_{}", prefix, id)
+    }
+
     pub fn emit(&mut self, s: &str) {
         self.out.emit(s);
     }
@@ -136,6 +142,18 @@ pub trait ArchCodegen {
 
     /// Emit a memory copy: copy `size` bytes from src address to dest address.
     fn emit_memcpy(&mut self, dest: &Value, src: &Value, size: usize);
+
+    /// Emit va_arg: extract next variadic argument from va_list and store to dest.
+    fn emit_va_arg(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType);
+
+    /// Emit va_start: initialize a va_list for variadic argument access.
+    fn emit_va_start(&mut self, va_list_ptr: &Value);
+
+    /// Emit va_end: clean up a va_list (typically no-op).
+    fn emit_va_end(&mut self, va_list_ptr: &Value);
+
+    /// Emit va_copy: copy src va_list to dest va_list.
+    fn emit_va_copy(&mut self, dest_ptr: &Value, src_ptr: &Value);
 
     /// Emit a return terminator.
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64);
@@ -250,6 +268,18 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
         }
         Instruction::Memcpy { dest, src, size } => {
             cg.emit_memcpy(dest, src, *size);
+        }
+        Instruction::VaArg { dest, va_list_ptr, result_ty } => {
+            cg.emit_va_arg(dest, va_list_ptr, *result_ty);
+        }
+        Instruction::VaStart { va_list_ptr } => {
+            cg.emit_va_start(va_list_ptr);
+        }
+        Instruction::VaEnd { va_list_ptr } => {
+            cg.emit_va_end(va_list_ptr);
+        }
+        Instruction::VaCopy { dest_ptr, src_ptr } => {
+            cg.emit_va_copy(dest_ptr, src_ptr);
         }
     }
 }

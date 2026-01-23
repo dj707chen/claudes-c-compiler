@@ -8,11 +8,23 @@ use crate::backend::codegen_shared::*;
 pub struct X86Codegen {
     state: CodegenState,
     current_return_type: IrType,
+    /// For variadic functions: number of named integer/pointer parameters
+    num_named_int_params: usize,
+    /// For variadic functions: stack offset of the register save area (negative from rbp)
+    reg_save_area_offset: i64,
+    /// Whether the current function is variadic
+    is_variadic: bool,
 }
 
 impl X86Codegen {
     pub fn new() -> Self {
-        Self { state: CodegenState::new(), current_return_type: IrType::I64 }
+        Self {
+            state: CodegenState::new(),
+            current_return_type: IrType::I64,
+            num_named_int_params: 0,
+            reg_save_area_offset: 0,
+            is_variadic: false,
+        }
     }
 
     pub fn generate(mut self, module: &IrModule) -> String {
@@ -305,11 +317,26 @@ impl ArchCodegen for X86Codegen {
     fn ptr_directive(&self) -> PtrDirective { PtrDirective::Quad }
 
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
-        calculate_stack_space_common(&mut self.state, func, 0, |space, alloc_size| {
+        // Track variadic function info
+        self.is_variadic = func.is_variadic;
+        self.num_named_int_params = func.params.iter()
+            .filter(|p| !p.ty.is_float())
+            .count();
+
+        let mut space = calculate_stack_space_common(&mut self.state, func, 0, |space, alloc_size| {
             // x86 uses negative offsets from rbp
             let new_space = space + ((alloc_size + 7) & !7);
             (-new_space, new_space)
-        })
+        });
+
+        // For variadic functions, reserve 48 bytes for the register save area
+        // (6 integer registers: rdi, rsi, rdx, rcx, r8, r9)
+        if func.is_variadic {
+            space += 48;
+            self.reg_save_area_offset = -space;
+        }
+
+        space
     }
 
     fn aligned_frame_size(&self, raw_space: i64) -> i64 {
@@ -322,6 +349,18 @@ impl ArchCodegen for X86Codegen {
         self.state.emit("    movq %rsp, %rbp");
         if frame_size > 0 {
             self.state.emit(&format!("    subq ${}, %rsp", frame_size));
+        }
+
+        // For variadic functions, save all integer arg registers to the register save area.
+        // This allows va_arg to retrieve register-passed arguments.
+        if func.is_variadic {
+            let base = self.reg_save_area_offset;
+            self.state.emit(&format!("    movq %rdi, {}(%rbp)", base));
+            self.state.emit(&format!("    movq %rsi, {}(%rbp)", base + 8));
+            self.state.emit(&format!("    movq %rdx, {}(%rbp)", base + 16));
+            self.state.emit(&format!("    movq %rcx, {}(%rbp)", base + 24));
+            self.state.emit(&format!("    movq %r8, {}(%rbp)", base + 32));
+            self.state.emit(&format!("    movq %r9, {}(%rbp)", base + 40));
         }
     }
 
@@ -768,6 +807,160 @@ impl ArchCodegen for X86Codegen {
         // Inline memcpy using rep movsb
         self.state.emit(&format!("    movq ${}, %rcx", size));
         self.state.emit("    rep movsb");
+    }
+
+    fn emit_va_arg(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType) {
+        // x86-64 System V ABI va_arg implementation.
+        // va_list is: { u32 gp_offset, u32 fp_offset, void* overflow_arg_area, void* reg_save_area }
+        //
+        // For integer/pointer types:
+        //   if gp_offset < 48:
+        //     result = *(reg_save_area + gp_offset)
+        //     gp_offset += 8
+        //   else:
+        //     result = *overflow_arg_area
+        //     overflow_arg_area += 8
+        //
+        // For float/double types:
+        //   if fp_offset < 176 (48 + 8*16):
+        //     result = *(reg_save_area + fp_offset)
+        //     fp_offset += 16
+        //   else:
+        //     result = *overflow_arg_area
+        //     overflow_arg_area += 8
+
+        let is_fp = result_ty.is_float();
+        let label_reg = self.state.fresh_label("va_arg_reg");
+        let label_mem = self.state.fresh_label("va_arg_mem");
+        let label_end = self.state.fresh_label("va_arg_end");
+
+        // Load va_list pointer into %rcx
+        if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
+            if self.state.is_alloca(va_list_ptr.0) {
+                self.state.emit(&format!("    leaq {}(%rbp), %rcx", slot.0));
+            } else {
+                self.state.emit(&format!("    movq {}(%rbp), %rcx", slot.0));
+            }
+        }
+
+        if is_fp {
+            // Check fp_offset < 176
+            self.state.emit("    movl 4(%rcx), %eax");  // fp_offset
+            self.state.emit("    cmpl $176, %eax");
+            self.state.emit(&format!("    jb {}", label_reg));
+            self.state.emit(&format!("    jmp {}", label_mem));
+
+            // Register path
+            self.state.emit(&format!("{}:", label_reg));
+            self.state.emit("    movl 4(%rcx), %eax");       // fp_offset
+            self.state.emit("    movslq %eax, %rdx");
+            self.state.emit("    movq 16(%rcx), %rsi");      // reg_save_area
+            if result_ty == IrType::F32 {
+                self.state.emit("    movss (%rsi,%rdx), %xmm0");
+                self.state.emit("    movd %xmm0, %eax");
+            } else {
+                self.state.emit("    movsd (%rsi,%rdx), %xmm0");
+                self.state.emit("    movq %xmm0, %rax");
+            }
+            self.state.emit("    addl $16, 4(%rcx)");       // fp_offset += 16
+            self.state.emit(&format!("    jmp {}", label_end));
+        } else {
+            // Check gp_offset < 48
+            self.state.emit("    movl (%rcx), %eax");  // gp_offset
+            self.state.emit("    cmpl $48, %eax");
+            self.state.emit(&format!("    jb {}", label_reg));
+            self.state.emit(&format!("    jmp {}", label_mem));
+
+            // Register path
+            self.state.emit(&format!("{}:", label_reg));
+            self.state.emit("    movl (%rcx), %eax");        // gp_offset
+            self.state.emit("    movslq %eax, %rdx");
+            self.state.emit("    movq 16(%rcx), %rsi");      // reg_save_area
+            self.state.emit("    movq (%rsi,%rdx), %rax");   // load value
+            self.state.emit("    addl $8, (%rcx)");          // gp_offset += 8
+            self.state.emit(&format!("    jmp {}", label_end));
+        }
+
+        // Memory (overflow) path
+        self.state.emit(&format!("{}:", label_mem));
+        self.state.emit("    movq 8(%rcx), %rdx");       // overflow_arg_area
+        if is_fp && result_ty == IrType::F32 {
+            self.state.emit("    movss (%rdx), %xmm0");
+            self.state.emit("    movd %xmm0, %eax");
+        } else if is_fp {
+            self.state.emit("    movsd (%rdx), %xmm0");
+            self.state.emit("    movq %xmm0, %rax");
+        } else {
+            self.state.emit("    movq (%rdx), %rax");    // load value
+        }
+        self.state.emit("    addq $8, 8(%rcx)");         // overflow_arg_area += 8
+
+        // End
+        self.state.emit(&format!("{}:", label_end));
+        // Store result
+        if let Some(slot) = self.state.get_slot(dest.0) {
+            self.state.emit(&format!("    movq %rax, {}(%rbp)", slot.0));
+        }
+    }
+
+    fn emit_va_start(&mut self, va_list_ptr: &Value) {
+        // x86-64 System V ABI va_start implementation.
+        // The prologue saves all 6 integer arg registers to the register save area.
+        // va_list struct layout:
+        //   [0]  u32 gp_offset:         byte offset into reg_save_area for next GP arg
+        //   [4]  u32 fp_offset:         byte offset into reg_save_area for next FP arg
+        //   [8]  void* overflow_arg_area: pointer to next stack-passed arg
+        //   [16] void* reg_save_area:   pointer to saved register args
+
+        // Load va_list pointer into %rax
+        if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
+            if self.state.is_alloca(va_list_ptr.0) {
+                self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
+            } else {
+                self.state.emit(&format!("    movq {}(%rbp), %rax", slot.0));
+            }
+        }
+        // gp_offset = num_named_int_params * 8 (skip named params in reg save area)
+        let gp_offset = self.num_named_int_params * 8;
+        self.state.emit(&format!("    movl ${}, (%rax)", gp_offset));
+        // fp_offset = 48 + 0 (no FP register saving yet, force overflow for FP)
+        self.state.emit("    movl $176, 4(%rax)");
+        // overflow_arg_area = rbp + 16 (where stack-passed args start, after saved rbp + ret addr)
+        self.state.emit("    leaq 16(%rbp), %rcx");
+        self.state.emit("    movq %rcx, 8(%rax)");
+        // reg_save_area = address of the saved registers in the prologue
+        let reg_save = self.reg_save_area_offset;
+        self.state.emit(&format!("    leaq {}(%rbp), %rcx", reg_save));
+        self.state.emit("    movq %rcx, 16(%rax)");
+    }
+
+    fn emit_va_end(&mut self, _va_list_ptr: &Value) {
+        // va_end is a no-op on x86-64
+    }
+
+    fn emit_va_copy(&mut self, dest_ptr: &Value, src_ptr: &Value) {
+        // Copy 24 bytes from src va_list to dest va_list
+        if let Some(src_slot) = self.state.get_slot(src_ptr.0) {
+            if self.state.is_alloca(src_ptr.0) {
+                self.state.emit(&format!("    leaq {}(%rbp), %rsi", src_slot.0));
+            } else {
+                self.state.emit(&format!("    movq {}(%rbp), %rsi", src_slot.0));
+            }
+        }
+        if let Some(dest_slot) = self.state.get_slot(dest_ptr.0) {
+            if self.state.is_alloca(dest_ptr.0) {
+                self.state.emit(&format!("    leaq {}(%rbp), %rdi", dest_slot.0));
+            } else {
+                self.state.emit(&format!("    movq {}(%rbp), %rdi", dest_slot.0));
+            }
+        }
+        // Copy 24 bytes (sizeof va_list = 24 on x86-64)
+        self.state.emit("    movq (%rsi), %rax");
+        self.state.emit("    movq %rax, (%rdi)");
+        self.state.emit("    movq 8(%rsi), %rax");
+        self.state.emit("    movq %rax, 8(%rdi)");
+        self.state.emit("    movq 16(%rsi), %rax");
+        self.state.emit("    movq %rax, 16(%rdi)");
     }
 
     fn emit_return(&mut self, val: Option<&Operand>, _frame_size: i64) {

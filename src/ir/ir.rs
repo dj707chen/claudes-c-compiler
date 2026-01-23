@@ -118,6 +118,20 @@ pub enum Instruction {
 
     /// Memory copy: memcpy(dest, src, size)
     Memcpy { dest: Value, src: Value, size: usize },
+
+    /// va_arg: extract the next variadic argument from a va_list.
+    /// va_list_ptr is a pointer to the va_list struct/pointer.
+    /// result_ty is the type of the argument being extracted.
+    VaArg { dest: Value, va_list_ptr: Value, result_ty: IrType },
+
+    /// va_start: initialize a va_list. last_named_param is the pointer to the last named parameter.
+    VaStart { va_list_ptr: Value, },
+
+    /// va_end: cleanup a va_list (typically a no-op).
+    VaEnd { va_list_ptr: Value },
+
+    /// va_copy: copy one va_list to another.
+    VaCopy { dest_ptr: Value, src_ptr: Value },
 }
 
 /// Block terminator.
