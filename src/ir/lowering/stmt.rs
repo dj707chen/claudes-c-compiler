@@ -125,7 +125,18 @@ impl Lowerer {
 
             // Determine if this is a struct/union variable or pointer-to-struct.
             // For pointer-to-struct, we still store the layout so p->field works.
-            let struct_layout = self.get_struct_layout_for_type(&decl.type_spec);
+            let struct_layout = self.get_struct_layout_for_type(&decl.type_spec)
+                .or_else(|| {
+                    // For typedef'd pointer-to-struct (e.g., typedef struct Foo *FooPtr),
+                    // the resolved type is Pointer(inner). Peel off Pointer to get
+                    // the struct layout for -> member access.
+                    let resolved = self.resolve_type_spec(&decl.type_spec);
+                    if let TypeSpecifier::Pointer(inner) = resolved {
+                        self.get_struct_layout_for_type(inner)
+                    } else {
+                        None
+                    }
+                });
             let is_struct = struct_layout.is_some() && !is_pointer && !is_array;
 
             // For struct variables, use the struct's actual size;

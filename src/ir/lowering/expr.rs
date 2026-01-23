@@ -1111,6 +1111,7 @@ impl Lowerer {
             let loaded = self.load_lvalue_typed(&lv, ty);
             // Cast loaded value to op_ty if needed
             let loaded_promoted = if ty != op_ty && op_ty.is_float() && !ty.is_float() {
+                // int -> float promotion
                 let dest = self.fresh_value();
                 // Use the actual LHS IR type so codegen knows if it's unsigned
                 let cast_from = if lhs_ir_ty.size() <= 4 && lhs_ir_ty.is_unsigned() {
@@ -1123,6 +1124,11 @@ impl Lowerer {
                     IrType::I64
                 };
                 self.emit(Instruction::Cast { dest, src: loaded, from_ty: cast_from, to_ty: op_ty });
+                Operand::Value(dest)
+            } else if ty != op_ty && ty.is_float() && op_ty.is_float() {
+                // float width promotion (e.g., F32 -> F64)
+                let dest = self.fresh_value();
+                self.emit(Instruction::Cast { dest, src: loaded, from_ty: ty, to_ty: op_ty });
                 Operand::Value(dest)
             } else {
                 loaded
@@ -1169,6 +1175,11 @@ impl Lowerer {
                 } else {
                     Operand::Value(dest)
                 }
+            } else if op_ty.is_float() && ty.is_float() && op_ty != ty {
+                // Float narrowing: e.g., F64 result from `float += double_literal` needs F64→F32 cast
+                let dest = self.fresh_value();
+                self.emit(Instruction::Cast { dest, src: Operand::Value(result), from_ty: op_ty, to_ty: ty });
+                Operand::Value(dest)
             } else if !op_ty.is_float() && (lhs_ir_ty == IrType::I32 || lhs_ir_ty == IrType::U32
                 || lhs_ir_ty == IrType::I16 || lhs_ir_ty == IrType::U16
                 || lhs_ir_ty == IrType::I8 || lhs_ir_ty == IrType::U8) {

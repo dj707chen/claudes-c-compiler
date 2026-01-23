@@ -198,8 +198,8 @@ impl Lowerer {
             Expr::AddressOf(inner, _) => {
                 match inner.as_ref() {
                     Expr::Identifier(name, _) => {
-                        // Address of a global variable
-                        if self.globals.contains_key(name) {
+                        // Address of a global variable or function
+                        if self.globals.contains_key(name) || self.known_functions.contains(name) {
                             return Some(GlobalInit::GlobalAddr(name.clone()));
                         }
                         None
@@ -1235,15 +1235,21 @@ impl Lowerer {
     /// (stride for dim 0 = 3*4=12, stride for dim 1 = 4).
     pub(super) fn compute_decl_info(&self, ts: &TypeSpecifier, derived: &[DerivedDeclarator]) -> (usize, usize, bool, bool, Vec<usize>) {
         let ts = self.resolve_type_spec(ts);
-        // Check for pointer declarators
-        let has_pointer = derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
+        // Check for pointer declarators (from derived or from the resolved type itself)
+        let has_pointer = derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer))
+            || matches!(ts, TypeSpecifier::Pointer(_));
 
         let has_array = derived.iter().any(|d| matches!(d, DerivedDeclarator::Array(_)));
 
         // Handle pointer and array combinations
         if has_pointer && !has_array {
-            // Simple pointer: int *p
-            let elem_size = self.sizeof_type(ts);
+            // Simple pointer: int *p, or typedef'd pointer (e.g., typedef struct Foo *FooPtr)
+            let elem_size = if let TypeSpecifier::Pointer(inner) = ts {
+                // Pointer is in the type spec itself (typedef'd pointer)
+                self.sizeof_type(self.resolve_type_spec(inner))
+            } else {
+                self.sizeof_type(ts)
+            };
             return (8, elem_size, false, true, vec![]);
         }
         if has_pointer && has_array {
