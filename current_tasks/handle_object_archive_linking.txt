@@ -1,0 +1,17 @@
+Task: Handle .o/.a files and linker flags in driver
+
+The driver currently treats all input files as C source and tries to compile them.
+When given object files (.o), archive files (.a), or linker flags (-l, -L),
+the driver should pass these directly to the linker rather than trying to compile them.
+
+This is critical for building real projects like Lua, which compile individual .c files
+to .o objects with -c, then link them together in a final step:
+  ccc -o lua lua.o liblua.a -lm
+
+Changes needed:
+1. Classify input files by extension (.c -> compile, .o/.a -> pass to linker)
+2. Collect -l and -L flags and pass to the linker
+3. Update linker interfaces to accept extra arguments (libs, archive files)
+4. All three backends (x86, arm, riscv) need updating
+
+Status: In progress
