@@ -1015,7 +1015,22 @@ impl Preprocessor {
         let mut i = 0;
 
         while i < len {
-            if is_ident_start(chars[i]) {
+            if chars[i].is_ascii_digit() {
+                // Skip entire number literal (hex 0x..., binary 0b..., octal, decimal)
+                // including suffixes like ULL, u, l, etc.
+                result.push(chars[i]);
+                i += 1;
+                // After '0', check for hex/binary prefix
+                if i < len && chars[i - 1] == '0' && (chars[i] == 'x' || chars[i] == 'X' || chars[i] == 'b' || chars[i] == 'B') {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+                // Consume digits and hex digits
+                while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '.') {
+                    result.push(chars[i]);
+                    i += 1;
+                }
+            } else if is_ident_start(chars[i]) {
                 let start = i;
                 while i < len && is_ident_cont(chars[i]) {
                     i += 1;

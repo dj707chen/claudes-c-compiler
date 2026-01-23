@@ -504,6 +504,30 @@ impl Lexer {
         while self.pos < self.input.len() && (self.input[self.pos] == b'_' || self.input[self.pos].is_ascii_alphanumeric()) {
             self.pos += 1;
         }
+
+        // Check for wide/unicode char/string prefixes: L'x', L"...", u'x', u"...", U'x', U"..."
+        if self.pos < self.input.len() {
+            let text_len = self.pos - start;
+            let next = self.input[self.pos];
+            if next == b'\'' || next == b'"' {
+                let prefix = &self.input[start..self.pos];
+                let is_wide_prefix = match text_len {
+                    1 => prefix[0] == b'L' || prefix[0] == b'u' || prefix[0] == b'U',
+                    2 => prefix == b"u8",
+                    _ => false,
+                };
+                if is_wide_prefix {
+                    if next == b'\'' {
+                        // Wide/unicode char literal: treat as regular char (result is int-valued)
+                        return self.lex_char(start);
+                    } else {
+                        // Wide/unicode string literal: treat as regular string
+                        return self.lex_string(start);
+                    }
+                }
+            }
+        }
+
         let text = std::str::from_utf8(&self.input[start..self.pos]).unwrap_or("");
         let span = Span::new(start as u32, self.pos as u32, self.file_id);
 
