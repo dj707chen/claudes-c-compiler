@@ -7,11 +7,12 @@ use crate::backend::codegen_shared::*;
 /// Uses System V AMD64 ABI with stack-based allocation (no register allocator yet).
 pub struct X86Codegen {
     state: CodegenState,
+    current_return_type: IrType,
 }
 
 impl X86Codegen {
     pub fn new() -> Self {
-        Self { state: CodegenState::new() }
+        Self { state: CodegenState::new(), current_return_type: IrType::I64 }
     }
 
     pub fn generate(mut self, module: &IrModule) -> String {
@@ -35,9 +36,17 @@ impl X86Codegen {
                             self.state.emit(&format!("    movabsq ${}, %rax", v));
                         }
                     }
-                    IrConst::F32(_) | IrConst::F64(_) => {
-                        // TODO: float constants
-                        self.state.emit("    xorq %rax, %rax");
+                    IrConst::F32(v) => {
+                        let bits = v.to_bits() as u64;
+                        self.state.emit(&format!("    movq ${}, %rax", bits as i64));
+                    }
+                    IrConst::F64(v) => {
+                        let bits = v.to_bits();
+                        if bits == 0 {
+                            self.state.emit("    xorq %rax, %rax");
+                        } else {
+                            self.state.emit(&format!("    movabsq ${}, %rax", bits as i64));
+                        }
                     }
                     IrConst::Zero => self.state.emit("    xorq %rax, %rax"),
                 }
@@ -119,6 +128,45 @@ impl X86Codegen {
         if from_ty == to_ty {
             return;
         }
+
+        // Float-to-int cast
+        if from_ty.is_float() && !to_ty.is_float() {
+            if from_ty == IrType::F64 {
+                self.state.emit("    movq %rax, %xmm0");
+                self.state.emit("    cvttsd2siq %xmm0, %rax");
+            } else {
+                self.state.emit("    movd %eax, %xmm0");
+                self.state.emit("    cvttss2siq %xmm0, %rax");
+            }
+            return;
+        }
+
+        // Int-to-float cast
+        if !from_ty.is_float() && to_ty.is_float() {
+            if to_ty == IrType::F64 {
+                self.state.emit("    cvtsi2sdq %rax, %xmm0");
+                self.state.emit("    movq %xmm0, %rax");
+            } else {
+                self.state.emit("    cvtsi2ssq %rax, %xmm0");
+                self.state.emit("    movd %xmm0, %eax");
+            }
+            return;
+        }
+
+        // Float-to-float cast (F32 <-> F64)
+        if from_ty.is_float() && to_ty.is_float() {
+            if from_ty == IrType::F32 && to_ty == IrType::F64 {
+                self.state.emit("    movd %eax, %xmm0");
+                self.state.emit("    cvtss2sd %xmm0, %xmm0");
+                self.state.emit("    movq %xmm0, %rax");
+            } else {
+                self.state.emit("    movq %rax, %xmm0");
+                self.state.emit("    cvtsd2ss %xmm0, %xmm0");
+                self.state.emit("    movd %xmm0, %eax");
+            }
+            return;
+        }
+
         if from_ty.size() == to_ty.size() && from_ty.is_integer() && to_ty.is_integer() {
             return;
         }
@@ -186,7 +234,8 @@ impl ArchCodegen for X86Codegen {
         if raw_space > 0 { (raw_space + 15) & !15 } else { 0 }
     }
 
-    fn emit_prologue(&mut self, _func: &IrFunction, frame_size: i64) {
+    fn emit_prologue(&mut self, func: &IrFunction, frame_size: i64) {
+        self.current_return_type = func.return_type;
         self.state.emit("    pushq %rbp");
         self.state.emit("    movq %rsp, %rbp");
         if frame_size > 0 {
@@ -252,6 +301,31 @@ impl ArchCodegen for X86Codegen {
     }
 
     fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        if ty.is_float() {
+            // Float binary operation using SSE
+            self.operand_to_rax(lhs);
+            self.state.emit("    movq %rax, %xmm0");
+            self.state.emit("    pushq %rax");
+            self.operand_to_rax(rhs);
+            self.state.emit("    movq %rax, %xmm1");
+            self.state.emit("    popq %rax"); // balance stack
+            let (add, sub, mul, div) = if ty == IrType::F64 {
+                ("addsd", "subsd", "mulsd", "divsd")
+            } else {
+                ("addss", "subss", "mulss", "divss")
+            };
+            match op {
+                IrBinOp::Add => self.state.emit(&format!("    {} %xmm1, %xmm0", add)),
+                IrBinOp::Sub => self.state.emit(&format!("    {} %xmm1, %xmm0", sub)),
+                IrBinOp::Mul => self.state.emit(&format!("    {} %xmm1, %xmm0", mul)),
+                IrBinOp::SDiv | IrBinOp::UDiv => self.state.emit(&format!("    {} %xmm1, %xmm0", div)),
+                _ => self.state.emit(&format!("    {} %xmm1, %xmm0", add)),
+            }
+            self.state.emit("    movq %xmm0, %rax");
+            self.store_rax_to(dest);
+            return;
+        }
+
         self.operand_to_rax(lhs);
         self.state.emit("    pushq %rax");
         self.operand_to_rax(rhs);
@@ -339,16 +413,58 @@ impl ArchCodegen for X86Codegen {
         self.store_rax_to(dest);
     }
 
-    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand) {
+    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
         self.operand_to_rax(src);
-        match op {
-            IrUnaryOp::Neg => self.state.emit("    negq %rax"),
-            IrUnaryOp::Not => self.state.emit("    notq %rax"),
+        if ty.is_float() {
+            match op {
+                IrUnaryOp::Neg => {
+                    // XOR sign bit to negate float
+                    self.state.emit("    movq %rax, %xmm0");
+                    self.state.emit("    movabsq $-9223372036854775808, %rcx"); // 0x8000000000000000
+                    self.state.emit("    movq %rcx, %xmm1");
+                    self.state.emit("    xorpd %xmm1, %xmm0");
+                    self.state.emit("    movq %xmm0, %rax");
+                }
+                IrUnaryOp::Not => self.state.emit("    notq %rax"),
+            }
+        } else {
+            match op {
+                IrUnaryOp::Neg => self.state.emit("    negq %rax"),
+                IrUnaryOp::Not => self.state.emit("    notq %rax"),
+            }
         }
         self.store_rax_to(dest);
     }
 
-    fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, _ty: IrType) {
+    fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        if ty.is_float() {
+            // Float comparison using SSE
+            self.operand_to_rax(lhs);
+            self.state.emit("    movq %rax, %xmm0");
+            self.state.emit("    pushq %rax");
+            self.operand_to_rax(rhs);
+            self.state.emit("    movq %rax, %xmm1");
+            self.state.emit("    popq %rax");
+            if ty == IrType::F64 {
+                self.state.emit("    ucomisd %xmm1, %xmm0");
+            } else {
+                self.state.emit("    ucomiss %xmm1, %xmm0");
+            }
+            // For float: use unsigned-style setcc (above/below) since ucomisd sets CF/ZF
+            let set_instr = match op {
+                IrCmpOp::Eq => "sete",
+                IrCmpOp::Ne => "setne",
+                IrCmpOp::Slt | IrCmpOp::Ult => "setb",
+                IrCmpOp::Sle | IrCmpOp::Ule => "setbe",
+                IrCmpOp::Sgt | IrCmpOp::Ugt => "seta",
+                IrCmpOp::Sge | IrCmpOp::Uge => "setae",
+            };
+            self.state.emit(&format!("    {} %al", set_instr));
+            self.state.emit("    movzbq %al, %rax");
+            self.store_rax_to(dest);
+            return;
+        }
+
         self.operand_to_rax(lhs);
         self.state.emit("    pushq %rax");
         self.operand_to_rax(rhs);
@@ -374,13 +490,21 @@ impl ArchCodegen for X86Codegen {
     }
 
     fn emit_call(&mut self, args: &[Operand], direct_name: Option<&str>,
-                 func_ptr: Option<&Operand>, dest: Option<Value>) {
+                 func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType) {
+        // Classify args: float constants go in xmm regs, others in int regs
         let mut stack_args: Vec<&Operand> = Vec::new();
-        let mut reg_args: Vec<(&Operand, usize)> = Vec::new();
+        let mut int_idx = 0usize;
+        let mut float_idx = 0usize;
+        let mut arg_assignments: Vec<(&Operand, bool, usize)> = Vec::new(); // (arg, is_float, reg_idx)
 
-        for (i, arg) in args.iter().enumerate() {
-            if i < 6 {
-                reg_args.push((arg, i));
+        for arg in args.iter() {
+            let is_float_arg = matches!(arg, Operand::Const(IrConst::F32(_) | IrConst::F64(_)));
+            if is_float_arg && float_idx < 8 {
+                arg_assignments.push((arg, true, float_idx));
+                float_idx += 1;
+            } else if !is_float_arg && int_idx < 6 {
+                arg_assignments.push((arg, false, int_idx));
+                int_idx += 1;
             } else {
                 stack_args.push(arg);
             }
@@ -393,20 +517,30 @@ impl ArchCodegen for X86Codegen {
         }
 
         // Load register args
-        for (arg, i) in &reg_args {
+        let xmm_regs = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];
+        for (arg, is_float, idx) in &arg_assignments {
             self.operand_to_rax(arg);
-            self.state.emit(&format!("    movq %rax, %{}", X86_ARG_REGS[*i]));
+            if *is_float {
+                self.state.emit(&format!("    movq %rax, %{}", xmm_regs[*idx]));
+            } else {
+                self.state.emit(&format!("    movq %rax, %{}", X86_ARG_REGS[*idx]));
+            }
         }
 
-        // Zero AL for variadic functions (SysV ABI requirement)
-        self.state.emit("    xorl %eax, %eax");
+        // Set AL = number of float args for variadic functions (SysV ABI)
+        if float_idx > 0 {
+            self.state.emit(&format!("    movb ${}, %al", float_idx));
+        } else {
+            self.state.emit("    xorl %eax, %eax");
+        }
 
         if let Some(name) = direct_name {
             self.state.emit(&format!("    call {}", name));
         } else if let Some(ptr) = func_ptr {
+            self.state.emit("    pushq %rax"); // save AL
             self.operand_to_rax(ptr);
             self.state.emit("    movq %rax, %r10");
-            self.state.emit("    xorl %eax, %eax");
+            self.state.emit("    popq %rax"); // restore AL
             self.state.emit("    call *%r10");
         }
 
@@ -415,6 +549,10 @@ impl ArchCodegen for X86Codegen {
         }
 
         if let Some(dest) = dest {
+            if return_type.is_float() {
+                // Float return value is in xmm0
+                self.state.emit("    movq %xmm0, %rax");
+            }
             self.store_rax_to(&dest);
         }
     }
@@ -470,6 +608,10 @@ impl ArchCodegen for X86Codegen {
     fn emit_return(&mut self, val: Option<&Operand>, _frame_size: i64) {
         if let Some(val) = val {
             self.operand_to_rax(val);
+            if self.current_return_type.is_float() {
+                // Move float bit pattern from rax to xmm0 for ABI compliance
+                self.state.emit("    movq %rax, %xmm0");
+            }
         }
         self.emit_epilogue(0); // frame_size not needed for x86 epilogue
         self.state.emit("    ret");

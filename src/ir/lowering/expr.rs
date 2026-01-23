@@ -136,14 +136,21 @@ impl Lowerer {
                     }
                 }
 
-                // Infer types to determine signed/unsigned and result width
+                // Determine type: float promotion first, then signed/unsigned
                 let lhs_ty = self.infer_expr_type(lhs);
                 let rhs_ty = self.infer_expr_type(rhs);
-                let common_ty = Self::common_type(lhs_ty, rhs_ty);
-                let is_unsigned = common_ty.is_unsigned();
+                let lhs_expr_ty = self.get_expr_type(lhs);
+                let rhs_expr_ty = self.get_expr_type(rhs);
+                let (op_ty, is_unsigned, common_ty) = if lhs_expr_ty.is_float() || rhs_expr_ty.is_float() {
+                    let ft = if lhs_expr_ty == IrType::F64 || rhs_expr_ty == IrType::F64 { IrType::F64 } else { IrType::F32 };
+                    (ft, false, ft)
+                } else {
+                    let ct = Self::common_type(lhs_ty, rhs_ty);
+                    (IrType::I64, ct.is_unsigned(), ct)
+                };
 
-                let lhs_val = self.lower_expr(lhs);
-                let rhs_val = self.lower_expr(rhs);
+                let lhs_val = self.lower_expr_with_type(lhs, op_ty);
+                let rhs_val = self.lower_expr_with_type(rhs, op_ty);
                 let dest = self.fresh_value();
 
                 match op {
@@ -161,7 +168,7 @@ impl Lowerer {
                             (BinOp::Ge, true) => IrCmpOp::Uge,
                             _ => unreachable!(),
                         };
-                        self.emit(Instruction::Cmp { dest, op: cmp_op, lhs: lhs_val, rhs: rhs_val, ty: IrType::I64 });
+                        self.emit(Instruction::Cmp { dest, op: cmp_op, lhs: lhs_val, rhs: rhs_val, ty: op_ty });
                     }
                     _ => {
                         let ir_op = match (op, is_unsigned) {
@@ -180,7 +187,7 @@ impl Lowerer {
                             (BinOp::Shr, true) => IrBinOp::LShr,
                             _ => unreachable!(),
                         };
-                        self.emit(Instruction::BinOp { dest, op: ir_op, lhs: lhs_val, rhs: rhs_val, ty: IrType::I64 });
+                        self.emit(Instruction::BinOp { dest, op: ir_op, lhs: lhs_val, rhs: rhs_val, ty: op_ty });
                     }
                 }
 
@@ -216,12 +223,14 @@ impl Lowerer {
                         self.lower_expr(inner)
                     }
                     UnaryOp::Neg => {
+                        let ty = self.get_expr_type(inner);
                         let inner_ty = self.infer_expr_type(inner);
+                        let neg_ty = if ty.is_float() { ty } else { IrType::I64 };
                         let val = self.lower_expr(inner);
                         let dest = self.fresh_value();
-                        self.emit(Instruction::UnaryOp { dest, op: IrUnaryOp::Neg, src: val, ty: IrType::I64 });
-                        // Truncate to sub-64-bit type if needed
-                        if inner_ty == IrType::U32 || inner_ty == IrType::I32 {
+                        self.emit(Instruction::UnaryOp { dest, op: IrUnaryOp::Neg, src: val, ty: neg_ty });
+                        // Truncate to sub-64-bit type if needed (not for float)
+                        if !neg_ty.is_float() && (inner_ty == IrType::U32 || inner_ty == IrType::I32) {
                             let narrowed = self.fresh_value();
                             self.emit(Instruction::Cast {
                                 dest: narrowed,
@@ -488,17 +497,29 @@ impl Lowerer {
             }
             Expr::Cast(ref target_type, inner, _) => {
                 let src = self.lower_expr(inner);
+                let from_ty = self.get_expr_type(inner);
                 let to_ty = self.type_spec_to_ir(target_type);
                 // For pointer casts or same-type casts, just pass through
-                if to_ty == IrType::Ptr || to_ty == IrType::I64 {
+                if to_ty == from_ty || (to_ty == IrType::Ptr && from_ty == IrType::I64)
+                    || (to_ty == IrType::I64 && from_ty == IrType::Ptr) {
                     src
-                } else {
-                    // Emit a cast instruction for type conversions
+                } else if to_ty.is_float() || from_ty.is_float() {
+                    // Float<->int or float<->float cast
                     let dest = self.fresh_value();
                     self.emit(Instruction::Cast {
                         dest,
                         src,
-                        from_ty: IrType::I64, // TODO: track actual source type
+                        from_ty,
+                        to_ty,
+                    });
+                    Operand::Value(dest)
+                } else {
+                    // Integer truncation/extension cast
+                    let dest = self.fresh_value();
+                    self.emit(Instruction::Cast {
+                        dest,
+                        src,
+                        from_ty,
                         to_ty,
                     });
                     Operand::Value(dest)
@@ -838,10 +859,25 @@ impl Lowerer {
 
     /// Lower compound assignment (+=, -=, etc.) for any lvalue.
     pub(super) fn lower_compound_assign(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> Operand {
-        let rhs_val = self.lower_expr(rhs);
         let ty = self.get_expr_type(lhs);
+        let rhs_ty = self.get_expr_type(rhs);
+        // Determine operation type (float promotion if either side is float)
+        let op_ty = if ty.is_float() || rhs_ty.is_float() {
+            if ty == IrType::F64 || rhs_ty == IrType::F64 { IrType::F64 } else { IrType::F32 }
+        } else {
+            IrType::I64
+        };
+        let rhs_val = self.lower_expr_with_type(rhs, op_ty);
         if let Some(lv) = self.lower_lvalue(lhs) {
             let loaded = self.load_lvalue_typed(&lv, ty);
+            // Cast loaded value to op_ty if needed
+            let loaded_promoted = if ty != op_ty && op_ty.is_float() && !ty.is_float() {
+                let dest = self.fresh_value();
+                self.emit(Instruction::Cast { dest, src: loaded, from_ty: IrType::I64, to_ty: op_ty });
+                Operand::Value(dest)
+            } else {
+                loaded
+            };
             let ir_op = match op {
                 BinOp::Add => IrBinOp::Add,
                 BinOp::Sub => IrBinOp::Sub,
@@ -879,12 +915,20 @@ impl Lowerer {
             self.emit(Instruction::BinOp {
                 dest: result,
                 op: ir_op,
-                lhs: loaded,
+                lhs: loaded_promoted,
                 rhs: actual_rhs,
-                ty: IrType::I64,
+                ty: op_ty,
             });
-            self.store_lvalue_typed(&lv, Operand::Value(result), ty);
-            return Operand::Value(result);
+            // Cast result back to lhs type if needed
+            let store_val = if op_ty.is_float() && !ty.is_float() {
+                let dest = self.fresh_value();
+                self.emit(Instruction::Cast { dest, src: Operand::Value(result), from_ty: op_ty, to_ty: IrType::I64 });
+                Operand::Value(dest)
+            } else {
+                Operand::Value(result)
+            };
+            self.store_lvalue_typed(&lv, store_val.clone(), ty);
+            return store_val;
         }
         // Fallback
         rhs_val
@@ -915,6 +959,7 @@ impl Lowerer {
                 }
             }
             Expr::CharLiteral(_, _) => IrType::I8,
+            Expr::FloatLiteral(_, _) => IrType::F64,
             Expr::Cast(ref target_type, _, _) => {
                 self.type_spec_to_ir(target_type)
             }
@@ -925,8 +970,6 @@ impl Lowerer {
                         IrType::I32 // comparison results are int
                     }
                     _ => {
-                        // For arithmetic, use usual arithmetic conversions:
-                        // promote both operands and return the common type
                         let lt = self.infer_expr_type(lhs);
                         let rt = self.infer_expr_type(rhs);
                         Self::common_type(lt, rt)
@@ -935,7 +978,6 @@ impl Lowerer {
             }
             Expr::UnaryOp(_, inner, _) => self.infer_expr_type(inner),
             Expr::FunctionCall(func, _, _) => {
-                // Check function return type
                 if let Expr::Identifier(name, _) = func.as_ref() {
                     if let Some(&ret_ty) = self.function_return_types.get(name.as_str()) {
                         return ret_ty;
@@ -949,6 +991,9 @@ impl Lowerer {
 
     /// Determine the common type for binary operation (usual arithmetic conversions, simplified).
     fn common_type(a: IrType, b: IrType) -> IrType {
+        // Float promotion takes priority
+        if a == IrType::F64 || b == IrType::F64 { return IrType::F64; }
+        if a == IrType::F32 || b == IrType::F32 { return IrType::F32; }
         // If either is I64/U64/Ptr, result is 64-bit
         if a == IrType::I64 || a == IrType::U64 || a == IrType::Ptr
             || b == IrType::I64 || b == IrType::U64 || b == IrType::Ptr
@@ -967,5 +1012,28 @@ impl Lowerer {
         }
         // Narrow types get promoted to int
         IrType::I32
+    }
+
+    /// Lower an expression and insert a cast if its type doesn't match the target type.
+    /// Used for implicit float/int promotion in binary operations.
+    pub(super) fn lower_expr_with_type(&mut self, expr: &Expr, target_ty: IrType) -> Operand {
+        let src = self.lower_expr(expr);
+        let src_ty = self.get_expr_type(expr);
+        if src_ty == target_ty {
+            return src;
+        }
+        if target_ty.is_float() && !src_ty.is_float() {
+            // int -> float promotion
+            let dest = self.fresh_value();
+            self.emit(Instruction::Cast { dest, src, from_ty: IrType::I64, to_ty: target_ty });
+            Operand::Value(dest)
+        } else if !target_ty.is_float() && src_ty.is_float() {
+            // float -> int demotion
+            let dest = self.fresh_value();
+            self.emit(Instruction::Cast { dest, src, from_ty: src_ty, to_ty: target_ty });
+            Operand::Value(dest)
+        } else {
+            src
+        }
     }
 }

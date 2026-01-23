@@ -7,11 +7,12 @@ use crate::backend::codegen_shared::*;
 /// Uses standard RISC-V calling convention with stack-based allocation.
 pub struct RiscvCodegen {
     state: CodegenState,
+    current_return_type: IrType,
 }
 
 impl RiscvCodegen {
     pub fn new() -> Self {
-        Self { state: CodegenState::new() }
+        Self { state: CodegenState::new(), current_return_type: IrType::I64 }
     }
 
     pub fn generate(mut self, module: &IrModule) -> String {
@@ -97,7 +98,14 @@ impl RiscvCodegen {
                     IrConst::I16(v) => self.state.emit(&format!("    li t0, {}", v)),
                     IrConst::I32(v) => self.state.emit(&format!("    li t0, {}", v)),
                     IrConst::I64(v) => self.state.emit(&format!("    li t0, {}", v)),
-                    IrConst::F32(_) | IrConst::F64(_) => self.state.emit("    li t0, 0"),
+                    IrConst::F32(v) => {
+                        let bits = v.to_bits() as u64;
+                        self.state.emit(&format!("    li t0, {}", bits as i64));
+                    }
+                    IrConst::F64(v) => {
+                        let bits = v.to_bits();
+                        self.state.emit(&format!("    li t0, {}", bits as i64));
+                    }
                     IrConst::Zero => self.state.emit("    li t0, 0"),
                 }
             }
@@ -146,6 +154,45 @@ impl RiscvCodegen {
     /// Emit a type cast instruction sequence for RISC-V 64.
     fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
         if from_ty == to_ty { return; }
+
+        // Float-to-int cast
+        if from_ty.is_float() && !to_ty.is_float() {
+            if from_ty == IrType::F64 {
+                self.state.emit("    fmv.d.x ft0, t0");
+                self.state.emit("    fcvt.l.d t0, ft0, rtz");
+            } else {
+                self.state.emit("    fmv.w.x ft0, t0");
+                self.state.emit("    fcvt.l.s t0, ft0, rtz");
+            }
+            return;
+        }
+
+        // Int-to-float cast
+        if !from_ty.is_float() && to_ty.is_float() {
+            if to_ty == IrType::F64 {
+                self.state.emit("    fcvt.d.l ft0, t0");
+                self.state.emit("    fmv.x.d t0, ft0");
+            } else {
+                self.state.emit("    fcvt.s.l ft0, t0");
+                self.state.emit("    fmv.x.w t0, ft0");
+            }
+            return;
+        }
+
+        // Float-to-float cast
+        if from_ty.is_float() && to_ty.is_float() {
+            if from_ty == IrType::F32 && to_ty == IrType::F64 {
+                self.state.emit("    fmv.w.x ft0, t0");
+                self.state.emit("    fcvt.d.s ft0, ft0");
+                self.state.emit("    fmv.x.d t0, ft0");
+            } else if from_ty == IrType::F64 && to_ty == IrType::F32 {
+                self.state.emit("    fmv.d.x ft0, t0");
+                self.state.emit("    fcvt.s.d ft0, ft0");
+                self.state.emit("    fmv.x.w t0, ft0");
+            }
+            return;
+        }
+
         if from_ty.size() == to_ty.size() && from_ty.is_integer() && to_ty.is_integer() {
             return;
         }
@@ -228,7 +275,8 @@ impl ArchCodegen for RiscvCodegen {
         (raw_space + 15) & !15
     }
 
-    fn emit_prologue(&mut self, _func: &IrFunction, frame_size: i64) {
+    fn emit_prologue(&mut self, func: &IrFunction, frame_size: i64) {
+        self.current_return_type = func.return_type;
         self.emit_prologue_riscv(frame_size);
     }
 
@@ -286,6 +334,38 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        if ty.is_float() {
+            self.operand_to_t0(lhs);
+            self.state.emit("    mv t1, t0");
+            self.operand_to_t0(rhs);
+            self.state.emit("    mv t2, t0");
+            if ty == IrType::F64 {
+                self.state.emit("    fmv.d.x ft0, t1");
+                self.state.emit("    fmv.d.x ft1, t2");
+                match op {
+                    IrBinOp::Add => self.state.emit("    fadd.d ft0, ft0, ft1"),
+                    IrBinOp::Sub => self.state.emit("    fsub.d ft0, ft0, ft1"),
+                    IrBinOp::Mul => self.state.emit("    fmul.d ft0, ft0, ft1"),
+                    IrBinOp::SDiv | IrBinOp::UDiv => self.state.emit("    fdiv.d ft0, ft0, ft1"),
+                    _ => self.state.emit("    fadd.d ft0, ft0, ft1"),
+                }
+                self.state.emit("    fmv.x.d t0, ft0");
+            } else {
+                self.state.emit("    fmv.w.x ft0, t1");
+                self.state.emit("    fmv.w.x ft1, t2");
+                match op {
+                    IrBinOp::Add => self.state.emit("    fadd.s ft0, ft0, ft1"),
+                    IrBinOp::Sub => self.state.emit("    fsub.s ft0, ft0, ft1"),
+                    IrBinOp::Mul => self.state.emit("    fmul.s ft0, ft0, ft1"),
+                    IrBinOp::SDiv | IrBinOp::UDiv => self.state.emit("    fdiv.s ft0, ft0, ft1"),
+                    _ => self.state.emit("    fadd.s ft0, ft0, ft1"),
+                }
+                self.state.emit("    fmv.x.w t0, ft0");
+            }
+            self.store_t0_to(dest);
+            return;
+        }
+
         self.operand_to_t0(lhs);
         self.state.emit("    mv t1, t0");
         self.operand_to_t0(rhs);
@@ -330,11 +410,28 @@ impl ArchCodegen for RiscvCodegen {
         self.store_t0_to(dest);
     }
 
-    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand) {
+    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
         self.operand_to_t0(src);
-        match op {
-            IrUnaryOp::Neg => self.state.emit("    neg t0, t0"),
-            IrUnaryOp::Not => self.state.emit("    not t0, t0"),
+        if ty.is_float() {
+            match op {
+                IrUnaryOp::Neg => {
+                    if ty == IrType::F64 {
+                        self.state.emit("    fmv.d.x ft0, t0");
+                        self.state.emit("    fneg.d ft0, ft0");
+                        self.state.emit("    fmv.x.d t0, ft0");
+                    } else {
+                        self.state.emit("    fmv.w.x ft0, t0");
+                        self.state.emit("    fneg.s ft0, ft0");
+                        self.state.emit("    fmv.x.w t0, ft0");
+                    }
+                }
+                IrUnaryOp::Not => self.state.emit("    not t0, t0"),
+            }
+        } else {
+            match op {
+                IrUnaryOp::Neg => self.state.emit("    neg t0, t0"),
+                IrUnaryOp::Not => self.state.emit("    not t0, t0"),
+            }
         }
         self.store_t0_to(dest);
     }
@@ -344,6 +441,40 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    mv t1, t0");
         self.operand_to_t0(rhs);
         self.state.emit("    mv t2, t0");
+
+        if ty.is_float() {
+            if ty == IrType::F64 {
+                self.state.emit("    fmv.d.x ft0, t1");
+                self.state.emit("    fmv.d.x ft1, t2");
+                match op {
+                    IrCmpOp::Eq => self.state.emit("    feq.d t0, ft0, ft1"),
+                    IrCmpOp::Ne => {
+                        self.state.emit("    feq.d t0, ft0, ft1");
+                        self.state.emit("    xori t0, t0, 1");
+                    }
+                    IrCmpOp::Slt | IrCmpOp::Ult => self.state.emit("    flt.d t0, ft0, ft1"),
+                    IrCmpOp::Sle | IrCmpOp::Ule => self.state.emit("    fle.d t0, ft0, ft1"),
+                    IrCmpOp::Sgt | IrCmpOp::Ugt => self.state.emit("    flt.d t0, ft1, ft0"),
+                    IrCmpOp::Sge | IrCmpOp::Uge => self.state.emit("    fle.d t0, ft1, ft0"),
+                }
+            } else {
+                self.state.emit("    fmv.w.x ft0, t1");
+                self.state.emit("    fmv.w.x ft1, t2");
+                match op {
+                    IrCmpOp::Eq => self.state.emit("    feq.s t0, ft0, ft1"),
+                    IrCmpOp::Ne => {
+                        self.state.emit("    feq.s t0, ft0, ft1");
+                        self.state.emit("    xori t0, t0, 1");
+                    }
+                    IrCmpOp::Slt | IrCmpOp::Ult => self.state.emit("    flt.s t0, ft0, ft1"),
+                    IrCmpOp::Sle | IrCmpOp::Ule => self.state.emit("    fle.s t0, ft0, ft1"),
+                    IrCmpOp::Sgt | IrCmpOp::Ugt => self.state.emit("    flt.s t0, ft1, ft0"),
+                    IrCmpOp::Sge | IrCmpOp::Uge => self.state.emit("    fle.s t0, ft1, ft0"),
+                }
+            }
+            self.store_t0_to(dest);
+            return;
+        }
 
         // For sub-64-bit types, sign/zero-extend before comparison
         let is_32bit = ty == IrType::I32 || ty == IrType::U32
@@ -394,11 +525,21 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_call(&mut self, args: &[Operand], direct_name: Option<&str>,
-                 func_ptr: Option<&Operand>, dest: Option<Value>) {
-        for (i, arg) in args.iter().enumerate() {
-            if i < 8 {
+                 func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType) {
+        let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
+        let mut int_idx = 0usize;
+        let mut float_idx = 0usize;
+
+        for arg in args.iter() {
+            let is_float_arg = matches!(arg, Operand::Const(IrConst::F32(_) | IrConst::F64(_)));
+            if is_float_arg && float_idx < 8 {
                 self.operand_to_t0(arg);
-                self.state.emit(&format!("    mv {}, t0", RISCV_ARG_REGS[i]));
+                self.state.emit(&format!("    fmv.d.x {}, t0", float_arg_regs[float_idx]));
+                float_idx += 1;
+            } else if int_idx < 8 {
+                self.operand_to_t0(arg);
+                self.state.emit(&format!("    mv {}, t0", RISCV_ARG_REGS[int_idx]));
+                int_idx += 1;
             }
         }
 
@@ -412,7 +553,12 @@ impl ArchCodegen for RiscvCodegen {
 
         if let Some(dest) = dest {
             if let Some(slot) = self.state.get_slot(dest.0) {
-                self.emit_store_to_s0("a0", slot.0, "sd");
+                if return_type.is_float() {
+                    self.state.emit("    fmv.x.d t0, fa0");
+                    self.emit_store_to_s0("t0", slot.0, "sd");
+                } else {
+                    self.emit_store_to_s0("a0", slot.0, "sd");
+                }
             }
         }
     }
@@ -476,7 +622,11 @@ impl ArchCodegen for RiscvCodegen {
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {
         if let Some(val) = val {
             self.operand_to_t0(val);
-            self.state.emit("    mv a0, t0");
+            if self.current_return_type.is_float() {
+                self.state.emit("    fmv.d.x fa0, t0");
+            } else {
+                self.state.emit("    mv a0, t0");
+            }
         }
         self.emit_epilogue_riscv(frame_size);
         self.state.emit("    ret");

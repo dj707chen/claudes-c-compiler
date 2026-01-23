@@ -9,6 +9,7 @@ pub struct ArmCodegen {
     state: CodegenState,
     /// Frame size for the current function (needed for epilogue in terminators).
     current_frame_size: i64,
+    current_return_type: IrType,
 }
 
 impl ArmCodegen {
@@ -16,6 +17,7 @@ impl ArmCodegen {
         Self {
             state: CodegenState::new(),
             current_frame_size: 0,
+            current_return_type: IrType::I64,
         }
     }
 
@@ -165,8 +167,43 @@ impl ArmCodegen {
                             }
                         }
                     }
-                    IrConst::F32(_) | IrConst::F64(_) => {
-                        self.state.emit("    mov x0, #0");
+                    IrConst::F32(v) => {
+                        let bits = v.to_bits() as u64;
+                        if bits == 0 {
+                            self.state.emit("    mov x0, #0");
+                        } else if bits <= 65535 {
+                            self.state.emit(&format!("    mov x0, #{}", bits));
+                        } else {
+                            self.state.emit(&format!("    mov x0, #{}", bits & 0xffff));
+                            if (bits >> 16) & 0xffff != 0 {
+                                self.state.emit(&format!("    movk x0, #{}, lsl #16", (bits >> 16) & 0xffff));
+                            }
+                            if (bits >> 32) & 0xffff != 0 {
+                                self.state.emit(&format!("    movk x0, #{}, lsl #32", (bits >> 32) & 0xffff));
+                            }
+                            if (bits >> 48) & 0xffff != 0 {
+                                self.state.emit(&format!("    movk x0, #{}, lsl #48", (bits >> 48) & 0xffff));
+                            }
+                        }
+                    }
+                    IrConst::F64(v) => {
+                        let bits = v.to_bits();
+                        if bits == 0 {
+                            self.state.emit("    mov x0, #0");
+                        } else if bits <= 65535 {
+                            self.state.emit(&format!("    mov x0, #{}", bits));
+                        } else {
+                            self.state.emit(&format!("    mov x0, #{}", bits & 0xffff));
+                            if (bits >> 16) & 0xffff != 0 {
+                                self.state.emit(&format!("    movk x0, #{}, lsl #16", (bits >> 16) & 0xffff));
+                            }
+                            if (bits >> 32) & 0xffff != 0 {
+                                self.state.emit(&format!("    movk x0, #{}, lsl #32", (bits >> 32) & 0xffff));
+                            }
+                            if (bits >> 48) & 0xffff != 0 {
+                                self.state.emit(&format!("    movk x0, #{}, lsl #48", (bits >> 48) & 0xffff));
+                            }
+                        }
                     }
                     IrConst::Zero => self.state.emit("    mov x0, #0"),
                 }
@@ -241,6 +278,35 @@ impl ArmCodegen {
     /// Emit a type cast instruction sequence for AArch64.
     fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
         if from_ty == to_ty { return; }
+
+        // Float-to-int cast
+        if from_ty.is_float() && !to_ty.is_float() {
+            self.state.emit("    fmov d0, x0");
+            self.state.emit("    fcvtzs x0, d0");
+            return;
+        }
+
+        // Int-to-float cast
+        if !from_ty.is_float() && to_ty.is_float() {
+            self.state.emit("    scvtf d0, x0");
+            self.state.emit("    fmov x0, d0");
+            return;
+        }
+
+        // Float-to-float cast (F32 <-> F64)
+        if from_ty.is_float() && to_ty.is_float() {
+            if from_ty == IrType::F32 && to_ty == IrType::F64 {
+                self.state.emit("    fmov s0, w0");
+                self.state.emit("    fcvt d0, s0");
+                self.state.emit("    fmov x0, d0");
+            } else {
+                self.state.emit("    fmov d0, x0");
+                self.state.emit("    fcvt s0, d0");
+                self.state.emit("    fmov w0, s0");
+            }
+            return;
+        }
+
         if from_ty.size() == to_ty.size() && from_ty.is_integer() && to_ty.is_integer() {
             return;
         }
@@ -302,7 +368,8 @@ impl ArchCodegen for ArmCodegen {
         (raw_space + 15) & !15
     }
 
-    fn emit_prologue(&mut self, _func: &IrFunction, frame_size: i64) {
+    fn emit_prologue(&mut self, func: &IrFunction, frame_size: i64) {
+        self.current_return_type = func.return_type;
         self.current_frame_size = frame_size;
         self.emit_prologue_arm(frame_size);
     }
@@ -365,6 +432,25 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        if ty.is_float() {
+            self.operand_to_x0(lhs);
+            self.state.emit("    mov x1, x0");
+            self.operand_to_x0(rhs);
+            self.state.emit("    mov x2, x0");
+            self.state.emit("    fmov d0, x1");
+            self.state.emit("    fmov d1, x2");
+            match op {
+                IrBinOp::Add => self.state.emit("    fadd d0, d0, d1"),
+                IrBinOp::Sub => self.state.emit("    fsub d0, d0, d1"),
+                IrBinOp::Mul => self.state.emit("    fmul d0, d0, d1"),
+                IrBinOp::SDiv | IrBinOp::UDiv => self.state.emit("    fdiv d0, d0, d1"),
+                _ => self.state.emit("    fadd d0, d0, d1"),
+            }
+            self.state.emit("    fmov x0, d0");
+            self.store_x0_to(dest);
+            return;
+        }
+
         self.operand_to_x0(lhs);
         self.state.emit("    mov x1, x0");
         self.operand_to_x0(rhs);
@@ -435,16 +521,47 @@ impl ArchCodegen for ArmCodegen {
         self.store_x0_to(dest);
     }
 
-    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand) {
+    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
         self.operand_to_x0(src);
-        match op {
-            IrUnaryOp::Neg => self.state.emit("    neg x0, x0"),
-            IrUnaryOp::Not => self.state.emit("    mvn x0, x0"),
+        if ty.is_float() {
+            match op {
+                IrUnaryOp::Neg => {
+                    self.state.emit("    fmov d0, x0");
+                    self.state.emit("    fneg d0, d0");
+                    self.state.emit("    fmov x0, d0");
+                }
+                IrUnaryOp::Not => self.state.emit("    mvn x0, x0"),
+            }
+        } else {
+            match op {
+                IrUnaryOp::Neg => self.state.emit("    neg x0, x0"),
+                IrUnaryOp::Not => self.state.emit("    mvn x0, x0"),
+            }
         }
         self.store_x0_to(dest);
     }
 
     fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        if ty.is_float() {
+            self.operand_to_x0(lhs);
+            self.state.emit("    mov x1, x0");
+            self.operand_to_x0(rhs);
+            self.state.emit("    fmov d0, x1");
+            self.state.emit("    fmov d1, x0");
+            self.state.emit("    fcmp d0, d1");
+            let cond = match op {
+                IrCmpOp::Eq => "eq",
+                IrCmpOp::Ne => "ne",
+                IrCmpOp::Slt | IrCmpOp::Ult => "mi",
+                IrCmpOp::Sle | IrCmpOp::Ule => "ls",
+                IrCmpOp::Sgt | IrCmpOp::Ugt => "gt",
+                IrCmpOp::Sge | IrCmpOp::Uge => "ge",
+            };
+            self.state.emit(&format!("    cset x0, {}", cond));
+            self.store_x0_to(dest);
+            return;
+        }
+
         self.operand_to_x0(lhs);
         self.state.emit("    mov x1, x0");
         self.operand_to_x0(rhs);
@@ -474,17 +591,24 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_call(&mut self, args: &[Operand], direct_name: Option<&str>,
-                 func_ptr: Option<&Operand>, dest: Option<Value>) {
+                 func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType) {
         let num_args = args.len().min(8);
+        let mut float_reg_idx = 0usize;
 
         // Load all args into temp registers first (to avoid clobbering)
         for (i, arg) in args.iter().enumerate().take(num_args) {
             self.operand_to_x0(arg);
             self.state.emit(&format!("    mov {}, x0", ARM_TMP_REGS[i]));
         }
-        // Move from temps to arg registers
-        for i in 0..num_args {
-            self.state.emit(&format!("    mov {}, {}", ARM_ARG_REGS[i], ARM_TMP_REGS[i]));
+        // Move from temps to arg registers, float args go to dN via fmov
+        for (i, arg) in args.iter().enumerate().take(num_args) {
+            let is_float_arg = matches!(arg, Operand::Const(IrConst::F32(_) | IrConst::F64(_)));
+            if is_float_arg && float_reg_idx < 8 {
+                self.state.emit(&format!("    fmov d{}, {}", float_reg_idx, ARM_TMP_REGS[i]));
+                float_reg_idx += 1;
+            } else {
+                self.state.emit(&format!("    mov {}, {}", ARM_ARG_REGS[i], ARM_TMP_REGS[i]));
+            }
         }
 
         if let Some(name) = direct_name {
@@ -496,6 +620,9 @@ impl ArchCodegen for ArmCodegen {
         }
 
         if let Some(dest) = dest {
+            if return_type.is_float() {
+                self.state.emit("    fmov x0, d0");
+            }
             self.store_x0_to(&dest);
         }
     }
@@ -558,6 +685,9 @@ impl ArchCodegen for ArmCodegen {
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {
         if let Some(val) = val {
             self.operand_to_x0(val);
+            if self.current_return_type.is_float() {
+                self.state.emit("    fmov d0, x0");
+            }
         }
         self.emit_epilogue_arm(frame_size);
         self.state.emit("    ret");

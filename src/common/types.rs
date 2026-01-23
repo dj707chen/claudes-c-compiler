@@ -266,6 +266,11 @@ impl IrType {
         self.is_signed() || self.is_unsigned()
     }
 
+    /// Whether this is a floating-point type.
+    pub fn is_float(&self) -> bool {
+        matches!(self, IrType::F32 | IrType::F64)
+    }
+
     /// Get the unsigned counterpart of this type.
     pub fn to_unsigned(&self) -> Self {
         match self {

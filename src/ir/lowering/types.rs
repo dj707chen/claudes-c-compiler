@@ -155,6 +155,39 @@ impl Lowerer {
     /// Get the IR type for an expression (best-effort, based on locals/globals info).
     pub(super) fn get_expr_type(&self, expr: &Expr) -> IrType {
         match expr {
+            Expr::IntLiteral(_, _) | Expr::CharLiteral(_, _) => return IrType::I64,
+            Expr::FloatLiteral(_, _) => return IrType::F64,
+            Expr::StringLiteral(_, _) => return IrType::Ptr,
+            Expr::Cast(ref target_type, _, _) => return self.type_spec_to_ir(target_type),
+            Expr::UnaryOp(UnaryOp::Neg, inner, _) | Expr::UnaryOp(UnaryOp::Plus, inner, _) => {
+                return self.get_expr_type(inner);
+            }
+            Expr::BinaryOp(op, lhs, rhs, _) => {
+                match op {
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                    | BinOp::LogicalAnd | BinOp::LogicalOr => return IrType::I64,
+                    _ => {
+                        let lty = self.get_expr_type(lhs);
+                        let rty = self.get_expr_type(rhs);
+                        if lty == IrType::F64 || rty == IrType::F64 {
+                            return IrType::F64;
+                        } else if lty == IrType::F32 || rty == IrType::F32 {
+                            return IrType::F32;
+                        }
+                    }
+                }
+            }
+            Expr::Assign(lhs, _, _) | Expr::CompoundAssign(_, lhs, _, _) => {
+                return self.get_expr_type(lhs);
+            }
+            Expr::Conditional(_, then_expr, _, _) => return self.get_expr_type(then_expr),
+            Expr::Comma(_, rhs, _) => return self.get_expr_type(rhs),
+            Expr::PostfixOp(_, inner, _) => return self.get_expr_type(inner),
+            Expr::AddressOf(_, _) => return IrType::Ptr,
+            Expr::FunctionCall(_, _, _) => return IrType::I64,
+            _ => {}
+        }
+        match expr {
             Expr::Identifier(name, _) => {
                 if self.enum_constants.contains_key(name) {
                     return IrType::I32;

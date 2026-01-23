@@ -113,14 +113,14 @@ pub trait ArchCodegen {
     fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType);
 
     /// Emit a unary operation.
-    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand);
+    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType);
 
     /// Emit a comparison operation.
     fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType);
 
     /// Emit a function call (direct or indirect).
     fn emit_call(&mut self, args: &[Operand], direct_name: Option<&str>,
-                 func_ptr: Option<&Operand>, dest: Option<Value>);
+                 func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType);
 
     /// Emit a global address load.
     fn emit_global_addr(&mut self, dest: &Value, name: &str);
@@ -218,17 +218,17 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
         Instruction::BinOp { dest, op, lhs, rhs, ty } => {
             cg.emit_binop(dest, *op, lhs, rhs, *ty);
         }
-        Instruction::UnaryOp { dest, op, src, .. } => {
-            cg.emit_unaryop(dest, *op, src);
+        Instruction::UnaryOp { dest, op, src, ty } => {
+            cg.emit_unaryop(dest, *op, src, *ty);
         }
         Instruction::Cmp { dest, op, lhs, rhs, ty } => {
             cg.emit_cmp(dest, *op, lhs, rhs, *ty);
         }
-        Instruction::Call { dest, func, args, .. } => {
-            cg.emit_call(args, Some(func), None, *dest);
+        Instruction::Call { dest, func, args, return_type } => {
+            cg.emit_call(args, Some(func), None, *dest, *return_type);
         }
-        Instruction::CallIndirect { dest, func_ptr, args, .. } => {
-            cg.emit_call(args, None, Some(func_ptr), *dest);
+        Instruction::CallIndirect { dest, func_ptr, args, return_type } => {
+            cg.emit_call(args, None, Some(func_ptr), *dest, *return_type);
         }
         Instruction::GlobalAddr { dest, name } => {
             cg.emit_global_addr(dest, name);
