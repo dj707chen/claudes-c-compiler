@@ -359,6 +359,13 @@ impl Lowerer {
                     let is_bool = func.params.get(i).map_or(false, |p| {
                         matches!(self.resolve_type_spec(&p.type_spec), TypeSpecifier::Bool)
                     });
+
+                    // For pointer-to-array params (e.g., int (*)[3] from int arr[N][3]),
+                    // compute array_dim_strides so multi-dim subscripts work.
+                    let array_dim_strides = if ty == IrType::Ptr {
+                        func.params.get(i).map_or(vec![], |p| self.compute_ptr_array_strides(&p.type_spec))
+                    } else { vec![] };
+
                     self.locals.insert(param.name.clone(), LocalInfo {
                         alloca,
                         elem_size,
@@ -368,7 +375,7 @@ impl Lowerer {
                         struct_layout,
                         is_struct: false,
                         alloc_size: ty.size(),
-                        array_dim_strides: vec![],
+                        array_dim_strides,
                         c_type,
                         is_bool,
                     });

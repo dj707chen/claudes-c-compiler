@@ -461,59 +461,78 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_store_params(&mut self, func: &IrFunction) {
+        let frame_size = self.current_frame_size;
+
+        // Classify each param: int reg, float reg, or stack-passed
         let mut int_reg_idx = 0usize;
         let mut float_reg_idx = 0usize;
-        // Stack-passed params are above the callee's frame at [sp + frame_size + offset]
-        let mut stack_param_offset: i64 = 0;
-        let frame_size = self.current_frame_size;
-        for (i, param) in func.params.iter().enumerate() {
-            let is_float = param.ty.is_float();
-            let is_stack_passed = if is_float { float_reg_idx >= 8 } else { int_reg_idx >= 8 };
+        let mut param_class: Vec<char> = Vec::new(); // 'i', 'f', 's'
+        let mut param_int_reg: Vec<usize> = Vec::new();
+        let mut param_float_reg: Vec<usize> = Vec::new();
+        let mut stack_offsets: Vec<i64> = Vec::new();
+        let mut stack_offset: i64 = 0;
 
-            if param.name.is_empty() {
-                if is_stack_passed {
-                    stack_param_offset += 8;
-                } else if is_float {
-                    float_reg_idx += 1;
-                } else {
-                    int_reg_idx += 1;
-                }
-                continue;
+        for param in func.params.iter() {
+            let is_float = param.ty.is_float();
+            if is_float && float_reg_idx < 8 {
+                param_class.push('f');
+                param_float_reg.push(float_reg_idx);
+                param_int_reg.push(0);
+                stack_offsets.push(0);
+                float_reg_idx += 1;
+            } else if !is_float && int_reg_idx < 8 {
+                param_class.push('i');
+                param_int_reg.push(int_reg_idx);
+                param_float_reg.push(0);
+                stack_offsets.push(0);
+                int_reg_idx += 1;
+            } else {
+                param_class.push('s');
+                param_int_reg.push(0);
+                param_float_reg.push(0);
+                stack_offsets.push(stack_offset);
+                stack_offset += 8;
             }
+        }
+
+        // Phase 1: Store all INTEGER register params first (before x0 gets clobbered by float moves).
+        for (i, param) in func.params.iter().enumerate() {
+            if param_class[i] != 'i' || param.name.is_empty() { continue; }
             if let Some((dest, ty)) = find_param_alloca(func, i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
-                    if is_stack_passed {
-                        // Stack-passed parameter: load from caller's stack above our frame
-                        let caller_offset = frame_size + stack_param_offset;
-                        self.emit_load_from_sp("x0", caller_offset, "ldr");
-                        let store_instr = Self::str_for_type(ty);
-                        let reg = Self::reg_for_type("x0", ty);
-                        self.emit_store_to_sp(reg, slot.0, store_instr);
-                        stack_param_offset += 8;
-                    } else if is_float {
-                        // Float params arrive in sN/dN per AAPCS64
-                        if ty == IrType::F32 {
-                            self.state.emit(&format!("    fmov w0, s{}", float_reg_idx));
-                            self.emit_store_to_sp("x0", slot.0, "str");
-                        } else {
-                            self.state.emit(&format!("    fmov x0, d{}", float_reg_idx));
-                            self.emit_store_to_sp("x0", slot.0, "str");
-                        }
-                        float_reg_idx += 1;
+                    let store_instr = Self::str_for_type(ty);
+                    let reg = Self::reg_for_type(ARM_ARG_REGS[param_int_reg[i]], ty);
+                    self.emit_store_to_sp(reg, slot.0, store_instr);
+                }
+            }
+        }
+
+        // Phase 2: Store all FLOAT register params (uses x0 as scratch, but int regs already saved).
+        for (i, param) in func.params.iter().enumerate() {
+            if param_class[i] != 'f' || param.name.is_empty() { continue; }
+            if let Some((dest, ty)) = find_param_alloca(func, i) {
+                if let Some(slot) = self.state.get_slot(dest.0) {
+                    if ty == IrType::F32 {
+                        self.state.emit(&format!("    fmov w0, s{}", param_float_reg[i]));
+                        self.emit_store_to_sp("x0", slot.0, "str");
                     } else {
-                        let store_instr = Self::str_for_type(ty);
-                        let reg = Self::reg_for_type(ARM_ARG_REGS[int_reg_idx], ty);
-                        self.emit_store_to_sp(reg, slot.0, store_instr);
-                        int_reg_idx += 1;
+                        self.state.emit(&format!("    fmov x0, d{}", param_float_reg[i]));
+                        self.emit_store_to_sp("x0", slot.0, "str");
                     }
                 }
-            } else {
-                if is_stack_passed {
-                    stack_param_offset += 8;
-                } else if is_float {
-                    float_reg_idx += 1;
-                } else {
-                    int_reg_idx += 1;
+            }
+        }
+
+        // Phase 3: Store stack-passed params (above callee's frame).
+        for (i, param) in func.params.iter().enumerate() {
+            if param_class[i] != 's' || param.name.is_empty() { continue; }
+            if let Some((dest, ty)) = find_param_alloca(func, i) {
+                if let Some(slot) = self.state.get_slot(dest.0) {
+                    let caller_offset = frame_size + stack_offsets[i];
+                    self.emit_load_from_sp("x0", caller_offset, "ldr");
+                    let store_instr = Self::str_for_type(ty);
+                    let reg = Self::reg_for_type("x0", ty);
+                    self.emit_store_to_sp(reg, slot.0, store_instr);
                 }
             }
         }

@@ -1099,7 +1099,7 @@ impl Parser {
             self.skip_gcc_extensions();
             if let Some(mut type_spec) = self.parse_type_specifier() {
                 // Parse parameter declarator (handles pointers, function pointers, arrays)
-                let (name, pointer_depth, is_array, is_func_ptr) = self.parse_param_declarator_full();
+                let (name, pointer_depth, array_dims, is_func_ptr) = self.parse_param_declarator_full();
                 self.skip_gcc_extensions();
 
                 // Wrap type with pointer levels from declarator
@@ -1108,8 +1108,17 @@ impl Parser {
                     type_spec = TypeSpecifier::Pointer(Box::new(type_spec));
                 }
 
-                // Array parameters decay to pointers (e.g., `int arr[]` -> `int *`)
-                if is_array {
+                // Array parameters: outermost dimension decays to pointer,
+                // inner dimensions wrap as Array.
+                // e.g., `int arr[3][4]` -> Pointer(Array(Int, 4))
+                // e.g., `int arr[][4]` -> Pointer(Array(Int, 4))
+                // e.g., `int arr[3]` -> Pointer(Int)
+                if !array_dims.is_empty() {
+                    // Wrap inner dimensions (from innermost to outermost, skip first)
+                    for dim in array_dims.iter().skip(1).rev() {
+                        type_spec = TypeSpecifier::Array(Box::new(type_spec), dim.clone());
+                    }
+                    // Outermost dimension decays to pointer
                     type_spec = TypeSpecifier::Pointer(Box::new(type_spec));
                 }
 
@@ -1140,16 +1149,17 @@ impl Parser {
     /// - Abstract (unnamed): `int *`, `void (*)(int)`
     /// - Parenthesized: `int (x)`
     /// Returns the name if one was found.
-    /// Parse a parameter declarator. Returns (name, pointer_depth, is_array, is_func_ptr).
-    /// The caller must wrap the base type_spec with Pointer() for each pointer level.
-    fn parse_param_declarator_full(&mut self) -> (Option<String>, u32, bool, bool) {
+    /// Parse a parameter declarator. Returns (name, pointer_depth, array_dims, is_func_ptr).
+    /// array_dims: list of array dimension sizes (outermost first). Empty = not an array.
+    /// The outermost dimension decays to pointer; inner dimensions wrap the type as Array.
+    fn parse_param_declarator_full(&mut self) -> (Option<String>, u32, Vec<Option<Box<Expr>>>, bool) {
         // Parse leading pointer(s)
         let mut pointer_depth: u32 = 0;
         while self.consume_if(&TokenKind::Star) {
             pointer_depth += 1;
             self.skip_cv_qualifiers();
         }
-        let mut is_array = false;
+        let mut array_dims: Vec<Option<Box<Expr>>> = Vec::new();
         let mut is_func_ptr = false;
 
         // Check for parenthesized declarator: (*name) or (*)
@@ -1220,10 +1230,19 @@ impl Parser {
             None
         };
 
-        // Skip array dimensions (and track that this is an array type -> pointer decay)
-        if matches!(self.peek(), TokenKind::LBracket) {
-            is_array = true;
-            self.skip_array_dimensions();
+        // Parse array dimensions (preserving inner dimensions for multi-dim arrays)
+        while matches!(self.peek(), TokenKind::LBracket) {
+            self.advance(); // consume '['
+            if matches!(self.peek(), TokenKind::RBracket) {
+                // Empty brackets: arr[]
+                array_dims.push(None);
+                self.advance();
+            } else {
+                // Parse the dimension expression
+                let dim_expr = self.parse_expr();
+                array_dims.push(Some(Box::new(dim_expr)));
+                self.expect(&TokenKind::RBracket);
+            }
         }
 
         // Skip trailing function param list (for function pointer types without name)
@@ -1231,7 +1250,7 @@ impl Parser {
             self.skip_balanced_parens();
         }
 
-        (name, pointer_depth, is_array, is_func_ptr)
+        (name, pointer_depth, array_dims, is_func_ptr)
     }
 
     fn parse_compound_stmt(&mut self) -> CompoundStmt {

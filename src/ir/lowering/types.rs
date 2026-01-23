@@ -356,8 +356,32 @@ impl Lowerer {
                 let v = l.wrapping_mul(r);
                 if is_32bit { v as i32 as i64 } else { v }
             }
-            BinOp::Div => if r != 0 { l.wrapping_div(r) } else { return None; },
-            BinOp::Mod => if r != 0 { l.wrapping_rem(r) } else { return None; },
+            BinOp::Div => {
+                if r == 0 { return None; }
+                if is_unsigned {
+                    if is_32bit {
+                        ((l as u32).wrapping_div(r as u32)) as i64
+                    } else {
+                        ((l as u64).wrapping_div(r as u64)) as i64
+                    }
+                } else {
+                    let v = l.wrapping_div(r);
+                    if is_32bit { v as i32 as i64 } else { v }
+                }
+            }
+            BinOp::Mod => {
+                if r == 0 { return None; }
+                if is_unsigned {
+                    if is_32bit {
+                        ((l as u32).wrapping_rem(r as u32)) as i64
+                    } else {
+                        ((l as u64).wrapping_rem(r as u64)) as i64
+                    }
+                } else {
+                    let v = l.wrapping_rem(r);
+                    if is_32bit { v as i32 as i64 } else { v }
+                }
+            }
             BinOp::BitAnd => l & r,
             BinOp::BitOr => l | r,
             BinOp::BitXor => l ^ r,
@@ -368,7 +392,6 @@ impl Lowerer {
             BinOp::Shr => {
                 if is_unsigned {
                     if is_32bit {
-                        // 32-bit unsigned shift: mask to 32 bits, then logical shift
                         ((l as u32).wrapping_shr(r as u32)) as i64
                     } else {
                         (l as u64).wrapping_shr(r as u32) as i64
@@ -383,10 +406,22 @@ impl Lowerer {
             }
             BinOp::Eq => if l == r { 1 } else { 0 },
             BinOp::Ne => if l != r { 1 } else { 0 },
-            BinOp::Lt => if l < r { 1 } else { 0 },
-            BinOp::Gt => if l > r { 1 } else { 0 },
-            BinOp::Le => if l <= r { 1 } else { 0 },
-            BinOp::Ge => if l >= r { 1 } else { 0 },
+            BinOp::Lt => {
+                if is_unsigned { if (l as u64) < (r as u64) { 1 } else { 0 } }
+                else { if l < r { 1 } else { 0 } }
+            },
+            BinOp::Gt => {
+                if is_unsigned { if (l as u64) > (r as u64) { 1 } else { 0 } }
+                else { if l > r { 1 } else { 0 } }
+            },
+            BinOp::Le => {
+                if is_unsigned { if (l as u64) <= (r as u64) { 1 } else { 0 } }
+                else { if l <= r { 1 } else { 0 } }
+            },
+            BinOp::Ge => {
+                if is_unsigned { if (l as u64) >= (r as u64) { 1 } else { 0 } }
+                else { if l >= r { 1 } else { 0 } }
+            },
             BinOp::LogicalAnd => if l != 0 && r != 0 { 1 } else { 0 },
             BinOp::LogicalOr => if l != 0 || r != 0 { 1 } else { 0 },
             _ => return None,
@@ -1037,6 +1072,51 @@ impl Lowerer {
         }
     }
 
+    /// For a pointer-to-array parameter type (e.g., Pointer(Array(Array(Int, 4), 3))),
+    /// compute the array dimension strides for multi-dimensional subscript access.
+    /// Returns strides for depth 0, 1, 2, ... where depth 0 is the outermost subscript.
+    /// E.g., for int (*arr)[3][4]: strides = [3*4*4=48, 4*4=16, 4]
+    /// For int (*arr)[3]: strides = [3*4=12, 4]
+    pub(super) fn compute_ptr_array_strides(&self, type_spec: &TypeSpecifier) -> Vec<usize> {
+        let ts = self.resolve_type_spec(type_spec);
+        if let TypeSpecifier::Pointer(inner) = ts {
+            // Collect dimensions from nested Array types
+            let mut dims: Vec<usize> = Vec::new();
+            let mut current = &*inner;
+            loop {
+                let resolved = self.resolve_type_spec(current);
+                if let TypeSpecifier::Array(elem, size_expr) = resolved {
+                    let n = size_expr.as_ref().and_then(|e| self.expr_as_array_size(e)).unwrap_or(1);
+                    dims.push(n as usize);
+                    current = &*elem;
+                } else {
+                    break;
+                }
+            }
+            if dims.is_empty() {
+                return vec![];
+            }
+            // Compute base element size (the innermost non-array type)
+            let base_elem_size = self.sizeof_type(current);
+            // Compute strides: stride[i] = product of dims[i..] * base_elem_size
+            let mut strides = Vec::with_capacity(dims.len() + 1);
+            // stride 0 = full row size = product(all dims) * base_elem_size
+            // This is sizeof(pointee), already used as elem_size
+            let full_size: usize = dims.iter().product::<usize>() * base_elem_size;
+            strides.push(full_size);
+            // stride 1 = product(dims[1..]) * base_elem_size
+            for i in 1..dims.len() {
+                let stride: usize = dims[i..].iter().product::<usize>() * base_elem_size;
+                strides.push(stride);
+            }
+            // Final stride = base_elem_size (for the innermost subscript)
+            strides.push(base_elem_size);
+            strides
+        } else {
+            vec![]
+        }
+    }
+
     /// Compute sizeof for an expression operand (sizeof expr).
     /// Returns the size in bytes of the expression's type.
     pub(super) fn sizeof_expr(&self, expr: &Expr) -> usize {
@@ -1575,6 +1655,45 @@ impl Lowerer {
             Expr::StringLiteral(_, _) => {
                 // String literals have type char[] which decays to char*
                 Some(CType::Pointer(Box::new(CType::Char)))
+            }
+            Expr::BinaryOp(op, lhs, rhs, _) => {
+                // Pointer arithmetic: ptr + int or int + ptr returns the pointer type
+                // Pointer subtraction: ptr - ptr returns ptrdiff_t (Long)
+                match op {
+                    BinOp::Add => {
+                        if let Some(lct) = self.get_expr_ctype(lhs) {
+                            if matches!(&lct, CType::Pointer(_) | CType::Array(_, _)) {
+                                return Some(lct);
+                            }
+                        }
+                        if let Some(rct) = self.get_expr_ctype(rhs) {
+                            if matches!(&rct, CType::Pointer(_) | CType::Array(_, _)) {
+                                return Some(rct);
+                            }
+                        }
+                        None
+                    }
+                    BinOp::Sub => {
+                        if let Some(lct) = self.get_expr_ctype(lhs) {
+                            if matches!(&lct, CType::Pointer(_) | CType::Array(_, _)) {
+                                // Check if rhs is also pointer (ptr - ptr = ptrdiff_t)
+                                if let Some(rct) = self.get_expr_ctype(rhs) {
+                                    if matches!(&rct, CType::Pointer(_) | CType::Array(_, _)) {
+                                        return Some(CType::Long);
+                                    }
+                                }
+                                // ptr - int = same pointer type
+                                return Some(lct);
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
+            Expr::FunctionCall(_, _, _) => {
+                // TODO: could look up function return type
+                None
             }
             _ => None,
         }

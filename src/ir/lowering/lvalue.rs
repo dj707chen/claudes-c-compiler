@@ -360,6 +360,21 @@ impl Lowerer {
                 }
             }
         }
+        // For non-identifier expressions (e.g., pointer arithmetic like arr+1, casts, etc.),
+        // try to resolve the element size via CType.
+        if let Some(ctype) = self.get_expr_ctype(base) {
+            match &ctype {
+                CType::Pointer(pointee) => {
+                    let sz = pointee.size();
+                    if sz > 0 { return sz; }
+                }
+                CType::Array(elem, _) => {
+                    let sz = elem.size();
+                    if sz > 0 { return sz; }
+                }
+                _ => {}
+            }
+        }
         // Default element size: for pointers we don't know the element type,
         // use 8 bytes as a safe default for pointer dereferencing.
         8
