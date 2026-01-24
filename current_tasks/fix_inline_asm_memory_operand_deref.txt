@@ -1,0 +1,9 @@
+Fix inline asm memory operand pointer dereference
+
+Inline asm "=m"(*ptr) and "m"(*ptr) constraints were not dereferencing pointers.
+Instead of writing to/reading from the memory location pointed to by ptr, the
+generated code accessed the stack slot holding the pointer value itself.
+
+This caused PostgreSQL's x86 atomic operations (lock xchgb, lock cmpxchgl,
+lock xaddl, lock cmpxchgq) to operate on wrong memory, making postgres --check
+hang in a spinlock busy-wait during initdb.

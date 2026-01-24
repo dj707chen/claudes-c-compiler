@@ -2169,17 +2169,50 @@ impl InlineAsmEmitter for X86Codegen {
         }
     }
 
-    fn setup_operand_metadata(&self, op: &mut AsmOperand, val: &Operand, _is_output: bool) {
+    fn setup_operand_metadata(&self, op: &mut AsmOperand, val: &Operand, is_output: bool) {
         if matches!(op.kind, AsmOperandKind::Memory) {
             match val {
                 Operand::Value(v) => {
                     if let Some(slot) = self.state.get_slot(v.0) {
-                        op.mem_addr = format!("{}(%rbp)", slot.0);
+                        if is_output && self.state.is_alloca(v.0) {
+                            // Alloca: the stack slot IS the variable's storage
+                            op.mem_addr = format!("{}(%rbp)", slot.0);
+                        } else if !is_output && self.state.is_alloca(v.0) {
+                            // Input alloca: use stack address directly
+                            op.mem_addr = format!("{}(%rbp)", slot.0);
+                        } else {
+                            // Non-alloca: slot holds a pointer value that needs indirection.
+                            // Mark with empty mem_addr; resolve_memory_operand will load
+                            // the pointer into a register and set up the indirect address.
+                            op.mem_addr = String::new();
+                        }
                     }
                 }
                 _ => {}
             }
         }
+    }
+
+    fn resolve_memory_operand(&mut self, op: &mut AsmOperand, val: &Operand) -> bool {
+        // If mem_addr is already set (alloca case), nothing to do
+        if !op.mem_addr.is_empty() {
+            return false;
+        }
+        // Load the pointer value into a temporary register for indirect addressing
+        match val {
+            Operand::Value(v) => {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    // Use rax as temporary (saved/restored by caller convention for inline asm)
+                    // Actually, use a register that won't conflict - pick from scratch regs
+                    let tmp_reg = "r11"; // r11 is caller-saved and unlikely to conflict
+                    self.state.emit(&format!("    movq {}(%rbp), %{}", slot.0, tmp_reg));
+                    op.mem_addr = format!("(%{})", tmp_reg);
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        false
     }
 
     fn assign_scratch_reg(&mut self, _kind: &AsmOperandKind) -> String {
@@ -2194,6 +2227,7 @@ impl InlineAsmEmitter for X86Codegen {
 
     fn load_input_to_reg(&mut self, op: &AsmOperand, val: &Operand, _constraint: &str) {
         let reg = &op.reg;
+        let ty = op.operand_type;
         match val {
             Operand::Const(c) => {
                 let imm = c.to_i64().unwrap_or(0);
@@ -2208,7 +2242,19 @@ impl InlineAsmEmitter for X86Codegen {
                     if self.state.is_alloca(v.0) {
                         self.state.emit(&format!("    leaq {}(%rbp), %{}", slot.0, reg));
                     } else {
-                        self.state.emit(&format!("    movq {}(%rbp), %{}", slot.0, reg));
+                        // Use type-appropriate load to avoid reading garbage from
+                        // stack slots of smaller-than-8-byte variables
+                        let load_instr = Self::mov_load_for_type(ty);
+                        let dest_reg = match ty {
+                            IrType::U32 | IrType::F32 => Self::reg_to_32(reg),
+                            _ => format!("%{}", reg),
+                        };
+                        let dest_reg_str = if matches!(ty, IrType::U32 | IrType::F32) {
+                            format!("%{}", dest_reg)
+                        } else {
+                            dest_reg
+                        };
+                        self.state.emit(&format!("    {} {}(%rbp), {}", load_instr, slot.0, dest_reg_str));
                     }
                 }
             }
@@ -2217,8 +2263,15 @@ impl InlineAsmEmitter for X86Codegen {
 
     fn preload_readwrite_output(&mut self, op: &AsmOperand, ptr: &Value) {
         let reg = &op.reg;
+        let ty = op.operand_type;
         if let Some(slot) = self.state.get_slot(ptr.0) {
-            self.state.emit(&format!("    movq {}(%rbp), %{}", slot.0, reg));
+            // Use type-appropriate load to correctly handle byte/word/dword variables
+            let load_instr = Self::mov_load_for_type(ty);
+            let dest_reg = match ty {
+                IrType::U32 | IrType::F32 => format!("%{}", Self::reg_to_32(reg)),
+                _ => format!("%{}", reg),
+            };
+            self.state.emit(&format!("    {} {}(%rbp), {}", load_instr, slot.0, dest_reg));
         }
     }
 
@@ -2252,8 +2305,17 @@ impl InlineAsmEmitter for X86Codegen {
             return;
         }
         let reg = &op.reg;
+        let ty = op.operand_type;
         if let Some(slot) = self.state.get_slot(ptr.0) {
-            self.state.emit(&format!("    movq %{}, {}(%rbp)", reg, slot.0));
+            // Use type-appropriate store to avoid clobbering adjacent stack data
+            let store_instr = Self::mov_store_for_type(ty);
+            let src_reg = match ty {
+                IrType::I8 | IrType::U8 => format!("%{}", Self::reg_to_8l(reg)),
+                IrType::I16 | IrType::U16 => format!("%{}", Self::reg_to_16(reg)),
+                IrType::I32 | IrType::U32 | IrType::F32 => format!("%{}", Self::reg_to_32(reg)),
+                _ => format!("%{}", reg),
+            };
+            self.state.emit(&format!("    {} {}, {}(%rbp)", store_instr, src_reg, slot.0));
         }
     }
 

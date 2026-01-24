@@ -65,6 +65,16 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   by spilling the function pointer to a dedicated stack slot and reloading before the call.
   This fixed sqlite3's VDBE interpreter crash on ARM and all 291 previously-crashing
   sqllogictest cases (they were timing out under QEMU, not producing wrong results).
+- **Fix inline assembly typed operand loads/stores and memory indirection**: Fixed inline
+  assembly operand handling to use correctly-sized load/store instructions based on operand
+  type. Previously, all inline asm load/store operations used 64-bit `movq` regardless of
+  the actual operand type. For byte-sized types (e.g., PostgreSQL's `slock_t` used in
+  spinlocks with `+q` constraint), this read garbage from adjacent stack bytes and wrote
+  too many bytes back. Also fixed memory operands (`+m`) for dereferenced pointers (`*ptr`)
+  to use register-indirect addressing instead of the stack slot of the pointer value.
+  Added `operand_type` field to `AsmOperand` and `resolve_memory_operand` trait method.
+  This fixed the PostgreSQL `initdb` hang where spinlocks (using `lock xchgb`) never
+  succeeded because the exchange byte register contained garbage instead of the expected value.
 - **Fix _Bool conversion normalization (truncate-before-normalize bug)**: Fixed implicit
   conversions to `_Bool` in initialization, assignment, return, and parameter passing.
   Previously `emit_implicit_cast` truncated to U8 (IntNarrow) *before* `emit_bool_normalize`
@@ -261,7 +271,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 | sqlite | PASS | All 622 sqllogictest pass |
 | libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |
 | redis | PASS | All tests pass (version, cli, SET/GET roundtrip) |
-| postgres | PARTIAL | Build succeeds; initdb runs (fixed `[N].field` designated init crash); `make check` times out |
+| postgres | PARTIAL | Build succeeds; initdb progresses past spinlock init (fixed inline asm typed operands); bootstrap script segfaults |
 
 ### What's Not Yet Implemented
 - Parser support for GNU C extensions in system headers (`__attribute__`, `__asm__` renames)

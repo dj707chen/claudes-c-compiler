@@ -1,0 +1,19 @@
+Fix PostgreSQL bootstrap script segfault
+
+After fixing the inline asm typed operands (spinlock hang), PostgreSQL initdb
+now progresses further but segfaults during "running bootstrap script":
+
+  creating configuration files ... ok
+  running bootstrap script ... Segmentation fault (core dumped)
+  child process exited with exit code 139
+
+The bootstrap script phase runs the postgres backend in single-user/bootstrap
+mode. This is a different code path from the spinlock issue (which is now fixed).
+
+Debugging approach:
+1. Build postgres with CCC --build-only, install to a temp prefix
+2. Run initdb under gdb (or use gdb on the postgres subprocess)
+3. Try mixed compilation: compile most files with GCC, swap in CCC one at a time
+   to isolate which source file is miscompiled
+4. Focus on the bootstrap code path in src/backend/bootstrap/
+5. Check struct layout mismatches between CCC and GCC-compiled objects

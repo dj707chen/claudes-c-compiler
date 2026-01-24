@@ -1031,11 +1031,13 @@ pub struct AsmOperand {
     pub mem_offset: i64,
     /// Immediate value for "I"/"i" constraints.
     pub imm_value: Option<i64>,
+    /// IR type of this operand, used for correctly-sized loads/stores.
+    pub operand_type: IrType,
 }
 
 impl AsmOperand {
     pub fn new(kind: AsmOperandKind, name: Option<String>) -> Self {
-        Self { kind, reg: String::new(), name, mem_addr: String::new(), mem_offset: 0, imm_value: None }
+        Self { kind, reg: String::new(), name, mem_addr: String::new(), mem_offset: 0, imm_value: None, operand_type: IrType::I64 }
     }
 }
 
@@ -1074,6 +1076,13 @@ pub trait InlineAsmEmitter {
 
     /// Store an output register value back to its stack slot after the asm executes.
     fn store_output_from_reg(&mut self, op: &AsmOperand, ptr: &Value, constraint: &str);
+
+    /// Resolve memory operand addresses that require indirection (non-alloca pointers).
+    /// Called during Phase 2 for Memory operands whose pointer values need to be loaded
+    /// into a register for indirect addressing. Returns true if the operand was updated.
+    fn resolve_memory_operand(&mut self, _op: &mut AsmOperand, _val: &Operand) -> bool {
+        false // default: no resolution needed
+    }
 
     /// Reset scratch register allocation state (called at start of each inline asm).
     fn reset_scratch_state(&mut self);
@@ -1186,6 +1195,22 @@ pub fn emit_inline_asm_common(
         }
     }
 
+    // Populate operand types from the operand_types array (outputs first, then inputs)
+    for (i, ty) in operand_types.iter().enumerate() {
+        if i < operands.len() {
+            operands[i].operand_type = *ty;
+        }
+    }
+
+    // Resolve memory operand addresses that require indirection (non-alloca pointers).
+    // This must happen BEFORE "+" propagation so synthetic inputs inherit resolved addresses.
+    for (i, (_, ptr, _)) in outputs.iter().enumerate() {
+        if matches!(operands[i].kind, AsmOperandKind::Memory) {
+            let val = Operand::Value(*ptr);
+            emitter.resolve_memory_operand(&mut operands[i], &val);
+        }
+    }
+
     // Handle "+" read-write constraints: synthetic inputs share the output's register.
     // The IR lowering adds synthetic inputs at the BEGINNING of the inputs list
     // (one per "+" output, in order).
@@ -1198,6 +1223,7 @@ pub fn emit_inline_asm_common(
                 operands[plus_input_idx].kind = operands[i].kind.clone();
                 operands[plus_input_idx].mem_addr = operands[i].mem_addr.clone();
                 operands[plus_input_idx].mem_offset = operands[i].mem_offset;
+                operands[plus_input_idx].operand_type = operands[i].operand_type;
             }
             plus_idx += 1;
         }
@@ -1213,6 +1239,19 @@ pub fn emit_inline_asm_common(
     }
     for i in num_plus..inputs.len() {
         gcc_to_internal.push(outputs.len() + i);
+    }
+
+    // Resolve memory operand addresses for non-synthetic input operands
+    {
+        let num_plus = outputs.iter().filter(|(c,_,_)| c.contains('+')).count();
+        for (i, (_, val, _)) in inputs.iter().enumerate() {
+            // Skip synthetic "+" inputs (they already inherited from outputs)
+            if i < num_plus { continue; }
+            let op_idx = outputs.len() + i;
+            if matches!(operands[op_idx].kind, AsmOperandKind::Memory) {
+                emitter.resolve_memory_operand(&mut operands[op_idx], val);
+            }
+        }
     }
 
     // Phase 2: Load input values into their assigned registers
