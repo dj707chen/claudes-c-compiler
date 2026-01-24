@@ -136,14 +136,116 @@ impl Lowerer {
                     let item = inits[0];
                     let has_nested_designator = item.designators.len() > 1
                         && matches!(item.designators.first(), Some(Designator::Field(_)));
-                    if has_nested_designator {
+
+                    // Check if this is a designator targeting a field inside an anonymous member
+                    let desig_name = match item.designators.first() {
+                        Some(Designator::Field(ref name)) => Some(name.as_str()),
+                        _ => None,
+                    };
+                    let is_anon_member_designator = desig_name.is_some()
+                        && layout.fields[fi].name.is_empty()
+                        && matches!(&layout.fields[fi].ty, CType::Struct(_) | CType::Union(_));
+
+                    if is_anon_member_designator {
+                        let sub_item = InitializerItem {
+                            designators: item.designators.clone(),
+                            init: item.init.clone(),
+                        };
+                        let sub_layout = match &layout.fields[fi].ty {
+                            CType::Struct(st) => StructLayout::for_struct(&st.fields),
+                            CType::Union(st) => StructLayout::for_union(&st.fields),
+                            _ => unreachable!(),
+                        };
+                        let sub_items = vec![sub_item];
+                        if self.struct_init_has_addr_fields(&sub_items, &sub_layout) {
+                            let nested = self.lower_struct_global_init_compound(&sub_items, &sub_layout);
+                            if let GlobalInit::Compound(nested_elems) = nested {
+                                let mut emitted = 0;
+                                for elem in nested_elems {
+                                    if emitted >= field_size { break; }
+                                    let elem_size = match &elem {
+                                        GlobalInit::Scalar(_) => 1,
+                                        GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) => 8,
+                                        GlobalInit::Compound(inner) => inner.len(),
+                                        GlobalInit::Array(vals) => vals.len(),
+                                        GlobalInit::Zero => 0,
+                                        GlobalInit::String(s) => s.len(),
+                                        GlobalInit::WideString(ws) => ws.len() * 4,
+                                    };
+                                    elements.push(elem);
+                                    emitted += elem_size;
+                                }
+                                while emitted < field_size {
+                                    elements.push(GlobalInit::Scalar(IrConst::I8(0)));
+                                    emitted += 1;
+                                }
+                            } else {
+                                push_zero_bytes(&mut elements, field_size);
+                            }
+                        } else {
+                            let mut bytes = vec![0u8; field_size];
+                            self.fill_struct_global_bytes(&sub_items, &sub_layout, &mut bytes, 0);
+                            for b in &bytes {
+                                elements.push(GlobalInit::Scalar(IrConst::I8(*b as i8)));
+                            }
+                        }
+                    } else if has_nested_designator {
                         self.emit_compound_nested_designator_init(
                             &mut elements, item, &layout.fields[fi].ty, field_size);
                     } else {
                         self.emit_compound_field_init(&mut elements, &item.init, &layout.fields[fi].ty, field_size, field_is_pointer);
                     }
                 } else if inits.len() > 1 {
-                    self.emit_compound_flat_array_init(&mut elements, inits, &layout.fields[fi].ty, field_size);
+                    // Check if this is an anonymous member with multiple sub-field inits
+                    let is_anon_multi = layout.fields[fi].name.is_empty()
+                        && matches!(&layout.fields[fi].ty, CType::Struct(_) | CType::Union(_));
+                    if is_anon_multi {
+                        let sub_items: Vec<InitializerItem> = inits.iter().map(|item| {
+                            InitializerItem {
+                                designators: item.designators.clone(),
+                                init: item.init.clone(),
+                            }
+                        }).collect();
+                        let sub_layout = match &layout.fields[fi].ty {
+                            CType::Struct(st) => StructLayout::for_struct(&st.fields),
+                            CType::Union(st) => StructLayout::for_union(&st.fields),
+                            _ => unreachable!(),
+                        };
+                        if self.struct_init_has_addr_fields(&sub_items, &sub_layout) {
+                            let nested = self.lower_struct_global_init_compound(&sub_items, &sub_layout);
+                            if let GlobalInit::Compound(nested_elems) = nested {
+                                let mut emitted = 0;
+                                for elem in nested_elems {
+                                    if emitted >= field_size { break; }
+                                    let elem_size = match &elem {
+                                        GlobalInit::Scalar(_) => 1,
+                                        GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) => 8,
+                                        GlobalInit::Compound(inner) => inner.len(),
+                                        GlobalInit::Array(vals) => vals.len(),
+                                        GlobalInit::Zero => 0,
+                                        GlobalInit::String(s) => s.len(),
+                                        GlobalInit::WideString(ws) => ws.len() * 4,
+                                    };
+                                    elements.push(elem);
+                                    emitted += elem_size;
+                                }
+                                while emitted < field_size {
+                                    elements.push(GlobalInit::Scalar(IrConst::I8(0)));
+                                    emitted += 1;
+                                }
+                            } else {
+                                push_zero_bytes(&mut elements, field_size);
+                            }
+                        } else {
+                            let mut bytes = vec![0u8; field_size];
+                            self.fill_struct_global_bytes(&sub_items, &sub_layout, &mut bytes, 0);
+                            for b in &bytes {
+                                elements.push(GlobalInit::Scalar(IrConst::I8(*b as i8)));
+                            }
+                        }
+                    } else {
+                        self.emit_compound_flat_array_init(&mut elements, inits, &layout.fields[fi].ty, field_size);
+                    }
                 } else {
                     push_zero_bytes(&mut elements, field_size);
                 }
@@ -261,7 +363,63 @@ impl Lowerer {
                 let has_nested_field_designator = item.designators.len() > 1
                     && matches!(item.designators.first(), Some(Designator::Field(_)));
 
-                if has_nested_field_designator {
+                // Check if this is a designator targeting a field inside an anonymous
+                // struct/union member (e.g., .x = 10 where x is inside an anonymous struct).
+                // The designator resolved to the anonymous member's index; we need to
+                // recurse into the anonymous member with the full designators.
+                let desig_name = match item.designators.first() {
+                    Some(Designator::Field(ref name)) => Some(name.as_str()),
+                    _ => None,
+                };
+                let is_anon_member_designator = desig_name.is_some()
+                    && layout.fields[fi].name.is_empty()
+                    && matches!(&layout.fields[fi].ty, CType::Struct(_) | CType::Union(_));
+
+                if is_anon_member_designator {
+                    // Recurse into the anonymous member with the full designators
+                    let sub_item = InitializerItem {
+                        designators: item.designators.clone(),
+                        init: item.init.clone(),
+                    };
+                    let sub_layout = match &layout.fields[fi].ty {
+                        CType::Struct(st) => StructLayout::for_struct(&st.fields),
+                        CType::Union(st) => StructLayout::for_union(&st.fields),
+                        _ => unreachable!(),
+                    };
+                    let sub_items = vec![sub_item];
+                    if self.struct_init_has_addr_fields(&sub_items, &sub_layout) {
+                        let nested = self.lower_struct_global_init_compound(&sub_items, &sub_layout);
+                        if let GlobalInit::Compound(nested_elems) = nested {
+                            let mut emitted = 0;
+                            for elem in nested_elems {
+                                if emitted >= field_size { break; }
+                                let elem_size = match &elem {
+                                    GlobalInit::Scalar(_) => 1,
+                                    GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) => 8,
+                                    GlobalInit::Compound(inner) => inner.len(),
+                                    GlobalInit::Array(vals) => vals.len(),
+                                    GlobalInit::Zero => 0,
+                                    GlobalInit::String(s) => s.len(),
+                                    GlobalInit::WideString(ws) => ws.len() * 4,
+                                };
+                                elements.push(elem);
+                                emitted += elem_size;
+                            }
+                            while emitted < field_size {
+                                elements.push(GlobalInit::Scalar(IrConst::I8(0)));
+                                emitted += 1;
+                            }
+                        } else {
+                            push_zero_bytes(&mut elements, field_size);
+                        }
+                    } else {
+                        let mut bytes = vec![0u8; field_size];
+                        self.fill_struct_global_bytes(&sub_items, &sub_layout, &mut bytes, 0);
+                        for b in &bytes {
+                            elements.push(GlobalInit::Scalar(IrConst::I8(*b as i8)));
+                        }
+                    }
+                } else if has_nested_field_designator {
                     self.emit_compound_nested_designator_field(
                         &mut elements, item, &layout.fields[fi].ty, field_size);
                 } else {
@@ -286,8 +444,60 @@ impl Lowerer {
                     }
                 }
             } else {
-                // Multiple items for this field (flat array init)
-                self.emit_compound_flat_array_init(&mut elements, inits, &layout.fields[fi].ty, field_size);
+                // Multiple items for this field.
+                // Check if this field is an anonymous struct/union member - if so,
+                // multiple items target different sub-fields of that anonymous member
+                // (e.g., .x = 10, .y = 20 both resolve to the same anonymous struct field_idx).
+                let is_anon_multi = layout.fields[fi].name.is_empty()
+                    && matches!(&layout.fields[fi].ty, CType::Struct(_) | CType::Union(_));
+                if is_anon_multi {
+                    let sub_items: Vec<InitializerItem> = inits.iter().map(|item| {
+                        InitializerItem {
+                            designators: item.designators.clone(),
+                            init: item.init.clone(),
+                        }
+                    }).collect();
+                    let sub_layout = match &layout.fields[fi].ty {
+                        CType::Struct(st) => StructLayout::for_struct(&st.fields),
+                        CType::Union(st) => StructLayout::for_union(&st.fields),
+                        _ => unreachable!(),
+                    };
+                    if self.struct_init_has_addr_fields(&sub_items, &sub_layout) {
+                        let nested = self.lower_struct_global_init_compound(&sub_items, &sub_layout);
+                        if let GlobalInit::Compound(nested_elems) = nested {
+                            let mut emitted = 0;
+                            for elem in nested_elems {
+                                if emitted >= field_size { break; }
+                                let elem_size = match &elem {
+                                    GlobalInit::Scalar(_) => 1,
+                                    GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) => 8,
+                                    GlobalInit::Compound(inner) => inner.len(),
+                                    GlobalInit::Array(vals) => vals.len(),
+                                    GlobalInit::Zero => 0,
+                                    GlobalInit::String(s) => s.len(),
+                                    GlobalInit::WideString(ws) => ws.len() * 4,
+                                };
+                                elements.push(elem);
+                                emitted += elem_size;
+                            }
+                            while emitted < field_size {
+                                elements.push(GlobalInit::Scalar(IrConst::I8(0)));
+                                emitted += 1;
+                            }
+                        } else {
+                            push_zero_bytes(&mut elements, field_size);
+                        }
+                    } else {
+                        let mut bytes = vec![0u8; field_size];
+                        self.fill_struct_global_bytes(&sub_items, &sub_layout, &mut bytes, 0);
+                        for b in &bytes {
+                            elements.push(GlobalInit::Scalar(IrConst::I8(*b as i8)));
+                        }
+                    }
+                } else {
+                    // flat array init
+                    self.emit_compound_flat_array_init(&mut elements, inits, &layout.fields[fi].ty, field_size);
+                }
             }
             current_offset += field_size;
             fi += 1;

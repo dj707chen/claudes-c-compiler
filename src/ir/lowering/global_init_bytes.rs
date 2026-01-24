@@ -87,21 +87,41 @@ impl Lowerer {
             let field_layout = &layout.fields[field_idx];
             let field_offset = base_offset + field_layout.offset;
 
+            // Check if designator targets a field inside an anonymous struct/union member
+            let is_anon_member_designator = designator_name.is_some()
+                && field_layout.name.is_empty()
+                && matches!(&field_layout.ty, CType::Struct(_) | CType::Union(_));
+
             let has_nested_designator = item.designators.len() > 1
                 && matches!(item.designators.first(), Some(Designator::Field(_)));
 
             match &field_layout.ty {
-                // Nested designator into struct/union: drill into sub-composite
-                CType::Struct(st) if has_nested_designator => {
-                    self.fill_nested_designator_composite(
-                        item, &StructLayout::for_struct(&st.fields), bytes, field_offset,
-                    );
+                // Nested designator or anonymous member designator into struct/union
+                CType::Struct(st) if has_nested_designator || is_anon_member_designator => {
+                    let sub_layout = StructLayout::for_struct(&st.fields);
+                    let sub_item = if is_anon_member_designator && !has_nested_designator {
+                        // Pass all designators through for anonymous member field lookup
+                        item.clone()
+                    } else {
+                        InitializerItem {
+                            designators: item.designators[1..].to_vec(),
+                            init: item.init.clone(),
+                        }
+                    };
+                    self.fill_struct_global_bytes(&[sub_item], &sub_layout, bytes, field_offset);
                     item_idx += 1;
                 }
-                CType::Union(st) if has_nested_designator => {
-                    self.fill_nested_designator_composite(
-                        item, &StructLayout::for_union(&st.fields), bytes, field_offset,
-                    );
+                CType::Union(st) if has_nested_designator || is_anon_member_designator => {
+                    let sub_layout = StructLayout::for_union(&st.fields);
+                    let sub_item = if is_anon_member_designator && !has_nested_designator {
+                        item.clone()
+                    } else {
+                        InitializerItem {
+                            designators: item.designators[1..].to_vec(),
+                            init: item.init.clone(),
+                        }
+                    };
+                    self.fill_struct_global_bytes(&[sub_item], &sub_layout, bytes, field_offset);
                     item_idx += 1;
                 }
                 // Nested designator into array: .field[idx] = val

@@ -1078,25 +1078,44 @@ impl Lowerer {
             let field = &layout.fields[field_idx].clone();
             let field_offset = base_offset + field.offset;
 
+            // Check if designator targets a field inside an anonymous struct/union member.
+            // resolve_init_field_idx returns the anonymous member's index in this case.
+            let is_anon_member_designator = desig_name.is_some()
+                && field.name.is_empty()
+                && matches!(&field.ty, CType::Struct(_) | CType::Union(_));
+
             // Handle nested designators (e.g., .a.j = 2): drill into sub-struct
             let has_nested_designator = item.designators.len() > 1
                 && matches!(item.designators.first(), Some(Designator::Field(_)));
 
             match &field.ty {
-                CType::Struct(st) if has_nested_designator => {
-                    // Nested designator like .a.j = 2: create sub-item with remaining designators
+                CType::Struct(st) if has_nested_designator || is_anon_member_designator => {
+                    // Nested designator like .a.j = 2, or designator targeting anonymous
+                    // member field like .x where x is inside an anonymous struct.
                     let sub_layout = StructLayout::for_struct(&st.fields);
+                    let sub_designators = if is_anon_member_designator && !has_nested_designator {
+                        // Designator targets a field inside the anonymous struct:
+                        // pass all designators through to the sub-struct init
+                        item.designators.clone()
+                    } else {
+                        item.designators[1..].to_vec()
+                    };
                     let sub_item = InitializerItem {
-                        designators: item.designators[1..].to_vec(),
+                        designators: sub_designators,
                         init: item.init.clone(),
                     };
                     self.emit_struct_init(&[sub_item], base_alloca, &sub_layout, field_offset);
                     item_idx += 1;
                 }
-                CType::Union(st) if has_nested_designator => {
+                CType::Union(st) if has_nested_designator || is_anon_member_designator => {
                     let sub_layout = StructLayout::for_union(&st.fields);
+                    let sub_designators = if is_anon_member_designator && !has_nested_designator {
+                        item.designators.clone()
+                    } else {
+                        item.designators[1..].to_vec()
+                    };
                     let sub_item = InitializerItem {
-                        designators: item.designators[1..].to_vec(),
+                        designators: sub_designators,
                         init: item.init.clone(),
                     };
                     self.emit_struct_init(&[sub_item], base_alloca, &sub_layout, field_offset);
