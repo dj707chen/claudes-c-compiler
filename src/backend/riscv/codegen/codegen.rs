@@ -2064,7 +2064,15 @@ impl InlineAsmEmitter for RiscvCodegen {
             AsmOperandKind::Memory | AsmOperandKind::Address => {
                 if let Operand::Value(v) = val {
                     if let Some(slot) = self.state.get_slot(v.0) {
-                        op.mem_offset = slot.0;
+                        if self.state.is_alloca(v.0) {
+                            // Alloca: stack slot IS the memory location
+                            op.mem_offset = slot.0;
+                        } else {
+                            // Non-alloca: slot holds a pointer that needs indirection.
+                            // Mark with empty mem_addr; resolve_memory_operand will handle it.
+                            op.mem_addr = String::new();
+                            op.mem_offset = 0;
+                        }
                     }
                 }
             }
@@ -2086,6 +2094,23 @@ impl InlineAsmEmitter for RiscvCodegen {
             }
             _ => {}
         }
+    }
+
+    fn resolve_memory_operand(&mut self, op: &mut AsmOperand, val: &Operand) -> bool {
+        // If mem_addr is set or mem_offset is non-zero (alloca case), nothing to do
+        if !op.mem_addr.is_empty() || op.mem_offset != 0 {
+            return false;
+        }
+        // Load the pointer value into a temporary register for indirect addressing
+        if let Operand::Value(v) = val {
+            if let Some(slot) = self.state.get_slot(v.0) {
+                let tmp_reg = "t0";
+                self.state.emit(&format!("    ld {}, {}(s0)", tmp_reg, slot.0));
+                op.mem_addr = format!("0({})", tmp_reg);
+                return true;
+            }
+        }
+        false
     }
 
     fn assign_scratch_reg(&mut self, kind: &AsmOperandKind) -> String {
@@ -2168,6 +2193,7 @@ impl InlineAsmEmitter for RiscvCodegen {
         let op_regs: Vec<String> = operands.iter().map(|o| o.reg.clone()).collect();
         let op_names: Vec<Option<String>> = operands.iter().map(|o| o.name.clone()).collect();
         let op_mem_offsets: Vec<i64> = operands.iter().map(|o| o.mem_offset).collect();
+        let op_mem_addrs: Vec<String> = operands.iter().map(|o| o.mem_addr.clone()).collect();
         let op_imm_values: Vec<Option<i64>> = operands.iter().map(|o| o.imm_value).collect();
 
         // Convert AsmOperandKind back to RvConstraintKind for the substitution function
@@ -2182,7 +2208,7 @@ impl InlineAsmEmitter for RiscvCodegen {
             AsmOperandKind::Tied(n) => RvConstraintKind::Tied(*n),
         }).collect();
 
-        Self::substitute_riscv_asm_operands(line, &op_regs, &op_names, &op_kinds, &op_mem_offsets, &op_imm_values, gcc_to_internal)
+        Self::substitute_riscv_asm_operands(line, &op_regs, &op_names, &op_kinds, &op_mem_offsets, &op_mem_addrs, &op_imm_values, gcc_to_internal)
     }
 
     fn store_output_from_reg(&mut self, op: &AsmOperand, ptr: &Value, _constraint: &str) {
@@ -2192,13 +2218,26 @@ impl InlineAsmEmitter for RiscvCodegen {
             AsmOperandKind::FpReg => {
                 let reg = op.reg.clone();
                 if let Some(slot) = self.state.get_slot(ptr.0) {
-                    self.emit_store_to_s0(&reg, slot.0, "fsd");
+                    if self.state.is_alloca(ptr.0) {
+                        self.emit_store_to_s0(&reg, slot.0, "fsd");
+                    } else {
+                        // Non-alloca: slot holds a pointer, store through it
+                        self.state.emit(&format!("    ld t0, {}(s0)", slot.0));
+                        self.state.emit(&format!("    fsd {}, 0(t0)", reg));
+                    }
                 }
             }
             _ => {
                 let reg = op.reg.clone();
                 if let Some(slot) = self.state.get_slot(ptr.0) {
-                    self.emit_store_to_s0(&reg, slot.0, "sd");
+                    if self.state.is_alloca(ptr.0) {
+                        self.emit_store_to_s0(&reg, slot.0, "sd");
+                    } else {
+                        // Non-alloca: slot holds a pointer, store through it
+                        let scratch = if reg != "t0" { "t0" } else { "t1" };
+                        self.state.emit(&format!("    ld {}, {}(s0)", scratch, slot.0));
+                        self.state.emit(&format!("    sd {}, 0({})", reg, scratch));
+                    }
                 }
             }
         }

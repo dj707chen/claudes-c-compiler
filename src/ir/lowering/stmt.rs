@@ -905,6 +905,17 @@ impl Lowerer {
                         } else {
                             self.lower_expr(&inp.expr)
                         }
+                    } else if stripped == "m" {
+                        // Memory constraint: need the address of the operand, not its value.
+                        // Use lower_lvalue to get the memory address.
+                        if let Some(lv) = self.lower_lvalue(&inp.expr) {
+                            let ptr = match lv {
+                                super::lowering::LValue::Variable(v) | super::lowering::LValue::Address(v) => v,
+                            };
+                            Operand::Value(ptr)
+                        } else {
+                            self.lower_expr(&inp.expr)
+                        }
                     } else {
                         self.lower_expr(&inp.expr)
                     };

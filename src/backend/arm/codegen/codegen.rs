@@ -2288,10 +2288,33 @@ impl InlineAsmEmitter for ArmCodegen {
         if matches!(op.kind, AsmOperandKind::Memory) {
             if let Operand::Value(v) = val {
                 if let Some(slot) = self.state.get_slot(v.0) {
-                    op.mem_offset = slot.0;
+                    if self.state.is_alloca(v.0) {
+                        // Alloca: stack slot IS the memory location
+                        op.mem_offset = slot.0;
+                    } else {
+                        // Non-alloca: slot holds a pointer that needs indirection.
+                        // Mark with empty mem_addr; resolve_memory_operand will handle it.
+                        op.mem_addr = String::new();
+                        op.mem_offset = 0;
+                    }
                 }
             }
         }
+    }
+
+    fn resolve_memory_operand(&mut self, op: &mut AsmOperand, val: &Operand) -> bool {
+        if !op.mem_addr.is_empty() || op.mem_offset != 0 {
+            return false;
+        }
+        if let Operand::Value(v) = val {
+            if let Some(slot) = self.state.get_slot(v.0) {
+                let tmp_reg = "x9";
+                self.emit_load_from_sp(tmp_reg, slot.0, "ldr");
+                op.mem_addr = format!("[{}]", tmp_reg);
+                return true;
+            }
+        }
+        false
     }
 
     fn assign_scratch_reg(&mut self, _kind: &AsmOperandKind) -> String {
@@ -2337,7 +2360,14 @@ impl InlineAsmEmitter for ArmCodegen {
         }
         let reg = &op.reg;
         if let Some(slot) = self.state.get_slot(ptr.0) {
-            self.emit_store_to_sp(reg, slot.0, "str");
+            if self.state.is_alloca(ptr.0) {
+                self.emit_store_to_sp(reg, slot.0, "str");
+            } else {
+                // Non-alloca: slot holds a pointer, store through it
+                let scratch = if reg != "x9" { "x9" } else { "x10" };
+                self.emit_load_from_sp(scratch, slot.0, "ldr");
+                self.state.emit(&format!("    str {}, [{}]", reg, scratch));
+            }
         }
     }
 

@@ -51,6 +51,7 @@ impl RiscvCodegen {
         op_regs: &[String],
         op_kinds: &[RvConstraintKind],
         op_mem_offsets: &[i64],
+        op_mem_addrs: &[String],
         op_imm_values: &[Option<i64>],
         use_addr_format: bool, // true for Address kind
     ) -> String {
@@ -59,7 +60,12 @@ impl RiscvCodegen {
         }
         match &op_kinds[idx] {
             RvConstraintKind::Memory => {
-                format!("{}(s0)", op_mem_offsets[idx])
+                // If mem_addr is set (non-alloca pointer dereference), use it directly
+                if idx < op_mem_addrs.len() && !op_mem_addrs[idx].is_empty() {
+                    op_mem_addrs[idx].clone()
+                } else {
+                    format!("{}(s0)", op_mem_offsets[idx])
+                }
             }
             RvConstraintKind::Address => {
                 // Address operands produce (register) format for AMO/LR/SC
@@ -90,6 +96,7 @@ impl RiscvCodegen {
         op_names: &[Option<String>],
         op_kinds: &[RvConstraintKind],
         op_mem_offsets: &[i64],
+        op_mem_addrs: &[String],
         op_imm_values: &[Option<i64>],
         gcc_to_internal: &[usize],
     ) -> String {
@@ -205,7 +212,7 @@ impl RiscvCodegen {
                     for (idx, op_name) in op_names.iter().enumerate() {
                         if let Some(ref n) = op_name {
                             if n == &name {
-                                result.push_str(&Self::format_operand(idx, op_regs, op_kinds, op_mem_offsets, op_imm_values, true));
+                                result.push_str(&Self::format_operand(idx, op_regs, op_kinds, op_mem_offsets, op_mem_addrs, op_imm_values, true));
                                 found = true;
                                 break;
                             }
@@ -230,7 +237,7 @@ impl RiscvCodegen {
                         num
                     };
                     if internal_idx < op_regs.len() {
-                        result.push_str(&Self::format_operand(internal_idx, op_regs, op_kinds, op_mem_offsets, op_imm_values, true));
+                        result.push_str(&Self::format_operand(internal_idx, op_regs, op_kinds, op_mem_offsets, op_mem_addrs, op_imm_values, true));
                     } else {
                         result.push_str(&format!("%{}", num));
                     }

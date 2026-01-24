@@ -2174,14 +2174,11 @@ impl InlineAsmEmitter for X86Codegen {
             match val {
                 Operand::Value(v) => {
                     if let Some(slot) = self.state.get_slot(v.0) {
-                        if is_output && self.state.is_alloca(v.0) {
-                            // Alloca: the stack slot IS the variable's storage
-                            op.mem_addr = format!("{}(%rbp)", slot.0);
-                        } else if !is_output && self.state.is_alloca(v.0) {
-                            // Input alloca: use stack address directly
+                        if self.state.is_alloca(v.0) {
+                            // Alloca: stack slot IS the memory location
                             op.mem_addr = format!("{}(%rbp)", slot.0);
                         } else {
-                            // Non-alloca: slot holds a pointer value that needs indirection.
+                            // Non-alloca: slot holds a pointer that needs indirection.
                             // Mark with empty mem_addr; resolve_memory_operand will load
                             // the pointer into a register and set up the indirect address.
                             op.mem_addr = String::new();
@@ -2307,15 +2304,31 @@ impl InlineAsmEmitter for X86Codegen {
         let reg = &op.reg;
         let ty = op.operand_type;
         if let Some(slot) = self.state.get_slot(ptr.0) {
-            // Use type-appropriate store to avoid clobbering adjacent stack data
-            let store_instr = Self::mov_store_for_type(ty);
-            let src_reg = match ty {
-                IrType::I8 | IrType::U8 => format!("%{}", Self::reg_to_8l(reg)),
-                IrType::I16 | IrType::U16 => format!("%{}", Self::reg_to_16(reg)),
-                IrType::I32 | IrType::U32 | IrType::F32 => format!("%{}", Self::reg_to_32(reg)),
-                _ => format!("%{}", reg),
-            };
-            self.state.emit(&format!("    {} {}, {}(%rbp)", store_instr, src_reg, slot.0));
+            if self.state.is_alloca(ptr.0) {
+                // Alloca: store directly to the stack slot with type-appropriate size
+                let store_instr = Self::mov_store_for_type(ty);
+                let src_reg = match ty {
+                    IrType::I8 | IrType::U8 => format!("%{}", Self::reg_to_8l(reg)),
+                    IrType::I16 | IrType::U16 => format!("%{}", Self::reg_to_16(reg)),
+                    IrType::I32 | IrType::U32 | IrType::F32 => format!("%{}", Self::reg_to_32(reg)),
+                    _ => format!("%{}", reg),
+                };
+                self.state.emit(&format!("    {} {}, {}(%rbp)", store_instr, src_reg, slot.0));
+            } else {
+                // Non-alloca: slot holds a pointer, store through it.
+                let scratch = if reg != "rcx" { "rcx" } else { "rdx" };
+                self.state.emit(&format!("    pushq %{}", scratch));
+                self.state.emit(&format!("    movq {}(%rbp), %{}", slot.0, scratch));
+                let store_instr = Self::mov_store_for_type(ty);
+                let src_reg = match ty {
+                    IrType::I8 | IrType::U8 => format!("%{}", Self::reg_to_8l(reg)),
+                    IrType::I16 | IrType::U16 => format!("%{}", Self::reg_to_16(reg)),
+                    IrType::I32 | IrType::U32 | IrType::F32 => format!("%{}", Self::reg_to_32(reg)),
+                    _ => format!("%{}", reg),
+                };
+                self.state.emit(&format!("    {} {}, (%{})", store_instr, src_reg, scratch));
+                self.state.emit(&format!("    popq %{}", scratch));
+            }
         }
     }
 
