@@ -774,9 +774,9 @@ impl Preprocessor {
                 return self.handle_include(rest);
             }
             "include_next" => {
-                // GCC extension: include_next searches from the next path in include list
-                // For simplicity, treat like include for now
-                return self.handle_include(rest);
+                // GCC extension: include_next searches from the next path after the
+                // current file's directory in the include search list
+                return self.handle_include_next(rest);
             }
             "define" => self.handle_define(rest),
             "undef" => self.handle_undef(rest),
@@ -900,6 +900,139 @@ impl Preprocessor {
             // Could not resolve; fall back to builtin macro behavior
             None
         }
+    }
+
+    /// Handle #include_next directive (GCC extension).
+    /// Searches for the header starting from the next include path after the one
+    /// that contained the current file.
+    fn handle_include_next(&mut self, path: &str) -> Option<String> {
+        let path = path.trim();
+
+        // Parse the include path
+        let (include_path, _is_system) = if path.starts_with('<') {
+            let end = path.find('>').unwrap_or(path.len());
+            (path[1..end].to_string(), true)
+        } else if path.starts_with('"') {
+            let rest = &path[1..];
+            let end = rest.find('"').unwrap_or(rest.len());
+            (rest[..end].to_string(), false)
+        } else {
+            // Try macro expansion
+            let expanded = self.macros.expand_line(path);
+            let expanded = expanded.trim().to_string();
+            if expanded.starts_with('<') {
+                let end = expanded.find('>').unwrap_or(expanded.len());
+                (expanded[1..end].to_string(), true)
+            } else if expanded.starts_with('"') {
+                let rest = &expanded[1..];
+                let end = rest.find('"').unwrap_or(rest.len());
+                (rest[..end].to_string(), false)
+            } else {
+                (expanded, false)
+            }
+        };
+
+        if !self.resolve_includes {
+            return None;
+        }
+
+        // Find which include path the current file is in
+        let current_file_dir = self.include_stack.last()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf());
+
+        // Resolve using include_next semantics
+        if let Some(resolved_path) = self.resolve_include_next_path(&include_path, current_file_dir.as_ref()) {
+            // Check for #pragma once
+            if self.pragma_once_files.contains(&resolved_path) {
+                return Some(String::new());
+            }
+
+            // Check for recursive inclusion
+            if self.include_stack.contains(&resolved_path) {
+                return Some(String::new());
+            }
+
+            // Read and preprocess the file
+            match std::fs::read_to_string(&resolved_path) {
+                Ok(content) => {
+                    self.include_stack.push(resolved_path.clone());
+
+                    let old_file = self.macros.get("__FILE__").map(|m| m.body.clone());
+                    self.macros.define(MacroDef {
+                        name: "__FILE__".to_string(),
+                        is_function_like: false,
+                        params: Vec::new(),
+                        is_variadic: false,
+                        body: format!("\"{}\"", resolved_path.display()),
+                        is_predefined: true,
+                    });
+
+                    let result = self.preprocess_included(&content);
+
+                    if let Some(old) = old_file {
+                        self.macros.define(MacroDef {
+                            name: "__FILE__".to_string(),
+                            is_function_like: false,
+                            params: Vec::new(),
+                            is_variadic: false,
+                            body: old,
+                            is_predefined: true,
+                        });
+                    }
+
+                    self.include_stack.pop();
+                    Some(result)
+                }
+                Err(_) => None,
+            }
+        } else {
+            // Fall back to regular include if include_next can't find it
+            self.handle_include(path)
+        }
+    }
+
+    /// Resolve an include path using #include_next semantics: search from the
+    /// next include path after the one containing the current file.
+    fn resolve_include_next_path(&self, include_path: &str, current_file_dir: Option<&PathBuf>) -> Option<PathBuf> {
+        // Collect all search paths in order
+        let all_paths: Vec<&Path> = self.include_paths.iter()
+            .chain(self.system_include_paths.iter())
+            .map(|p| p.as_path())
+            .collect();
+
+        // Find which path contains the current file
+        let mut found_current = false;
+        if let Some(cur_dir) = current_file_dir {
+            let cur_dir_canon = std::fs::canonicalize(cur_dir).unwrap_or_else(|_| cur_dir.clone());
+            for search_path in &all_paths {
+                let search_canon = std::fs::canonicalize(search_path)
+                    .unwrap_or_else(|_| search_path.to_path_buf());
+                if search_canon == cur_dir_canon {
+                    found_current = true;
+                    continue;
+                }
+                if found_current {
+                    let candidate = search_path.join(include_path);
+                    if candidate.is_file() {
+                        return std::fs::canonicalize(&candidate).ok().or(Some(candidate));
+                    }
+                }
+            }
+        }
+
+        // If we didn't find the current path in search paths, search all paths
+        // (this handles the case where the file was found relative to the source)
+        if !found_current {
+            for search_path in &all_paths {
+                let candidate = search_path.join(include_path);
+                if candidate.is_file() {
+                    return std::fs::canonicalize(&candidate).ok().or(Some(candidate));
+                }
+            }
+        }
+
+        None
     }
 
     /// Resolve an include path to an actual file path.
