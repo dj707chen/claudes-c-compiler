@@ -1,0 +1,29 @@
+HIGH PRIORITY: Fix RISC-V va_arg runtime correctness
+
+The RISC-V include path has been fixed (stdarg.h is now found), so variadic
+functions compile correctly. However, some gcc_torture_stdarg tests (1, 2)
+still abort at runtime while stdarg tests 3 and 4 pass. The simpler variadic
+test cases (variadic-001, variadic-types) work fine.
+
+The failing tests use:
+- va_list as a global variable (not just local)
+- Passing va_list to other functions by value
+- va_list pointers (va_list *pap, then va_arg(*pap, type))
+- va_copy semantics
+- Long double va_arg on RISC-V
+
+Root cause is likely in the RISC-V emit_va_arg or emit_va_start:
+- src/backend/riscv/codegen/codegen.rs:1107 (emit_va_arg)
+- src/backend/riscv/codegen/codegen.rs:1147 (emit_va_start)
+
+On RISC-V, va_list is a simple void* (pointer to next stack arg), so:
+- va_start should store the address of the first variadic arg
+- va_arg should load from the pointer, then advance it by the arg size
+- va_copy should just copy the pointer
+
+Things to investigate:
+1. Is va_list being passed by reference correctly when used as a function param?
+   (On RISC-V va_list is just a pointer, but the C type is char[32] array)
+2. Is va_arg advancing the pointer by the correct alignment for each type?
+3. Does va_copy work correctly?
+4. Is there an issue with long double (f128) alignment in va_arg?

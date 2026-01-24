@@ -542,6 +542,7 @@ impl Preprocessor {
                     "/usr/lib/gcc-cross/aarch64-linux-gnu/11/include",
                     "/usr/lib/gcc-cross/aarch64-linux-gnu/12/include",
                     "/usr/lib/gcc-cross/aarch64-linux-gnu/13/include",
+                    "/usr/lib/gcc-cross/aarch64-linux-gnu/14/include",
                     "/usr/aarch64-linux-gnu/include",
                     "/usr/include/aarch64-linux-gnu",
                 ];
@@ -569,6 +570,8 @@ impl Preprocessor {
                 let riscv_paths = [
                     "/usr/lib/gcc-cross/riscv64-linux-gnu/11/include",
                     "/usr/lib/gcc-cross/riscv64-linux-gnu/12/include",
+                    "/usr/lib/gcc-cross/riscv64-linux-gnu/13/include",
+                    "/usr/lib/gcc-cross/riscv64-linux-gnu/14/include",
                     "/usr/riscv64-linux-gnu/include",
                     "/usr/include/riscv64-linux-gnu",
                 ];
@@ -979,6 +982,49 @@ impl Preprocessor {
                     "double carg(double _Complex __z);\n",
                     "float cargf(float _Complex __z);\n",
                 ).to_string());
+            }
+            "stdarg.h" => {
+                // Define va_start/va_arg/va_end/va_copy as macros expanding to builtins.
+                // This ensures variadic function support works even if the system stdarg.h
+                // is not found (e.g., missing GCC cross-compiler include path).
+                self.pending_injections.push("typedef __builtin_va_list va_list;\n".to_string());
+                self.macros.define(MacroDef {
+                    name: "va_start".to_string(),
+                    is_function_like: true,
+                    params: vec!["ap".to_string(), "last".to_string()],
+                    is_variadic: false,
+                    body: "__builtin_va_start(ap,last)".to_string(),
+                    is_predefined: true,
+                });
+                self.macros.define(MacroDef {
+                    name: "va_end".to_string(),
+                    is_function_like: true,
+                    params: vec!["ap".to_string()],
+                    is_variadic: false,
+                    body: "__builtin_va_end(ap)".to_string(),
+                    is_predefined: true,
+                });
+                self.macros.define(MacroDef {
+                    name: "va_copy".to_string(),
+                    is_function_like: true,
+                    params: vec!["dest".to_string(), "src".to_string()],
+                    is_variadic: false,
+                    body: "__builtin_va_copy(dest,src)".to_string(),
+                    is_predefined: true,
+                });
+                // va_arg is special syntax: __builtin_va_arg(ap, type)
+                // It's handled by the parser as a special built-in, so we define
+                // the macro to expand to __builtin_va_arg which the lexer recognizes.
+                self.macros.define(MacroDef {
+                    name: "va_arg".to_string(),
+                    is_function_like: true,
+                    params: vec!["ap".to_string(), "type".to_string()],
+                    is_variadic: false,
+                    body: "__builtin_va_arg(ap,type)".to_string(),
+                    is_predefined: true,
+                });
+                // Also define __gnuc_va_list as a typedef
+                self.pending_injections.push("typedef __builtin_va_list __gnuc_va_list;\n".to_string());
             }
             _ => {}
         }
