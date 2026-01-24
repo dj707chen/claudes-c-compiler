@@ -370,17 +370,7 @@ impl Lowerer {
             if ai >= arr_size { break; }
 
             if let Initializer::Expr(ref expr) = item.init {
-                if let Expr::StringLiteral(s, _) = expr {
-                    let label = self.intern_string_literal(s);
-                    elements.push(GlobalInit::GlobalAddr(label));
-                } else if let Some(addr_init) = self.eval_global_addr_expr(expr) {
-                    elements.push(addr_init);
-                } else if let Some(val) = self.eval_const_expr(expr) {
-                    self.push_const_as_bytes(elements, &val, ptr_size);
-                } else {
-                    // zero
-                    push_zero_bytes(elements, ptr_size);
-                }
+                self.emit_ptr_expr_to_elements(elements, expr, ptr_size);
             } else {
                 // Nested list - zero fill this element
                 push_zero_bytes(elements, ptr_size);
@@ -428,16 +418,7 @@ impl Lowerer {
         for ai in 0..arr_size {
             if let Some(init) = index_inits[ai] {
                 if let Initializer::Expr(ref expr) = init {
-                    if let Expr::StringLiteral(s, _) = expr {
-                        let label = self.intern_string_literal(s);
-                        elements.push(GlobalInit::GlobalAddr(label));
-                    } else if let Some(addr_init) = self.eval_global_addr_expr(expr) {
-                        elements.push(addr_init);
-                    } else if let Some(val) = self.eval_const_expr(expr) {
-                        self.push_const_as_bytes(elements, &val, ptr_size);
-                    } else {
-                        push_zero_bytes(elements, ptr_size);
-                    }
+                    self.emit_ptr_expr_to_elements(elements, expr, ptr_size);
                 } else {
                     push_zero_bytes(elements, ptr_size);
                 }
@@ -481,16 +462,7 @@ impl Lowerer {
 
             if let Initializer::Expr(ref expr) = item.init {
                 if elem_is_pointer {
-                    if let Expr::StringLiteral(s, _) = expr {
-                        let label = self.intern_string_literal(s);
-                        elements.push(GlobalInit::GlobalAddr(label));
-                    } else if let Some(addr_init) = self.eval_global_addr_expr(expr) {
-                        elements.push(addr_init);
-                    } else if let Some(val) = self.eval_const_expr(expr) {
-                        self.push_const_as_bytes(elements, &val, ptr_size);
-                    } else {
-                        push_zero_bytes(elements, ptr_size);
-                    }
+                    self.emit_ptr_expr_to_elements(elements, expr, ptr_size);
                 } else {
                     if let Some(val) = self.eval_const_expr(expr) {
                         let elem_ir_ty = IrType::from_ctype(elem_ty);
@@ -527,6 +499,27 @@ impl Lowerer {
         };
         layout.resolve_init_field_idx(designator_name, current_field_idx)
             .unwrap_or(current_field_idx)
+    }
+
+    /// Emit a pointer expression's initialization into compound elements.
+    /// Handles string literals (→ GlobalAddr), global address expressions,
+    /// evaluated constants, and falls back to zero-fill.
+    fn emit_ptr_expr_to_elements(
+        &mut self,
+        elements: &mut Vec<GlobalInit>,
+        expr: &Expr,
+        ptr_size: usize,
+    ) {
+        if let Expr::StringLiteral(s, _) = expr {
+            let label = self.intern_string_literal(s);
+            elements.push(GlobalInit::GlobalAddr(label));
+        } else if let Some(addr_init) = self.eval_global_addr_expr(expr) {
+            elements.push(addr_init);
+        } else if let Some(val) = self.eval_const_expr(expr) {
+            self.push_const_as_bytes(elements, &val, ptr_size);
+        } else {
+            push_zero_bytes(elements, ptr_size);
+        }
     }
 
     /// Resolve a pointer field's initializer expression to a GlobalInit.

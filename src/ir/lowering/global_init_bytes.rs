@@ -731,28 +731,14 @@ impl Lowerer {
                 // {real, imag} or {real} (imag defaults to 0)
                 let real_val = items.first().and_then(|item| {
                     if let Initializer::Expr(e) = &item.init {
-                        self.eval_const_expr(e).and_then(|c| match c {
-                            IrConst::F64(v) => Some(v),
-                            IrConst::F32(v) => Some(v as f64),
-                            IrConst::I64(v) => Some(v as f64),
-                            IrConst::I32(v) => Some(v as f64),
-                            IrConst::LongDouble(v) => Some(v),
-                            _ => None,
-                        })
+                        self.eval_const_expr(e).and_then(|c| c.to_f64())
                     } else {
                         None
                     }
                 }).unwrap_or(0.0);
                 let imag_val = items.get(1).and_then(|item| {
                     if let Initializer::Expr(e) = &item.init {
-                        self.eval_const_expr(e).and_then(|c| match c {
-                            IrConst::F64(v) => Some(v),
-                            IrConst::F32(v) => Some(v as f64),
-                            IrConst::I64(v) => Some(v as f64),
-                            IrConst::I32(v) => Some(v as f64),
-                            IrConst::LongDouble(v) => Some(v),
-                            _ => None,
-                        })
+                        self.eval_const_expr(e).and_then(|c| c.to_f64())
                     } else {
                         None
                     }
