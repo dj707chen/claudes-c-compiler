@@ -182,6 +182,27 @@ fn expand_condition_macros(expr: &str, macros: &MacroTable) -> String {
             }
         }
 
+        // Skip pp-number tokens: a digit (or .digit) followed by alphanumeric chars,
+        // dots, underscores, and exponent signs (e+, e-, p+, p-).
+        // This prevents macro expansion of suffixes like 'u' in '1u', 'L' in '1L', etc.
+        if chars[i].is_ascii_digit() || (chars[i] == '.' && i + 1 < len && chars[i + 1].is_ascii_digit()) {
+            while i < len {
+                if chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '_' {
+                    result.push(chars[i]);
+                    i += 1;
+                } else if (chars[i] == '+' || chars[i] == '-')
+                    && i > 0
+                    && matches!(chars[i - 1], 'e' | 'E' | 'p' | 'P')
+                {
+                    result.push(chars[i]);
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            continue;
+        }
+
         if is_ident_start(chars[i]) {
             let start = i;
             while i < len && is_ident_cont(chars[i]) {
