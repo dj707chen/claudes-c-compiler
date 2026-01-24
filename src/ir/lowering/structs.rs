@@ -40,35 +40,13 @@ impl Lowerer {
     /// Insert a struct layout into the cache, tracking the change in the current
     /// scope frame so it can be undone on scope exit.
     fn insert_struct_layout_scoped(&mut self, key: String, layout: StructLayout) {
-        let prev = self.types.struct_layouts.get(&key).cloned();
-        if let Some(ref mut fs) = self.func_state {
-            if let Some(frame) = fs.scope_stack.last_mut() {
-                if let Some(prev) = prev {
-                    frame.struct_layouts_shadowed.push((key.clone(), prev));
-                } else {
-                    frame.struct_layouts_added.push(key.clone());
-                }
-            }
-        }
-        self.types.struct_layouts.insert(key, layout);
+        self.types.insert_struct_layout_scoped(key, layout);
     }
 
     /// Invalidate a ctype_cache entry for a struct/union tag, tracking the change
     /// in the current scope frame so it can be restored on scope exit.
     fn invalidate_ctype_cache_scoped(&mut self, key: &str) {
-        let prev = {
-            let mut cache = self.types.ctype_cache.borrow_mut();
-            cache.remove(key)
-        };
-        if let Some(ref mut fs) = self.func_state {
-            if let Some(frame) = fs.scope_stack.last_mut() {
-                if let Some(prev) = prev {
-                    frame.ctype_cache_shadowed.push((key.to_string(), prev));
-                } else {
-                    frame.ctype_cache_added.push(key.to_string());
-                }
-            }
-        }
+        self.types.invalidate_ctype_cache_scoped(key);
     }
 
     /// Recursively register any struct/union types defined inline in field declarations.

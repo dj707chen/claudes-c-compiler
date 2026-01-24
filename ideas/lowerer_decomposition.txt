@@ -16,13 +16,17 @@ COMPLETED:
    ctype_cache, func_return_ctypes. Lowerer holds TypeContext field.
    ~67 access sites updated across 13 files. pop_scope and
    insert_enum_scoped updated to go through self.types.)
+- Commit 4: Move scope undo tracking into TypeContext and FunctionBuildState
+  (ScopeFrame split into TypeScopeFrame and FuncScopeFrame.
+   TypeContext owns scope_stack for enum_constants/struct_layouts/ctype_cache
+   undo tracking with push_scope/pop_scope/insert_*_scoped methods.
+   FunctionBuildState owns scope_stack for locals/statics/consts/var_ctypes
+   undo tracking with push_scope/pop_scope/insert_*_scoped/shadow_*_for_scope.
+   Lowerer's push_scope/pop_scope delegates to both sub-structs.
+   structs.rs insert_struct_layout_scoped/invalidate_ctype_cache_scoped
+   now delegate to TypeContext methods.)
 
 REMAINING (in order):
-
-1. Move scope undo tracking into TypeContext
-   - ScopeFrame currently tracks undo ops for maps in both TypeContext and
-     FunctionBuildState. Split accordingly.
-   - Risk: Medium (scope push/pop is subtle)
 
 4. CType::Struct(Arc<StructType>) -> CType::Struct(String)
    - TypeContext becomes sole owner of struct definitions

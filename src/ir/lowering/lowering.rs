@@ -249,14 +249,45 @@ pub(super) struct FunctionMeta {
 /// Instead of cloning entire HashMaps on scope entry, we track what was changed
 /// and undo it on scope exit. This reduces O(total_map_size) clone cost to
 /// O(number_of_changes_in_scope).
+///
+/// Scope tracking is split into two frame types:
+/// - `TypeScopeFrame`: tracks undo ops for TypeContext fields (enum_constants,
+///   struct_layouts, ctype_cache). Managed by TypeContext::push_scope/pop_scope.
+/// - `FuncScopeFrame`: tracks undo ops for FunctionBuildState fields (locals,
+///   static_local_names, const_local_values, var_ctypes). Managed by
+///   FunctionBuildState::push_scope/pop_scope.
 #[derive(Debug)]
-pub(super) struct ScopeFrame {
+pub(super) struct TypeScopeFrame {
+    /// Keys newly inserted into `enum_constants`.
+    pub enums_added: Vec<String>,
+    /// Keys newly inserted into `struct_layouts`.
+    pub struct_layouts_added: Vec<String>,
+    /// Keys that were overwritten in `struct_layouts`: (key, previous_value).
+    pub struct_layouts_shadowed: Vec<(String, StructLayout)>,
+    /// Keys newly inserted into `ctype_cache`.
+    pub ctype_cache_added: Vec<String>,
+    /// Keys that were overwritten in `ctype_cache`: (key, previous_value).
+    pub ctype_cache_shadowed: Vec<(String, CType)>,
+}
+
+impl TypeScopeFrame {
+    fn new() -> Self {
+        Self {
+            enums_added: Vec::new(),
+            struct_layouts_added: Vec::new(),
+            struct_layouts_shadowed: Vec::new(),
+            ctype_cache_added: Vec::new(),
+            ctype_cache_shadowed: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct FuncScopeFrame {
     /// Keys that were newly inserted into `locals` (not present before scope entry).
     pub locals_added: Vec<String>,
     /// Keys that were overwritten in `locals`: (key, previous_value).
     pub locals_shadowed: Vec<(String, LocalInfo)>,
-    /// Keys newly inserted into `enum_constants`.
-    pub enums_added: Vec<String>,
     /// Keys newly inserted into `static_local_names`.
     pub statics_added: Vec<String>,
     /// Keys that were overwritten in `static_local_names`: (key, previous_value).
@@ -269,32 +300,19 @@ pub(super) struct ScopeFrame {
     pub var_ctypes_added: Vec<String>,
     /// Keys that were overwritten in `var_ctypes`: (key, previous_value).
     pub var_ctypes_shadowed: Vec<(String, CType)>,
-    /// Keys newly inserted into `struct_layouts`.
-    pub struct_layouts_added: Vec<String>,
-    /// Keys that were overwritten in `struct_layouts`: (key, previous_value).
-    pub struct_layouts_shadowed: Vec<(String, StructLayout)>,
-    /// Keys newly inserted into `ctype_cache`.
-    pub ctype_cache_added: Vec<String>,
-    /// Keys that were overwritten in `ctype_cache`: (key, previous_value).
-    pub ctype_cache_shadowed: Vec<(String, CType)>,
 }
 
-impl ScopeFrame {
+impl FuncScopeFrame {
     fn new() -> Self {
         Self {
             locals_added: Vec::new(),
             locals_shadowed: Vec::new(),
-            enums_added: Vec::new(),
             statics_added: Vec::new(),
             statics_shadowed: Vec::new(),
             consts_added: Vec::new(),
             consts_shadowed: Vec::new(),
             var_ctypes_added: Vec::new(),
             var_ctypes_shadowed: Vec::new(),
-            struct_layouts_added: Vec::new(),
-            struct_layouts_shadowed: Vec::new(),
-            ctype_cache_added: Vec::new(),
-            ctype_cache_shadowed: Vec::new(),
         }
     }
 }
@@ -328,8 +346,8 @@ pub(super) struct FunctionBuildState {
     pub switch_stack: Vec<SwitchFrame>,
     /// User-defined goto labels -> unique IR labels
     pub user_labels: HashMap<String, String>,
-    /// Scope stack for efficient scope-based variable management
-    pub scope_stack: Vec<ScopeFrame>,
+    /// Scope stack for function-local variable undo tracking
+    pub scope_stack: Vec<FuncScopeFrame>,
     /// Static local variable name -> mangled global name
     pub static_local_names: HashMap<String, String>,
     /// Const-qualified local variable values
@@ -363,6 +381,109 @@ impl FunctionBuildState {
             next_value: 0,
         }
     }
+
+    /// Push a new function-local scope frame.
+    pub fn push_scope(&mut self) {
+        self.scope_stack.push(FuncScopeFrame::new());
+    }
+
+    /// Pop the top function-local scope frame and undo changes to locals,
+    /// static_local_names, const_local_values, and var_ctypes.
+    pub fn pop_scope(&mut self) {
+        if let Some(frame) = self.scope_stack.pop() {
+            for key in frame.locals_added {
+                self.locals.remove(&key);
+            }
+            for (key, val) in frame.locals_shadowed {
+                self.locals.insert(key, val);
+            }
+            for key in frame.statics_added {
+                self.static_local_names.remove(&key);
+            }
+            for (key, val) in frame.statics_shadowed {
+                self.static_local_names.insert(key, val);
+            }
+            for key in frame.consts_added {
+                self.const_local_values.remove(&key);
+            }
+            for (key, val) in frame.consts_shadowed {
+                self.const_local_values.insert(key, val);
+            }
+            for key in frame.var_ctypes_added {
+                self.var_ctypes.remove(&key);
+            }
+            for (key, val) in frame.var_ctypes_shadowed {
+                self.var_ctypes.insert(key, val);
+            }
+        }
+    }
+
+    /// Insert a local variable, tracking the change in the current scope frame.
+    pub fn insert_local_scoped(&mut self, name: String, info: LocalInfo) {
+        if let Some(frame) = self.scope_stack.last_mut() {
+            if let Some(prev) = self.locals.remove(&name) {
+                frame.locals_shadowed.push((name.clone(), prev));
+            } else {
+                frame.locals_added.push(name.clone());
+            }
+        }
+        self.locals.insert(name, info);
+    }
+
+    /// Insert a static local name, tracking the change in the current scope frame.
+    pub fn insert_static_local_scoped(&mut self, name: String, mangled: String) {
+        if let Some(frame) = self.scope_stack.last_mut() {
+            if let Some(prev) = self.static_local_names.remove(&name) {
+                frame.statics_shadowed.push((name.clone(), prev));
+            } else {
+                frame.statics_added.push(name.clone());
+            }
+        }
+        self.static_local_names.insert(name, mangled);
+    }
+
+    /// Insert a const local value, tracking the change in the current scope frame.
+    pub fn insert_const_local_scoped(&mut self, name: String, value: i64) {
+        if let Some(frame) = self.scope_stack.last_mut() {
+            if let Some(prev) = self.const_local_values.remove(&name) {
+                frame.consts_shadowed.push((name.clone(), prev));
+            } else {
+                frame.consts_added.push(name.clone());
+            }
+        }
+        self.const_local_values.insert(name, value);
+    }
+
+    /// Insert a var ctype, tracking the change in the current scope frame.
+    pub fn insert_var_ctype_scoped(&mut self, name: String, ctype: CType) {
+        if let Some(frame) = self.scope_stack.last_mut() {
+            if let Some(prev) = self.var_ctypes.remove(&name) {
+                frame.var_ctypes_shadowed.push((name.clone(), prev));
+            } else {
+                frame.var_ctypes_added.push(name.clone());
+            }
+        }
+        self.var_ctypes.insert(name, ctype);
+    }
+
+    /// Remove a local variable from `locals`, tracking the removal in the
+    /// current scope frame so `pop_scope()` restores it.
+    pub fn shadow_local_for_scope(&mut self, name: &str) {
+        if let Some(prev_local) = self.locals.remove(name) {
+            if let Some(frame) = self.scope_stack.last_mut() {
+                frame.locals_shadowed.push((name.to_string(), prev_local));
+            }
+        }
+    }
+
+    /// Remove a static local name, tracking the removal in the current scope frame.
+    pub fn shadow_static_for_scope(&mut self, name: &str) {
+        if let Some(prev_static) = self.static_local_names.remove(name) {
+            if let Some(frame) = self.scope_stack.last_mut() {
+                frame.statics_shadowed.push((name.to_string(), prev_static));
+            }
+        }
+    }
 }
 
 /// Type-system state extracted from Lowerer.
@@ -383,6 +504,8 @@ pub(super) struct TypeContext {
     /// Cache for CType of named struct/union types
     /// Uses RefCell because type_spec_to_ctype takes &self.
     pub ctype_cache: std::cell::RefCell<HashMap<String, CType>>,
+    /// Scope stack for type-system undo tracking (enum_constants, struct_layouts, ctype_cache)
+    pub scope_stack: Vec<TypeScopeFrame>,
 }
 
 impl TypeContext {
@@ -394,6 +517,77 @@ impl TypeContext {
             function_typedefs: HashMap::new(),
             func_return_ctypes: HashMap::new(),
             ctype_cache: std::cell::RefCell::new(HashMap::new()),
+            scope_stack: Vec::new(),
+        }
+    }
+
+    /// Push a new type-system scope frame.
+    pub fn push_scope(&mut self) {
+        self.scope_stack.push(TypeScopeFrame::new());
+    }
+
+    /// Pop the top type-system scope frame and undo changes to
+    /// enum_constants, struct_layouts, and ctype_cache.
+    pub fn pop_scope(&mut self) {
+        if let Some(frame) = self.scope_stack.pop() {
+            for key in frame.enums_added {
+                self.enum_constants.remove(&key);
+            }
+            for key in frame.struct_layouts_added {
+                self.struct_layouts.remove(&key);
+            }
+            for (key, val) in frame.struct_layouts_shadowed {
+                self.struct_layouts.insert(key, val);
+            }
+            {
+                let mut cache = self.ctype_cache.borrow_mut();
+                for key in frame.ctype_cache_added {
+                    cache.remove(&key);
+                }
+                for (key, val) in frame.ctype_cache_shadowed {
+                    cache.insert(key, val);
+                }
+            }
+        }
+    }
+
+    /// Insert an enum constant, tracking the change in the current scope frame.
+    pub fn insert_enum_scoped(&mut self, name: String, value: i64) {
+        let track = !self.enum_constants.contains_key(&name);
+        if track {
+            if let Some(frame) = self.scope_stack.last_mut() {
+                frame.enums_added.push(name.clone());
+            }
+        }
+        self.enum_constants.insert(name, value);
+    }
+
+    /// Insert a struct layout, tracking the change in the current scope frame
+    /// so it can be undone on scope exit.
+    pub fn insert_struct_layout_scoped(&mut self, key: String, layout: StructLayout) {
+        if let Some(frame) = self.scope_stack.last_mut() {
+            if let Some(prev) = self.struct_layouts.get(&key).cloned() {
+                frame.struct_layouts_shadowed.push((key.clone(), prev));
+            } else {
+                frame.struct_layouts_added.push(key.clone());
+            }
+        }
+        self.struct_layouts.insert(key, layout);
+    }
+
+    /// Invalidate a ctype_cache entry, tracking the change in the current scope frame
+    /// so it can be restored on scope exit.
+    pub fn invalidate_ctype_cache_scoped(&mut self, key: &str) {
+        let prev = {
+            let mut cache = self.ctype_cache.borrow_mut();
+            cache.remove(key)
+        };
+        if let Some(frame) = self.scope_stack.last_mut() {
+            if let Some(prev) = prev {
+                frame.ctype_cache_shadowed.push((key.to_string(), prev));
+            } else {
+                frame.ctype_cache_added.push(key.to_string());
+            }
         }
     }
 }
@@ -500,164 +694,53 @@ impl Lowerer {
     }
 
 
-    /// Push a new scope frame onto the scope stack.
+    /// Push a new scope frame onto both TypeContext and FunctionBuildState scope stacks.
     /// Call this at the start of a compound statement or function body.
     pub(super) fn push_scope(&mut self) {
-        self.func_mut().scope_stack.push(ScopeFrame::new());
+        self.types.push_scope();
+        self.func_mut().push_scope();
     }
 
-    /// Pop the top scope frame and undo all local variable/enum/const changes
-    /// made in that scope, restoring the maps to their state at scope entry.
+    /// Pop the top scope frame from both TypeContext and FunctionBuildState,
+    /// undoing all scoped changes made in that scope.
     pub(super) fn pop_scope(&mut self) {
-        let frame = {
-            let fs = self.func_mut();
-            fs.scope_stack.pop()
-        };
-        if let Some(frame) = frame {
-            let fs = self.func_mut();
-            // Undo locals: remove added keys, restore shadowed keys
-            for key in frame.locals_added {
-                fs.locals.remove(&key);
-            }
-            for (key, val) in frame.locals_shadowed {
-                fs.locals.insert(key, val);
-            }
-
-            // Undo static_local_names: remove added keys, restore shadowed keys
-            for key in frame.statics_added {
-                fs.static_local_names.remove(&key);
-            }
-            for (key, val) in frame.statics_shadowed {
-                fs.static_local_names.insert(key, val);
-            }
-
-            // Undo const_local_values: remove added keys, restore shadowed keys
-            for key in frame.consts_added {
-                fs.const_local_values.remove(&key);
-            }
-            for (key, val) in frame.consts_shadowed {
-                fs.const_local_values.insert(key, val);
-            }
-
-            // Undo var_ctypes: remove added keys, restore shadowed keys
-            for key in frame.var_ctypes_added {
-                fs.var_ctypes.remove(&key);
-            }
-            for (key, val) in frame.var_ctypes_shadowed {
-                fs.var_ctypes.insert(key, val);
-            }
-
-            // Undo enum_constants: remove added keys
-            for key in frame.enums_added {
-                self.types.enum_constants.remove(&key);
-            }
-
-            // Undo struct_layouts: remove added keys, restore shadowed keys
-            for key in frame.struct_layouts_added {
-                self.types.struct_layouts.remove(&key);
-            }
-            for (key, val) in frame.struct_layouts_shadowed {
-                self.types.struct_layouts.insert(key, val);
-            }
-
-            // Undo ctype_cache: remove added keys, restore shadowed keys
-            {
-                let mut cache = self.types.ctype_cache.borrow_mut();
-                for key in frame.ctype_cache_added {
-                    cache.remove(&key);
-                }
-                for (key, val) in frame.ctype_cache_shadowed {
-                    cache.insert(key, val);
-                }
-            }
-        }
+        self.func_mut().pop_scope();
+        self.types.pop_scope();
     }
 
-    /// Remove a local variable from `self.func_mut().locals`, tracking the removal in the
-    /// current scope frame so `pop_scope()` restores it. Use this when a block-scope
-    /// declaration (extern, function decl) needs to shadow a local variable.
+    /// Remove a local variable, tracking the removal in the current scope frame.
     pub(super) fn shadow_local_for_scope(&mut self, name: &str) {
-        let fs = self.func_mut();
-        if let Some(prev_local) = fs.locals.remove(name) {
-            if let Some(frame) = fs.scope_stack.last_mut() {
-                frame.locals_shadowed.push((name.to_string(), prev_local));
-            }
-        }
+        self.func_mut().shadow_local_for_scope(name);
     }
 
     /// Remove a static local name, tracking the removal in the current scope frame.
     pub(super) fn shadow_static_for_scope(&mut self, name: &str) {
-        let fs = self.func_mut();
-        if let Some(prev_static) = fs.static_local_names.remove(name) {
-            if let Some(frame) = fs.scope_stack.last_mut() {
-                frame.statics_shadowed.push((name.to_string(), prev_static));
-            }
-        }
+        self.func_mut().shadow_static_for_scope(name);
     }
 
     /// Insert a local variable, tracking the change in the current scope frame.
     pub(super) fn insert_local_scoped(&mut self, name: String, info: LocalInfo) {
-        let fs = self.func_mut();
-        if let Some(frame) = fs.scope_stack.last_mut() {
-            if let Some(prev) = fs.locals.remove(&name) {
-                frame.locals_shadowed.push((name.clone(), prev));
-            } else {
-                frame.locals_added.push(name.clone());
-            }
-        }
-        fs.locals.insert(name, info);
+        self.func_mut().insert_local_scoped(name, info);
     }
 
     /// Insert an enum constant, tracking the change in the current scope frame.
     pub(super) fn insert_enum_scoped(&mut self, name: String, value: i64) {
-        let track = !self.types.enum_constants.contains_key(&name);
-        if track {
-            if let Some(ref mut fs) = self.func_state {
-                if let Some(frame) = fs.scope_stack.last_mut() {
-                    frame.enums_added.push(name.clone());
-                }
-            }
-        }
-        self.types.enum_constants.insert(name, value);
+        self.types.insert_enum_scoped(name, value);
     }
 
     /// Insert a static local name, tracking the change in the current scope frame.
     pub(super) fn insert_static_local_scoped(&mut self, name: String, mangled: String) {
-        let fs = self.func_mut();
-        if let Some(frame) = fs.scope_stack.last_mut() {
-            if let Some(prev) = fs.static_local_names.remove(&name) {
-                frame.statics_shadowed.push((name.clone(), prev));
-            } else {
-                frame.statics_added.push(name.clone());
-            }
-        }
-        fs.static_local_names.insert(name, mangled);
+        self.func_mut().insert_static_local_scoped(name, mangled);
     }
 
     /// Insert a const local value, tracking the change in the current scope frame.
     pub(super) fn insert_const_local_scoped(&mut self, name: String, value: i64) {
-        let fs = self.func_mut();
-        if let Some(frame) = fs.scope_stack.last_mut() {
-            if let Some(prev) = fs.const_local_values.remove(&name) {
-                frame.consts_shadowed.push((name.clone(), prev));
-            } else {
-                frame.consts_added.push(name.clone());
-            }
-        }
-        fs.const_local_values.insert(name, value);
+        self.func_mut().insert_const_local_scoped(name, value);
     }
 
     /// Insert a var ctype, tracking the change in the current scope frame.
     pub(super) fn insert_var_ctype_scoped(&mut self, name: String, ctype: CType) {
-        let fs = self.func_mut();
-        if let Some(frame) = fs.scope_stack.last_mut() {
-            if let Some(prev) = fs.var_ctypes.remove(&name) {
-                frame.var_ctypes_shadowed.push((name.clone(), prev));
-            } else {
-                frame.var_ctypes_added.push(name.clone());
-            }
-        }
-        fs.var_ctypes.insert(name, ctype);
+        self.func_mut().insert_var_ctype_scoped(name, ctype);
     }
 
     pub fn lower(mut self, tu: &TranslationUnit) -> IrModule {
