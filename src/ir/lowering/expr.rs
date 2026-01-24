@@ -1410,6 +1410,22 @@ impl Lowerer {
         Operand::Value(dest)
     }
 
+    /// Get a pointer to the va_list struct from an expression.
+    /// Used by va_start, va_end, va_copy builtins.
+    ///
+    /// Target-dependent behavior (same logic as lower_va_arg):
+    /// - x86-64/AArch64: va_list is array type, lower_expr handles both local
+    ///   (array decay gives address) and parameter (loads pointer) cases.
+    /// - RISC-V: va_list is void*, always need address-of the variable.
+    pub(super) fn lower_va_list_pointer(&mut self, ap_expr: &Expr) -> Operand {
+        use crate::backend::Target;
+        if self.target == Target::Riscv64 {
+            self.lower_address_of(ap_expr)
+        } else {
+            self.lower_expr(ap_expr)
+        }
+    }
+
     pub(super) fn resolve_va_arg_type(&self, type_spec: &TypeSpecifier) -> IrType {
         match type_spec {
             TypeSpecifier::Int | TypeSpecifier::Signed => IrType::I32,

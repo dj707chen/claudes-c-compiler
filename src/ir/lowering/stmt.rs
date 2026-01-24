@@ -1361,12 +1361,10 @@ impl Lowerer {
                     match &item.init {
                         Initializer::List(sub_items) => {
                             // Nested braces: { {10, 20}, 30 } - the sub_items init the inner struct
-                            // Zero-init the sub-struct area if it has designators or partial init,
-                            // so that non-designated fields are properly zeroed.
-                            let has_desig = sub_items.iter().any(|si| !si.designators.is_empty());
-                            if has_desig || sub_items.len() < sub_layout.fields.len() {
-                                self.zero_init_region(base_alloca, field_offset, sub_layout.size);
-                            }
+                            // Always zero-init the sub-struct region before writing explicit values.
+                            // C11 6.7.9p21: unspecified members are implicitly zero-initialized.
+                            // This handles partial array field init within nested structs.
+                            self.zero_init_region(base_alloca, field_offset, sub_layout.size);
                             self.emit_struct_init(sub_items, base_alloca, &sub_layout, field_offset);
                             item_idx += 1;
                         }
@@ -1390,6 +1388,9 @@ impl Lowerer {
                     let sub_layout = StructLayout::for_union(&st.fields);
                     match &item.init {
                         Initializer::List(sub_items) => {
+                            // Zero the entire union region first, then write explicit values.
+                            // C11 6.7.9p21: unspecified bytes are zero-initialized.
+                            self.zero_init_region(base_alloca, field_offset, sub_layout.size);
                             if !sub_items.is_empty() {
                                 self.emit_struct_init(sub_items, base_alloca, &sub_layout, field_offset);
                             }

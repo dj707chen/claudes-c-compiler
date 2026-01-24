@@ -111,6 +111,8 @@ pub struct InitializerItem {
 #[derive(Debug, Clone)]
 pub enum Designator {
     Index(Expr),
+    /// GCC range designator: [lo ... hi]
+    Range(Expr, Expr),
     Field(String),
 }
 

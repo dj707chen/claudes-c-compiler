@@ -56,6 +56,26 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Fix va_list parameter passing (postgres zic segfault)**: Fixed `va_arg`, `va_start`,
+  `va_end`, and `va_copy` when operating on a `va_list` function parameter. On x86-64,
+  `va_list` is `__va_list_tag[1]` (array type), which decays to a pointer when passed as
+  a parameter. The lowering code used `lower_address_of` to get the va_list address, which
+  works for local va_list variables (takes address of the array) but is wrong for parameters
+  (takes address of the pointer variable, giving a pointer-to-pointer). Added
+  `lower_va_list_pointer` helper that checks `is_array` to distinguish: local va_list (array)
+  uses address-of, parameter va_list (pointer) loads the value directly. This was the root
+  cause of PostgreSQL's `zic` timezone compiler segfaulting on `--version` — the internal
+  `pg_printf` → `dopr` call chain passes va_list through function parameters.
+- **Fix 2D global array initializer corruption**: Fixed `flatten_global_array_init` using
+  `<=` instead of `<` in the padding loop (`while values.len() <= current_idx`), which
+  inserted a spurious zero element before every real value when processing inner dimensions
+  of multi-dimensional global arrays. For `int arr[2][12] = {{31,28,...}, {31,29,...}}`, this
+  produced `[0,31,0,28,...]` instead of `[31,28,31,30,...]`. This caused PostgreSQL's `zic`
+  to report "invalid day of month" on all timezone data entries (comparing day numbers against
+  `len_months[1][month]` which returned 0 for all months).
+- **Increase compiler stack size to 64MB**: Large generated C files (e.g. Bison parser outputs
+  like PostgreSQL's 68K-line `preproc.c`) caused stack overflow in our recursive descent parser.
+  Spawn the main compilation in a thread with 64MB stack.
 - **Fix forward-declared struct type resolution in pointer chains**: Fixed a bug where
   struct types captured from forward declarations (e.g., `struct B;` used as a pointer
   member before `struct B` was fully defined) retained empty field lists in the CType
@@ -224,7 +244,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 | sqlite | PASS | All 622 sqllogictest pass (100%) |
 | libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |
 | redis | PASS | All tests pass (version, cli, SET/GET roundtrip) |
-| postgres | PARTIAL | Build succeeds; initdb completes (fixed BSS struct pointer size, -rdynamic flag forwarding); make check not yet verified |
+| postgres | PARTIAL | Build succeeds; initdb + zic timezone compiler work (fixed va_list param passing + 2D array init); `make check` temp-install succeeds but postmaster has bind EFAULT issue |
 
 ### What's Not Yet Implemented
 - Parser support for GNU C extensions in system headers (`__attribute__`, `__asm__` renames)

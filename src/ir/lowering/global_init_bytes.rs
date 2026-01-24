@@ -259,6 +259,10 @@ impl Lowerer {
                         return None;
                     }
                 }
+                Designator::Range(_, _) => {
+                    // Range designators are expanded to individual Index items during parsing
+                    return None;
+                }
             }
         }
 

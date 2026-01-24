@@ -1,7 +1,0 @@
-Fix PostgreSQL zic (timezone compiler) segfault
-
-The zic binary segfaults even on `--version`. This is the last blocker for
-postgres `make check`. Will bisect miscompiled source files by mixing gcc/ccc
-compilation, create a minimal reproducer, and fix the underlying codegen bug.
-
-Status: LOCKED

@@ -7,6 +7,7 @@
 // K&R-style function parameters are also handled here, where parameter types
 // are declared separately after the parameter name list.
 
+use crate::common::source::Span;
 use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
 use super::parser::Parser;
@@ -449,9 +450,16 @@ impl Parser {
                 // Parse designators: [idx] and .field
                 loop {
                     if self.consume_if(&TokenKind::LBracket) {
-                        let idx = self.parse_expr();
-                        self.expect(&TokenKind::RBracket);
-                        designators.push(Designator::Index(idx));
+                        let lo = self.parse_expr();
+                        if self.consume_if(&TokenKind::Ellipsis) {
+                            // GCC range designator: [lo ... hi]
+                            let hi = self.parse_expr();
+                            self.expect(&TokenKind::RBracket);
+                            designators.push(Designator::Range(lo, hi));
+                        } else {
+                            self.expect(&TokenKind::RBracket);
+                            designators.push(Designator::Index(lo));
+                        }
                     } else if self.consume_if(&TokenKind::Dot) {
                         if let TokenKind::Identifier(name) = self.peek().clone() {
                             self.advance();
@@ -483,9 +491,71 @@ impl Parser {
                 }
             }
             self.expect(&TokenKind::RBrace);
+            // Expand range designators [lo ... hi] into individual Index items
+            let items = Self::expand_range_designators(items);
             Initializer::List(items)
         } else {
             Initializer::Expr(self.parse_assignment_expr())
+        }
+    }
+
+    /// Expand GCC range designators `[lo ... hi] = val` into multiple items
+    /// `[lo] = val, [lo+1] = val, ..., [hi] = val` so downstream code only
+    /// sees `Designator::Index`.
+    fn expand_range_designators(items: Vec<InitializerItem>) -> Vec<InitializerItem> {
+        let mut result = Vec::with_capacity(items.len());
+        for item in items {
+            if let Some(range_pos) = item.designators.iter().position(|d| matches!(d, Designator::Range(_, _))) {
+                if let Designator::Range(ref lo_expr, ref hi_expr) = item.designators[range_pos] {
+                    // Try to evaluate lo and hi as integer constants
+                    let lo = Self::eval_simple_int_expr(lo_expr);
+                    let hi = Self::eval_simple_int_expr(hi_expr);
+                    if let (Some(lo_val), Some(hi_val)) = (lo, hi) {
+                        for idx in lo_val..=hi_val {
+                            let mut new_desigs = item.designators.clone();
+                            new_desigs[range_pos] = Designator::Index(
+                                Expr::IntLiteral(idx, Span::dummy())
+                            );
+                            result.push(InitializerItem {
+                                designators: new_desigs,
+                                init: item.init.clone(),
+                            });
+                        }
+                        continue;
+                    }
+                }
+                // If we can't evaluate, keep as-is (will error later)
+                result.push(item);
+            } else {
+                result.push(item);
+            }
+        }
+        result
+    }
+
+    /// Simple constant expression evaluator for range designator bounds.
+    /// Handles integer literals and character literals.
+    fn eval_simple_int_expr(expr: &Expr) -> Option<i64> {
+        match expr {
+            Expr::IntLiteral(val, _) => Some(*val),
+            Expr::UIntLiteral(val, _) => Some(*val as i64),
+            Expr::LongLiteral(val, _) => Some(*val),
+            Expr::CharLiteral(val, _) => Some(*val as i64),
+            Expr::BinaryOp(op, lhs, rhs, _) => {
+                let l = Self::eval_simple_int_expr(lhs)?;
+                let r = Self::eval_simple_int_expr(rhs)?;
+                match op {
+                    BinOp::Add => Some(l + r),
+                    BinOp::Sub => Some(l - r),
+                    BinOp::Mul => Some(l * r),
+                    BinOp::Div if r != 0 => Some(l / r),
+                    _ => None,
+                }
+            }
+            Expr::UnaryOp(UnaryOp::Neg, inner, _) => {
+                Self::eval_simple_int_expr(inner).map(|v| -v)
+            }
+            _ => None,
         }
     }
 

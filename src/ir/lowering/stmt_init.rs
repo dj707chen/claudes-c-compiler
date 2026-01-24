@@ -319,10 +319,12 @@ impl Lowerer {
     /// Struct initializer list with designated initializer support.
     fn lower_struct_init_list(&mut self, items: &[InitializerItem], alloca: Value, declarator_name: &str) {
         if let Some(layout) = self.func_mut().locals.get(declarator_name).and_then(|l| l.struct_layout.clone()) {
-            let has_designators = items.iter().any(|item| !item.designators.is_empty());
-            if has_designators || items.len() < layout.fields.len() {
-                self.zero_init_alloca(alloca, layout.size);
-            }
+            // Always zero-initialize the entire struct before writing explicit values.
+            // The C standard (C11 6.7.9p21) requires that all members not explicitly
+            // initialized in a brace-enclosed list are implicitly zero-initialized.
+            // This handles partial array field init (e.g., struct { int arr[8]; } x = {0};)
+            // where a single initializer item covers only one element of an array field.
+            self.zero_init_alloca(alloca, layout.size);
             self.emit_struct_init(items, alloca, &layout, 0);
         }
     }

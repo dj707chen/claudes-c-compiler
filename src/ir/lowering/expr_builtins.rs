@@ -80,32 +80,33 @@ impl Lowerer {
             _ => {}
         }
         // Handle va_start/va_end/va_copy specially.
-        // These builtins take the ADDRESS of the va_list variable, not its value.
-        // Use lower_address_of to get the address regardless of whether va_list is
-        // an array type (x86-64/AArch64) or a pointer type (RISC-V).
+        // These builtins need a pointer to the va_list struct.
+        // Use lower_va_list_pointer which correctly handles both local va_list
+        // variables (array type, needs address-of) and va_list parameters
+        // (pointer type after array-to-pointer decay, needs value load).
         match name {
             "__builtin_va_start" => {
                 if let Some(ap_expr) = args.first() {
-                    let ap_addr = self.lower_address_of(ap_expr);
-                    let ap_ptr = self.operand_to_value(ap_addr);
+                    let ap_ptr_op = self.lower_va_list_pointer(ap_expr);
+                    let ap_ptr = self.operand_to_value(ap_ptr_op);
                     self.emit(Instruction::VaStart { va_list_ptr: ap_ptr });
                 }
                 return Some(Operand::Const(IrConst::I64(0)));
             }
             "__builtin_va_end" => {
                 if let Some(ap_expr) = args.first() {
-                    let ap_addr = self.lower_address_of(ap_expr);
-                    let ap_ptr = self.operand_to_value(ap_addr);
+                    let ap_ptr_op = self.lower_va_list_pointer(ap_expr);
+                    let ap_ptr = self.operand_to_value(ap_ptr_op);
                     self.emit(Instruction::VaEnd { va_list_ptr: ap_ptr });
                 }
                 return Some(Operand::Const(IrConst::I64(0)));
             }
             "__builtin_va_copy" => {
                 if args.len() >= 2 {
-                    let dest_addr = self.lower_address_of(&args[0]);
-                    let src_addr = self.lower_address_of(&args[1]);
-                    let dest_ptr = self.operand_to_value(dest_addr);
-                    let src_ptr = self.operand_to_value(src_addr);
+                    let dest_op = self.lower_va_list_pointer(&args[0]);
+                    let src_op = self.lower_va_list_pointer(&args[1]);
+                    let dest_ptr = self.operand_to_value(dest_op);
+                    let src_ptr = self.operand_to_value(src_op);
                     self.emit(Instruction::VaCopy { dest_ptr, src_ptr });
                 }
                 return Some(Operand::Const(IrConst::I64(0)));
