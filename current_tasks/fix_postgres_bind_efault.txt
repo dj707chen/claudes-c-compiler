@@ -1,0 +1,20 @@
+Task: Fix PostgreSQL postmaster bind() EFAULT
+
+Problem:
+After building PostgreSQL with ccc, `make check` gets through temp-install but
+the postmaster fails to start with:
+  LOG: could not bind IPv6 address "::1": EFAULT
+  LOG: could not bind IPv4 address "127.0.0.1": EFAULT
+  FATAL: could not create any TCP/IP sockets
+
+The bind() call in StreamServerPort (src/backend/libpq/pqcomm.c:510) passes
+addr->ai_addr and addr->ai_addrlen from getaddrinfo results.
+
+Plan:
+1. Reproduce the issue by running postgres verify
+2. Compile pqcomm.c with gcc while rest uses ccc to confirm the bug is there
+3. Bisect to find the miscompiled expression
+4. Fix the compiler bug
+5. Add regression test
+
+Status: LOCKED

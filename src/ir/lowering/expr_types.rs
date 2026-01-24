@@ -655,6 +655,20 @@ impl Lowerer {
                 }
             }
         }
+        // Fallback for member access bases (e.g., p->c[0] or x.arr[0])
+        match base {
+            Expr::MemberAccess(base_expr, field_name, _) | Expr::PointerMemberAccess(base_expr, field_name, _) => {
+                let is_ptr = matches!(base, Expr::PointerMemberAccess(..));
+                if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, is_ptr) {
+                    match &ctype {
+                        CType::Array(elem_ty, _) => return self.resolve_ctype_size(elem_ty).max(1),
+                        CType::Pointer(pointee) => return self.resolve_ctype_size(pointee).max(1),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
         4 // default: int element
     }
 
@@ -1051,8 +1065,10 @@ impl Lowerer {
     fn get_field_ctype(&self, base_expr: &Expr, field_name: &str, is_pointer_access: bool) -> Option<CType> {
         let base_ctype = if is_pointer_access {
             // For p->field, get CType of p, then dereference
+            // Arrays decay to pointers, so arr->field is valid when arr is an array
             match self.get_expr_ctype(base_expr)? {
                 CType::Pointer(inner) => *inner,
+                CType::Array(inner, _) => *inner,
                 _ => return None,
             }
         } else {

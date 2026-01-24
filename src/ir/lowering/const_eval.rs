@@ -762,6 +762,51 @@ impl Lowerer {
         }
     }
 
+    /// Compute the number of scalar initializer items needed to flat-initialize a CType.
+    /// For scalar types: 1. For arrays: element_count * scalars_per_element.
+    /// For structs/unions: sum of scalar counts of all fields (union uses max field count).
+    fn flat_scalar_count(&self, ty: &CType) -> usize {
+        match ty {
+            CType::Array(elem_ty, Some(size)) => {
+                *size * self.flat_scalar_count(elem_ty)
+            }
+            CType::Array(_, None) => {
+                // Unsized array treated as 0 for counting purposes
+                0
+            }
+            CType::Struct(key) | CType::Union(key) => {
+                if let Some(layout) = self.types.struct_layouts.get(key) {
+                    self.flat_scalar_count_for_layout(layout)
+                } else {
+                    1
+                }
+            }
+            // All scalar types (int, float, pointer, etc.) consume 1 initializer item
+            _ => 1,
+        }
+    }
+
+    /// Compute the flat scalar count for a struct/union layout.
+    /// For structs: sum of flat scalar counts of all fields.
+    /// For unions: the maximum flat scalar count among fields (since only one is initialized).
+    fn flat_scalar_count_for_layout(&self, layout: &StructLayout) -> usize {
+        if layout.fields.is_empty() {
+            return 0;
+        }
+        if layout.is_union {
+            // Union: only one field is initialized, use max for sizing purposes
+            layout.fields.iter()
+                .map(|f| self.flat_scalar_count(&f.ty))
+                .max()
+                .unwrap_or(1)
+        } else {
+            // Struct: all fields are initialized sequentially
+            layout.fields.iter()
+                .map(|f| self.flat_scalar_count(&f.ty))
+                .sum()
+        }
+    }
+
     /// Compute the number of struct elements in a flat initializer list for an unsized
     /// array of structs. Handles both braced (each item is one struct) and flat (items
     /// fill struct fields sequentially) initialization styles, as well as [idx] designators.
@@ -773,8 +818,9 @@ impl Lowerer {
         items: &[InitializerItem],
         layout: &StructLayout,
     ) -> usize {
-        let num_fields = layout.fields.len();
-        if num_fields == 0 {
+        // Use flat scalar count: accounts for array fields consuming multiple items
+        let flat_count = self.flat_scalar_count_for_layout(layout);
+        if flat_count == 0 {
             return items.len();
         }
 
@@ -815,9 +861,9 @@ impl Lowerer {
                     current_idx += 1;
                 }
             } else {
-                // Flat init: this scalar fills one field of the current struct element
+                // Flat init: this scalar fills one slot of the current struct element
                 fields_consumed += 1;
-                if fields_consumed >= num_fields {
+                if fields_consumed >= flat_count {
                     // Completed one struct element
                     if current_idx >= max_idx {
                         max_idx = current_idx + 1;
