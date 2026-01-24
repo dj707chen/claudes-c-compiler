@@ -1263,10 +1263,8 @@ impl Lowerer {
 
                 // Push switch context
                 self.switch_stack.push(SwitchFrame {
-                    end_label: end_label.clone(),
                     cases: Vec::new(),
                     default_label: None,
-                    val_alloca: switch_alloca,
                     expr_type: switch_expr_ty,
                 });
                 self.break_labels.push(end_label.clone());

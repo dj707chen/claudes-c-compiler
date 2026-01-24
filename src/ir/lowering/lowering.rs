@@ -191,10 +191,8 @@ pub(super) enum LValue {
 /// A single level of switch statement context, pushed/popped as switches nest.
 #[derive(Debug)]
 pub(super) struct SwitchFrame {
-    pub end_label: String,
     pub cases: Vec<(i64, String)>,
     pub default_label: Option<String>,
-    pub val_alloca: Value,
     pub expr_type: IrType,
 }
 
@@ -744,7 +742,6 @@ impl Lowerer {
             struct_size: usize,
             struct_layout: Option<StructLayout>,
             param_name: String,
-            is_complex: bool,
             c_type: Option<CType>,
         }
         let mut struct_params: Vec<StructParamInfo> = Vec::new();
@@ -818,7 +815,6 @@ impl Lowerer {
                         struct_size,
                         struct_layout: layout,
                         param_name: param.name.clone(),
-                        is_complex: is_complex_param,
                         c_type: param_ctype,
                     });
                 } else {

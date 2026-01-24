@@ -542,26 +542,6 @@ impl Parser {
         (result, Vec::new())
     }
 
-    /// Parse array dimensions and wrap a type with them in reverse order.
-    /// For T field[N][M], produces Array(Array(T, M), N).
-    pub(super) fn parse_array_dimensions_wrapping(&mut self, mut base_type: TypeSpecifier) -> TypeSpecifier {
-        let mut array_dims: Vec<Option<Box<Expr>>> = Vec::new();
-        while matches!(self.peek(), TokenKind::LBracket) {
-            self.advance();
-            let size = if matches!(self.peek(), TokenKind::RBracket) {
-                None
-            } else {
-                Some(Box::new(self.parse_expr()))
-            };
-            self.expect(&TokenKind::RBracket);
-            array_dims.push(size);
-        }
-        for dim in array_dims.into_iter().rev() {
-            base_type = TypeSpecifier::Array(Box::new(base_type), dim);
-        }
-        base_type
-    }
-
     /// Parse enum variant declarations inside braces.
     pub(super) fn parse_enum_variants(&mut self) -> Vec<EnumVariant> {
         let mut variants = Vec::new();

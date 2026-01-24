@@ -728,11 +728,6 @@ impl Lowerer {
         c.to_i64()
     }
 
-    /// Coerce an IrConst to match a target IrType. Delegates to IrConst::coerce_to().
-    pub(super) fn coerce_const_to_type(&self, val: IrConst, target_ty: IrType) -> IrConst {
-        val.coerce_to(target_ty)
-    }
-
     /// Coerce a constant to the target type, using the source expression's type for signedness.
     pub(super) fn coerce_const_to_type_with_src(&self, val: IrConst, target_ty: IrType, src_ty: IrType) -> IrConst {
         val.coerce_to_with_src(target_ty, Some(src_ty))
@@ -1507,11 +1502,6 @@ impl Lowerer {
                 self.get_struct_union_layout_by_tag("union", tag).cloned(),
             _ => None,
         }
-    }
-
-    /// Compute a StructLayout from inline field definitions.
-    pub(super) fn compute_struct_union_layout(&self, fields: &[StructFieldDecl], is_union: bool) -> StructLayout {
-        self.compute_struct_union_layout_packed(fields, is_union, None)
     }
 
     pub(super) fn compute_struct_union_layout_packed(&self, fields: &[StructFieldDecl], is_union: bool, max_field_align: Option<usize>) -> StructLayout {

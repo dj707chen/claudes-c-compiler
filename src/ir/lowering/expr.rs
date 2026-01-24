@@ -2014,76 +2014,6 @@ impl Lowerer {
         }
     }
 
-    /// Initialize struct fields from an initializer list (used by both compound
-    /// literals and local variable initialization).
-    pub(super) fn init_struct_fields(
-        &mut self,
-        base: Value,
-        items: &[InitializerItem],
-        layout: &crate::common::types::StructLayout,
-    ) {
-        self.zero_init_alloca(base, layout.size);
-        let mut current_field_idx = 0usize;
-
-        for item in items {
-            let desig_name = match item.designators.first() {
-                Some(Designator::Field(ref name)) => Some(name.as_str()),
-                _ => None,
-            };
-            let field_idx = match layout.resolve_init_field_idx(desig_name, current_field_idx) {
-                Some(idx) => idx,
-                None => break,
-            };
-            let field = &layout.fields[field_idx].clone();
-            let field_ty = IrType::from_ctype(&field.ty);
-
-            let field_addr = self.fresh_value();
-            self.emit(Instruction::GetElementPtr {
-                dest: field_addr,
-                base,
-                offset: Operand::Const(IrConst::I64(field.offset as i64)),
-                ty: field_ty,
-            });
-
-            // Check if the field is a nested struct/union - use memcpy instead of store
-            let is_struct_field = matches!(&field.ty, CType::Struct(_) | CType::Union(_));
-
-            match &item.init {
-                Initializer::Expr(expr) => {
-                    if is_struct_field {
-                        // Struct field: memcpy from source struct address
-                        let src_addr = self.lower_expr(expr);
-                        let src_val = self.operand_to_value(src_addr);
-                        self.emit(Instruction::Memcpy {
-                            dest: field_addr,
-                            src: src_val,
-                            size: field.ty.size(),
-                        });
-                    } else if let (Some(bit_offset), Some(bit_width)) = (field.bit_offset, field.bit_width) {
-                        // Bitfield: use read-modify-write to pack value at correct bit position
-                        let val = self.lower_and_cast_init_expr(expr, field_ty);
-                        self.store_bitfield(field_addr, field_ty, bit_offset, bit_width, val);
-                    } else {
-                        let val = self.lower_and_cast_init_expr(expr, field_ty);
-                        self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
-                    }
-                }
-                Initializer::List(sub_items) => {
-                    if is_struct_field {
-                        // Nested struct init list: recursively init the sub-struct
-                        if let CType::Struct(ref st) = &field.ty {
-                            let sub_layout = crate::common::types::StructLayout::for_struct(&st.fields);
-                            self.init_struct_fields(field_addr, sub_items, &sub_layout);
-                        }
-                    }
-                    // For non-struct nested list, fall through (already zero-initialized)
-                }
-            }
-
-            current_field_idx = field_idx + 1;
-        }
-    }
-
     /// Initialize an array or scalar compound literal from an initializer list.
     fn init_array_compound_literal(
         &mut self,
@@ -2442,16 +2372,6 @@ impl Lowerer {
             let mask = (1u64 << bit_width) - 1;
             let masked = self.emit_binop_val(IrBinOp::And, val, Operand::Const(IrConst::I64(mask as i64)), IrType::I64);
             Operand::Value(masked)
-        }
-    }
-
-    /// Create an IrConst of the appropriate integer type.
-    fn make_int_const(&self, ty: IrType, val: i64) -> IrConst {
-        match ty {
-            IrType::I8 | IrType::U8 => IrConst::I8(val as i8),
-            IrType::I16 | IrType::U16 => IrConst::I16(val as i16),
-            IrType::I32 | IrType::U32 => IrConst::I32(val as i32),
-            _ => IrConst::I64(val),
         }
     }
 
@@ -2868,12 +2788,6 @@ impl Lowerer {
                 tmp
             }
         }
-    }
-
-    /// Load an lvalue and return the result as a raw Value (not Operand).
-    fn load_lvalue_as_value(&mut self, lv: &super::lowering::LValue, ty: IrType) -> Value {
-        let loaded = self.load_lvalue_typed(lv, ty);
-        self.operand_to_value(loaded)
     }
 
     /// Insert a narrowing cast if the type is sub-64-bit (I32/U32).

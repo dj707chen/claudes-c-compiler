@@ -298,18 +298,6 @@ impl ArmCodegen {
         }
     }
 
-    /// Convert an x-register name to its w-register counterpart.
-    fn w_for_x(xreg: &str) -> &'static str {
-        match xreg {
-            "x0" => "w0", "x1" => "w1", "x2" => "w2", "x3" => "w3",
-            "x4" => "w4", "x5" => "w5", "x6" => "w6", "x7" => "w7",
-            "x8" => "w8", "x9" => "w9", "x10" => "w10", "x11" => "w11",
-            "x12" => "w12", "x13" => "w13", "x14" => "w14", "x15" => "w15",
-            "x16" => "w16", "x17" => "w17",
-            _ => "w0",
-        }
-    }
-
     /// Emit a type cast instruction sequence for AArch64.
     /// Emit AArch64 instructions for a type cast, using shared cast classification.
     fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {

@@ -1819,42 +1819,6 @@ impl Lowerer {
             .unwrap_or(current_field_idx)
     }
 
-    /// Write an initializer item to a byte buffer at the given offset.
-    fn write_init_item_to_bytes(&self, bytes: &mut [u8], offset: usize, init: &Initializer, field_ty: &CType) {
-        match init {
-            Initializer::Expr(expr) => {
-                let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
-                let field_ir_ty = IrType::from_ctype(field_ty);
-                self.write_const_to_bytes(bytes, offset, &val, field_ir_ty);
-            }
-            Initializer::List(sub_items) => {
-                // Try struct/union layout first
-                if let Some(sub_layout) = self.get_struct_layout_for_ctype(field_ty) {
-                    self.write_struct_init_to_bytes(bytes, offset, sub_items, &sub_layout);
-                } else if let CType::Array(elem_ty, count) = field_ty {
-                    let elem_size = elem_ty.size();
-                    for (idx, sub_item) in sub_items.iter().enumerate() {
-                        if count.map_or(false, |c| idx >= c) { break; }
-                        if let Initializer::Expr(expr) = &sub_item.init {
-                            let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
-                            let elem_ir_ty = IrType::from_ctype(elem_ty);
-                            self.write_const_to_bytes(bytes, offset + idx * elem_size, &val, elem_ir_ty);
-                        }
-                    }
-                } else {
-                    // Scalar in braces
-                    if let Some(first) = sub_items.first() {
-                        if let Initializer::Expr(expr) = &first.init {
-                            let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
-                            let field_ir_ty = IrType::from_ctype(field_ty);
-                            self.write_const_to_bytes(bytes, offset, &val, field_ir_ty);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Write an IrConst value to a byte buffer at the given offset using the field's IR type.
     fn write_const_to_bytes(&self, bytes: &mut [u8], offset: usize, val: &IrConst, ty: IrType) {
         let coerced = val.coerce_to(ty);

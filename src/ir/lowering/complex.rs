@@ -755,25 +755,6 @@ impl Lowerer {
         Operand::Value(result)
     }
 
-    /// Create a complex value from real scalar for use in expressions like `10.0 + 5.0i`.
-    /// This handles the case where a real literal is added to an imaginary literal.
-    pub(super) fn make_complex_from_real_scalar(&mut self, val: f64, ctype: &CType) -> Operand {
-        let alloca = self.alloca_complex(ctype);
-        let comp_ty = Self::complex_component_ir_type(ctype);
-        let real_val = match comp_ty {
-            IrType::F32 => Operand::Const(IrConst::F32(val as f32)),
-            IrType::F128 => Operand::Const(IrConst::LongDouble(val)),
-            _ => Operand::Const(IrConst::F64(val)),
-        };
-        let zero = match comp_ty {
-            IrType::F32 => Operand::Const(IrConst::F32(0.0)),
-            IrType::F128 => Operand::Const(IrConst::LongDouble(0.0)),
-            _ => Operand::Const(IrConst::F64(0.0)),
-        };
-        self.store_complex_parts(alloca, real_val, zero, ctype);
-        Operand::Value(alloca)
-    }
-
     /// Evaluate a complex expression for global initialization.
     /// Returns a GlobalInit::Array with [real, imag] constant values.
     pub(super) fn eval_complex_global_init(&self, expr: &Expr, target_type: &TypeSpecifier) -> Option<GlobalInit> {
