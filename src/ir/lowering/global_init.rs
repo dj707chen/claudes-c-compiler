@@ -210,12 +210,8 @@ impl Lowerer {
                     // Array of structs: emit as byte array using struct layout.
                     // But skip byte-serialization if any struct field is or contains
                     // a pointer type (pointers need .quad directives for address relocations).
-                    let has_ptr_fields = struct_layout.as_ref().map_or(false, |layout| {
-                        layout.fields.iter().any(|f| {
-                            matches!(f.ty, CType::Pointer(_) | CType::Function(_))
-                            || Self::type_has_pointer_elements(&f.ty)
-                        })
-                    });
+                    let has_ptr_fields = struct_layout.as_ref()
+                        .map_or(false, |layout| layout.has_pointer_fields());
                     if let Some(ref layout) = struct_layout {
                         if has_ptr_fields {
                             // Use Compound approach for struct arrays with pointer fields
@@ -658,10 +654,7 @@ impl Lowerer {
 
         // If target is a struct/union, check its fields for pointers
         if let Some(target_layout) = self.get_struct_layout_for_ctype(&current_ty) {
-            let has_ptr_fields = target_layout.fields.iter().any(|f| {
-                Self::type_has_pointer_elements(&f.ty)
-            });
-            if has_ptr_fields && self.init_has_addr_exprs(&item.init) {
+            if target_layout.has_pointer_fields() && self.init_has_addr_exprs(&item.init) {
                 return true;
             }
             if let Initializer::List(nested_items) = &item.init {

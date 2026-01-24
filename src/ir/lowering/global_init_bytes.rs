@@ -923,7 +923,7 @@ impl Lowerer {
                         );
                     } else {
                         // This brace group represents a single struct initializer.
-                        self.write_struct_init_to_bytes(bytes, elem_offset, sub_items, layout);
+                        self.fill_struct_global_bytes(sub_items, layout, bytes, elem_offset);
                     }
                     item_idx += 1;
                 }
@@ -1099,114 +1099,6 @@ impl Lowerer {
                 let imag_const = IrConst::F64(imag);
                 self.write_const_to_bytes(bytes, field_offset, &real_const, IrType::F64);
                 self.write_const_to_bytes(bytes, field_offset + comp_size, &imag_const, IrType::F64);
-            }
-        }
-    }
-
-    /// Write a struct initializer list to a byte buffer at the given base offset.
-    /// Handles nested struct fields recursively.
-    pub(super) fn write_struct_init_to_bytes(
-        &self,
-        bytes: &mut [u8],
-        base_offset: usize,
-        items: &[InitializerItem],
-        layout: &StructLayout,
-    ) {
-        let mut current_field_idx = 0usize;
-        for item in items {
-            let designator_name = match item.designators.first() {
-                Some(Designator::Field(ref name)) => Some(name.as_str()),
-                _ => None,
-            };
-            let field_idx = match layout.resolve_init_field_idx(designator_name, current_field_idx) {
-                Some(idx) => idx,
-                None => break,
-            };
-
-            let field_layout = &layout.fields[field_idx];
-            let field_offset = base_offset + field_layout.offset;
-
-            // Handle nested designators (e.g., .a.j = 2): drill into sub-struct
-            let has_nested_designator = item.designators.len() > 1
-                && matches!(item.designators.first(), Some(Designator::Field(_)));
-            if has_nested_designator {
-                if let Some(sub_layout) = self.get_struct_layout_for_ctype(&field_layout.ty) {
-                    let sub_item = InitializerItem {
-                        designators: item.designators[1..].to_vec(),
-                        init: item.init.clone(),
-                    };
-                    self.write_struct_init_to_bytes(bytes, field_offset, &[sub_item], &sub_layout);
-                }
-                current_field_idx = field_idx + 1;
-                continue;
-            }
-
-            // Complex fields: use specialized handler for {real, imag} pair
-            if field_layout.ty.is_complex() {
-                self.write_complex_field_to_bytes(bytes, field_offset, &field_layout.ty, &item.init);
-                current_field_idx = field_idx + 1;
-                continue;
-            }
-
-            match &item.init {
-                Initializer::Expr(expr) => {
-                    if let Expr::StringLiteral(s, _) = expr {
-                        // String literal initializing a char array field
-                        // Use chars() to get raw byte values (each char U+0000..U+00FF)
-                        if let CType::Array(_, Some(arr_size)) = &field_layout.ty {
-                            let s_chars: Vec<u8> = s.chars().map(|c| c as u8).collect();
-                            for (i, &b) in s_chars.iter().enumerate() {
-                                if i >= *arr_size { break; }
-                                if field_offset + i < bytes.len() {
-                                    bytes[field_offset + i] = b;
-                                }
-                            }
-                            if s_chars.len() < *arr_size && field_offset + s_chars.len() < bytes.len() {
-                                bytes[field_offset + s_chars.len()] = 0;
-                            }
-                        }
-                    } else {
-                        let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
-                        let field_ir_ty = IrType::from_ctype(&field_layout.ty);
-                        if let (Some(bit_offset), Some(bit_width)) = (field_layout.bit_offset, field_layout.bit_width) {
-                            self.write_bitfield_to_bytes(bytes, field_offset, &val, field_ir_ty, bit_offset, bit_width);
-                        } else {
-                            self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
-                        }
-                    }
-                }
-                Initializer::List(sub_items) => {
-                    // Nested struct/union: recurse if the field is a struct type
-                    if let Some(sub_layout) = self.get_struct_layout_for_ctype(&field_layout.ty) {
-                        self.write_struct_init_to_bytes(bytes, field_offset, sub_items, &sub_layout);
-                    } else {
-                        // Array field or other nested init: try to write elements sequentially
-                        if let CType::Array(ref elem_ty, _) = field_layout.ty {
-                            let elem_ir_ty = IrType::from_ctype(elem_ty);
-                            let elem_size = elem_ty.size();
-                            for (i, sub_item) in sub_items.iter().enumerate() {
-                                if let Initializer::Expr(expr) = &sub_item.init {
-                                    let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
-                                    self.write_const_to_bytes(bytes, field_offset + i * elem_size, &val, elem_ir_ty);
-                                }
-                            }
-                        } else if let Some(first) = sub_items.first() {
-                            if let Initializer::Expr(expr) = &first.init {
-                                let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
-                                let field_ir_ty = IrType::from_ctype(&field_layout.ty);
-                                self.write_const_to_bytes(bytes, field_offset, &val, field_ir_ty);
-                            }
-                        }
-                    }
-                }
-            }
-
-            current_field_idx = field_idx + 1;
-
-            // For unions with flat init, only the first member can be initialized.
-            // Designated inits can overwrite (last designator wins).
-            if layout.is_union && designator_name.is_none() {
-                break;
             }
         }
     }

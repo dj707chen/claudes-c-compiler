@@ -80,7 +80,13 @@ be fully serialized to a `Vec<u8>` byte buffer, which is simpler and more effici
 
 The **compound path** (`global_init_compound.rs`) also handles struct arrays with pointer
 fields via a hybrid approach: serializes scalar fields to bytes, collects pointer relocations
-separately, then merges them into a single `GlobalInit::Compound` vector.
+separately, then merges them into a single `GlobalInit::Compound` vector. Key helpers:
+- `write_expr_to_bytes_or_ptrs()` — Writes a scalar expression to either the byte buffer
+  (for non-pointer types) or the ptr_ranges relocation list (for pointer/function types).
+  Handles bitfields too. Eliminates duplicated is-ptr/bitfield/scalar dispatch.
+- `fill_composite_or_array_with_ptrs()` — Routes a braced init list through either the
+  pointer-aware path (`fill_nested_struct_with_ptrs`) or the plain byte path
+  (`fill_struct_global_bytes`) based on `StructLayout::has_pointer_fields()`.
 
 ## Design Decisions
 

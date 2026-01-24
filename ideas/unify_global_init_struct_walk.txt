@@ -1,24 +1,28 @@
 Unify global init struct traversal with trait-based emitter pattern
 
-The global init subsystem has the same struct-field-traversal algorithm implemented
-in 3 separate functions, each targeting a different output format:
+STATUS: PARTIALLY DONE. See below for what was completed and what remains.
 
-1. fill_struct_global_bytes() -> writes to &mut [u8] byte buffer
-2. lower_struct_global_init_compound() -> writes to Vec<GlobalInit> elements
-3. fill_struct_array_sequential() + fill_nested_struct_with_ptrs() ->
-   writes scalars to bytes + collects pointer relocations in Vec<(usize, GlobalInit)>
+COMPLETED:
+- Removed `write_struct_init_to_bytes` (~105 lines), replaced by `fill_struct_global_bytes`
+  which already handles all the same cases (nested designators, complex fields, string
+  literals in char arrays, bitfields, nested structs/unions, array fields, union semantics).
+- Added `StructLayout::has_pointer_fields()` to common/types.rs, replacing 4 inline
+  occurrences of `layout.fields.iter().any(|f| matches!(...) || type_has_pointer_elements(...))`
+- Extracted `write_expr_to_bytes_or_ptrs()` helper, consolidating 5 instances of the
+  "if ptr { resolve_ptr } else if bitfield { write_bitfield } else { write_const }" pattern
+- Extracted `fill_composite_or_array_with_ptrs()` helper, consolidating 4 instances of the
+  "if has_ptr { fill_nested_struct_with_ptrs } else { fill_struct_global_bytes }" branching
 
-All three independently implement: field index resolution via designators, union
-single-field semantics, bitfield packing, padding/zero-fill, and nested struct
-recursion. Every bug fix or new designator feature must be applied in 3+ places.
+REMAINING (diminishing returns):
+The full trait-based unification (InitEmitter with ByteEmitter/CompoundEmitter/HybridEmitter
+and a single walk_struct_init) was not done because the three main traversal loops
+(fill_struct_global_bytes, lower_struct_global_init_compound, fill_nested_struct_with_ptrs)
+differ significantly in their handling of:
+- Array fields (byte path has elaborate multi-dim/FAM/designator support)
+- Bitfield packing (compound path packs into storage units with padding tracking)
+- Union semantics (compound path has field_inits grouping phase)
+- Flat init consumption (byte path consumes multiple items per array field)
 
-Recommended approach: Create an InitEmitter trait with methods for emitting scalars,
-pointers, and zero-fill. Implement ByteEmitter, CompoundEmitter, and HybridEmitter.
-Write one walk_struct_init function that works with any emitter.
-
-The drill_designators() shared helper was already extracted (replacing 5 duplicated
-designator chain walkers). This next step would unify the remaining ~300 lines of
-duplicated field traversal logic.
-
-Estimated savings: ~200-300 lines net reduction, plus correctness-by-construction
-benefit of having one traversal algorithm instead of three.
+A trait unification would need to abstract over these differences, which may add
+complexity rather than reducing it. The current extraction of shared helpers eliminates
+the most impactful duplication points.

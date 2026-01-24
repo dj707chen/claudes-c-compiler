@@ -495,6 +495,24 @@ impl StructLayout {
         }
     }
 
+    /// Check if any field in this layout is or contains a pointer/function type.
+    /// Recursively checks array element types and nested struct/union fields.
+    pub fn has_pointer_fields(&self) -> bool {
+        self.fields.iter().any(|f| Self::field_type_has_pointers(&f.ty))
+    }
+
+    /// Check if a type is or contains pointer/function types (recursive).
+    fn field_type_has_pointers(ty: &CType) -> bool {
+        match ty {
+            CType::Pointer(_) | CType::Function(_) => true,
+            CType::Array(inner, _) => Self::field_type_has_pointers(inner),
+            CType::Struct(st) | CType::Union(st) => {
+                st.fields.iter().any(|f| Self::field_type_has_pointers(&f.ty))
+            }
+            _ => false,
+        }
+    }
+
     /// Resolve which field index an initializer targets, given either a field designator
     /// or a positional index that skips unnamed bitfield fields.
     ///
