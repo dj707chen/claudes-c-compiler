@@ -1500,6 +1500,26 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit("    br x0");
     }
 
+    fn emit_dyn_alloca(&mut self, dest: &Value, size: &Operand, align: usize) {
+        // Dynamic stack allocation on AArch64
+        // 1. Load size into x0
+        self.operand_to_x0(size);
+        // 2. Round up size to 16-byte alignment
+        self.state.emit("    add x0, x0, #15");
+        self.state.emit("    and x0, x0, #-16");
+        // 3. Subtract from stack pointer
+        self.state.emit("    sub sp, sp, x0");
+        // 4. Result is the new sp value
+        if align > 16 {
+            self.state.emit("    mov x0, sp");
+            self.state.emit(&format!("    add x0, x0, #{}", align - 1));
+            self.state.emit(&format!("    and x0, x0, #{}", -(align as i64)));
+        } else {
+            self.state.emit("    mov x0, sp");
+        }
+        self.store_x0_to(dest);
+    }
+
     fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, _ordering: AtomicOrdering) {
         // Load ptr into x1, val into x2
         self.operand_to_x0(ptr);

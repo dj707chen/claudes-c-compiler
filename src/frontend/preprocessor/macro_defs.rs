@@ -144,7 +144,47 @@ impl MacroTable {
                                 // Parse arguments
                                 let (args, end_pos) = self.parse_macro_args(&chars, j);
                                 i = end_pos;
-                                let expanded = self.expand_function_macro(mac, &args, expanding);
+                                let mut expanded = self.expand_function_macro(mac, &args, expanding);
+
+                                // After expansion, check if the result ends with a function-like
+                                // macro name and the remaining source starts with '('. This handles
+                                // the pattern where a macro expands to another macro name that should
+                                // be called with following args, e.g.:
+                                //   #define DISPATCH(...) SELECT(__VA_ARGS__, B, A)(__VA_ARGS__)
+                                // Here SELECT(...) expands to A or B, and then A(...) or B(...)
+                                // must be further expanded with the following parenthesized args.
+                                loop {
+                                    let trailing = extract_trailing_ident(&expanded);
+                                    if let Some(ref trail_ident) = trailing {
+                                        if !expanding.contains(trail_ident) {
+                                            if let Some(trail_mac) = self.macros.get(trail_ident.as_str()) {
+                                                if trail_mac.is_function_like {
+                                                    // Check if '(' follows in the remaining text
+                                                    let mut k = i;
+                                                    while k < len && chars[k].is_whitespace() {
+                                                        k += 1;
+                                                    }
+                                                    if k < len && chars[k] == '(' {
+                                                        // Parse arguments from source and expand
+                                                        let (trail_args, trail_end) = self.parse_macro_args(&chars, k);
+                                                        i = trail_end;
+                                                        let trail_mac_clone = trail_mac.clone();
+                                                        // Remove the trailing macro name from expanded
+                                                        let prefix_len = expanded.len() - trail_ident.len();
+                                                        expanded.truncate(prefix_len);
+                                                        let trail_expanded = self.expand_function_macro(&trail_mac_clone, &trail_args, expanding);
+                                                        expanded.push_str(&trail_expanded);
+                                                        // Continue loop to check if the new expansion
+                                                        // also ends with a callable macro
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+
                                 // Add spaces around expansion to prevent token pasting
                                 // with adjacent characters (e.g., M(-) before --b)
                                 if !expanded.is_empty() {

@@ -899,6 +899,30 @@ impl Lowerer {
 
     /// Try to lower a __builtin_* call. Returns Some(result) if handled.
     fn try_lower_builtin_call(&mut self, name: &str, args: &[Expr]) -> Option<Operand> {
+        // Handle alloca specially - it needs dynamic stack allocation
+        match name {
+            "__builtin_alloca" | "__builtin_alloca_with_align" => {
+                // __builtin_alloca(size) -> dynamic stack allocation
+                if let Some(size_expr) = args.first() {
+                    let size_operand = self.lower_expr(size_expr);
+                    let align = if name == "__builtin_alloca_with_align" && args.len() >= 2 {
+                        // align is in bits
+                        if let Expr::IntLiteral(bits, _) = &args[1] {
+                            (*bits as usize) / 8
+                        } else {
+                            16
+                        }
+                    } else {
+                        16 // default alignment
+                    };
+                    let dest = self.fresh_value();
+                    self.emit(Instruction::DynAlloca { dest, size: size_operand, align });
+                    return Some(Operand::Value(dest));
+                }
+                return Some(Operand::Const(IrConst::I64(0)));
+            }
+            _ => {}
+        }
         // Handle va_start/va_end/va_copy specially
         match name {
             "__builtin_va_start" => {
@@ -1100,6 +1124,10 @@ impl Lowerer {
                     }
                     BuiltinIntrinsic::IsInfSign => {
                         self.lower_builtin_isinf_sign(args)
+                    }
+                    BuiltinIntrinsic::Alloca => {
+                        // Handled earlier in try_lower_builtin_call - should not reach here
+                        Some(Operand::Const(IrConst::I64(0)))
                     }
                 }
             }

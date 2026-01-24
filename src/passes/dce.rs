@@ -75,6 +75,9 @@ fn collect_used_values(func: &IrFunction) -> HashSet<u32> {
 fn collect_instruction_uses(inst: &Instruction, used: &mut HashSet<u32>) {
     match inst {
         Instruction::Alloca { .. } => {}
+        Instruction::DynAlloca { size, .. } => {
+            collect_operand_uses(size, used);
+        }
         Instruction::Store { val, ptr, .. } => {
             collect_operand_uses(val, used);
             used.insert(ptr.0);
@@ -198,6 +201,8 @@ fn has_side_effects(inst: &Instruction) -> bool {
         // (find_param_alloca) to map function parameters to their stack slots.
         // Removing unused parameter allocas shifts indices and causes miscompilation.
         Instruction::Alloca { .. } |
+        // DynAlloca modifies the stack pointer at runtime - always has side effects
+        Instruction::DynAlloca { .. } |
         Instruction::Store { .. } |
         Instruction::Call { .. } |
         Instruction::CallIndirect { .. } |

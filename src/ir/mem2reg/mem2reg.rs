@@ -173,6 +173,9 @@ fn instruction_used_values(inst: &Instruction) -> Vec<u32> {
     match inst {
         // Load and Store ptr uses are handled by the caller
         Instruction::Load { .. } | Instruction::Store { .. } | Instruction::Alloca { .. } => {}
+        Instruction::DynAlloca { size, .. } => {
+            add_operand_values(size, &mut used);
+        }
         Instruction::BinOp { lhs, rhs, .. } => {
             add_operand_values(lhs, &mut used);
             add_operand_values(rhs, &mut used);

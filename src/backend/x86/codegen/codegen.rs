@@ -1210,6 +1210,28 @@ impl ArchCodegen for X86Codegen {
         self.state.emit("    jmpq *%rax");
     }
 
+    fn emit_dyn_alloca(&mut self, dest: &Value, size: &Operand, align: usize) {
+        // Dynamic stack allocation: subtract size from rsp, align, store pointer
+        // 1. Load size into rax
+        self.operand_to_rax(size);
+        // 2. Round up size to 16-byte alignment for stack alignment
+        self.state.emit("    addq $15, %rax");
+        self.state.emit("    andq $-16, %rax");
+        // 3. Subtract from stack pointer
+        self.state.emit("    subq %rax, %rsp");
+        // 4. Align result pointer if needed
+        if align > 16 {
+            self.state.emit(&format!("    movq %rsp, %rax"));
+            self.state.emit(&format!("    addq ${}, %rax", align - 1));
+            self.state.emit(&format!("    andq ${}, %rax", -(align as i64)));
+            self.store_rax_to(dest);
+        } else {
+            // rsp is already 16-byte aligned
+            self.state.emit("    movq %rsp, %rax");
+            self.store_rax_to(dest);
+        }
+    }
+
     fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, _ordering: AtomicOrdering) {
         // Load ptr into rcx, val into rax/rdx
         self.operand_to_rax(ptr);

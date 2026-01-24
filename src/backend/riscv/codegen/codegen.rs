@@ -1264,6 +1264,26 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    jr t0");
     }
 
+    fn emit_dyn_alloca(&mut self, dest: &Value, size: &Operand, align: usize) {
+        // Dynamic stack allocation on RISC-V
+        // 1. Load size into t0
+        self.operand_to_t0(size);
+        // 2. Round up size to 16-byte alignment
+        self.state.emit("    addi t0, t0, 15");
+        self.state.emit("    andi t0, t0, -16");
+        // 3. Subtract from stack pointer
+        self.state.emit("    sub sp, sp, t0");
+        // 4. Result is the new sp value
+        if align > 16 {
+            self.state.emit("    mv t0, sp");
+            self.state.emit(&format!("    addi t0, t0, {}", align - 1));
+            self.state.emit(&format!("    andi t0, t0, -{}", align));
+        } else {
+            self.state.emit("    mv t0, sp");
+        }
+        self.store_t0_to(dest);
+    }
+
     fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, ordering: AtomicOrdering) {
         // Load ptr into t1, val into t2
         self.operand_to_t0(ptr);

@@ -83,6 +83,10 @@ pub enum Instruction {
     /// Allocate stack space: %dest = alloca ty
     Alloca { dest: Value, ty: IrType, size: usize },
 
+    /// Dynamic stack allocation: %dest = dynalloca size_operand, align
+    /// Used for __builtin_alloca - adjusts stack pointer at runtime.
+    DynAlloca { dest: Value, size: Operand, align: usize },
+
     /// Store to memory: store val, ptr (type indicates size of store)
     Store { val: Operand, ptr: Value, ty: IrType },
 
@@ -704,6 +708,7 @@ impl Instruction {
     pub fn dest(&self) -> Option<Value> {
         match self {
             Instruction::Alloca { dest, .. }
+            | Instruction::DynAlloca { dest, .. }
             | Instruction::Load { dest, .. }
             | Instruction::BinOp { dest, .. }
             | Instruction::UnaryOp { dest, .. }

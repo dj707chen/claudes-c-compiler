@@ -197,6 +197,10 @@ pub trait ArchCodegen {
     /// x86 uses "@function", ARM uses "%function".
     fn function_type_directive(&self) -> &'static str { "@function" }
 
+    /// Emit dynamic stack allocation: subtract size from stack pointer,
+    /// align the result, and store the pointer in dest.
+    fn emit_dyn_alloca(&mut self, dest: &Value, size: &Operand, align: usize);
+
     /// Frame size including alignment and saved registers.
     fn aligned_frame_size(&self, raw_space: i64) -> i64;
 }
@@ -261,6 +265,9 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
     match inst {
         Instruction::Alloca { .. } => {
             // Space already allocated in prologue
+        }
+        Instruction::DynAlloca { dest, size, align } => {
+            cg.emit_dyn_alloca(dest, size, *align);
         }
         Instruction::Store { val, ptr, ty } => {
             cg.emit_store(val, ptr, *ty);

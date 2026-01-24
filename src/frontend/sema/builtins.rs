@@ -85,9 +85,9 @@ static BUILTIN_MAP: LazyLock<HashMap<&'static str, BuiltinInfo>> = LazyLock::new
     m.insert("__builtin_realloc", BuiltinInfo::simple("realloc"));
     m.insert("__builtin_free", BuiltinInfo::simple("free"));
 
-    // Stack allocation
-    m.insert("__builtin_alloca", BuiltinInfo::simple("alloca"));
-    m.insert("__builtin_alloca_with_align", BuiltinInfo::simple("alloca"));
+    // Stack allocation - handled specially in try_lower_builtin_call as DynAlloca
+    m.insert("__builtin_alloca", BuiltinInfo::intrinsic(BuiltinIntrinsic::Alloca));
+    m.insert("__builtin_alloca_with_align", BuiltinInfo::intrinsic(BuiltinIntrinsic::Alloca));
 
     // Return address / frame address (return 0 as approximation)
     m.insert("__builtin_return_address", BuiltinInfo::constant_i64(0));
@@ -216,6 +216,8 @@ pub enum BuiltinIntrinsic {
     SignBit,
     /// __builtin_isinf_sign(x) -> int (-1 if -inf, 1 if +inf, 0 otherwise)
     IsInfSign,
+    /// __builtin_alloca(size) -> dynamic stack allocation
+    Alloca,
 }
 
 impl BuiltinInfo {

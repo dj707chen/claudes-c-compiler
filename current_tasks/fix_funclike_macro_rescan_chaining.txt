@@ -25,4 +25,4 @@ This is the same logic already present for object-like macros at line 146-172.
 Real-world impact: Breaks jq build (BLOCK variadic dispatch), and many C projects
 that use the argument-counting variadic macro dispatch pattern.
 
-Status: In progress
+Status: Completed
