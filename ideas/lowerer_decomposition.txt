@@ -39,11 +39,20 @@ COMPLETED:
    and resolve_ctype_size simplified to key-based lookups.
    Eliminates the entire class of forward-declaration staleness bugs.)
 
-REMAINING (in order):
+- Commit 6: Typedefs become HashMap<String, CType>
+  (TypeContext.typedefs changed from HashMap<String, TypeSpecifier> to
+   HashMap<String, CType>. resolve_type_spec no longer follows TypedefName
+   chains -- type_spec_to_ctype is now the primary typedef resolution path.
+   Typedef scope tracking with undo logs added to TypeScopeFrame.
+   seed_builtin_typedefs inserts CType values directly.
+   Added CType-based type query helpers: is_type_bool, is_type_complex,
+   is_type_struct_or_union, is_type_pointer, is_type_array, resolve_type_to_ctype.
+   ~30 resolve_type_spec call sites updated to use CType resolution.
+   Fixed CType::size() -> size_ctx()/resolve_ctype_size() for struct/union
+   element sizing in array subscript, struct init, and global init paths.
+   13 files changed, ~600 insertions, ~378 deletions.)
 
-5. Typedefs become HashMap<String, CType>
-   - Delete TypeSpecifier conversion layer
-   - Risk: Medium
+REMAINING (in order):
 
 6-8. Sema populates TypeContext / Lowerer receives it from sema
    - Make sema the authority for type information
