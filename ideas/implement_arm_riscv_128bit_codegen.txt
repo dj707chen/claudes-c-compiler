@@ -1,0 +1,26 @@
+Implement 128-bit integer codegen for ARM and RISC-V backends
+
+Priority: MEDIUM (needed for mbedtls on non-x86 targets)
+
+Problem: The ARM (AArch64) and RISC-V backends completely lack 128-bit integer
+codegen. All I128/U128 operations silently truncate to 64 bits:
+- Loads/stores only access lower 8 bytes of 16-byte stack slots
+- Binary ops (OR, AND, XOR, shifts, add, sub, mul) use single 64-bit instructions
+- Constants truncate to 64 bits
+- emit_copy_i128 uses default (64-bit truncation)
+
+The x86 backend has full 128-bit support using rax:rdx register pairs.
+
+Fix approach (two options):
+1. Register pair approach (like x86): Use x0:x1 on ARM, t0:t1 on RISC-V
+   - Implement emit_binop_i128 for each backend
+   - Override emit_copy_i128 for proper 16-byte copies
+   - Fix load/store to use ldp/stp (ARM) or paired ld/sd (RISC-V)
+   - Fix constant materialization to load both halves
+
+2. Compiler-rt helper approach (simpler):
+   - Call __divti3, __modti3, __multi3 etc. for complex ops
+   - Still need register pair for load/store/simple ops
+   - Less code but slower runtime
+
+Impact: Fixes __uint128_t on ARM/RISC-V, needed for mbedtls bignum on those targets.

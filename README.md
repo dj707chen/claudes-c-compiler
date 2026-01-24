@@ -56,6 +56,11 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **128-bit compound assignment fix**: Fixed `usual_arithmetic_conversions` to use I128/U128
+  as the operation type for 128-bit integers (was always forcing I64). This caused compound
+  assignments (`|=`, `+=`, `&=`, `<<=`, etc.) on `__uint128_t`/`__int128` to silently
+  truncate to 64 bits, losing the upper half. Fixes mbedtls bignum division (which uses
+  `__attribute__((mode(TI)))` for 128-bit math), unblocking MPI/RSA crypto selftests.
 - **_Complex long double argument passing**: Fixed `_Complex long double` ABI compliance.
   Previously CLD values were passed by pointer instead of being decomposed into two F128
   stack arguments (x87 extended format). Now both caller and callee decompose CLD params
@@ -145,7 +150,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 |---------|--------|-------|
 | lua | PARTIAL | Build succeeds; runtime segfaults (pre-existing regression) |
 | zlib | PARTIAL | Build succeeds; minigzip passes, self-test partially fails |
-| mbedtls | PARTIAL | Library + test programs build; selftest crashes in AES-GCM-256, rsa/ecp segfault |
+| mbedtls | PARTIAL | Library builds; selftest: md5/sha/aes pass, rsa sign fails, ecp segfault |
 | libpng | PASS | Builds and pngtest passes |
 | jq | PARTIAL | Builds successfully; 3/12 tests pass, runtime segfaults on queries |
 | sqlite | PARTIAL | Builds; 573/622 (92%) sqllogictest pass |

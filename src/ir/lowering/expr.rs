@@ -2837,7 +2837,9 @@ impl Lowerer {
                 Self::integer_promote(rhs_ir_ty),
             )
         };
-        let op_ty = if common_ty.is_float() { common_ty } else { IrType::I64 };
+        let op_ty = if common_ty.is_float() { common_ty }
+            else if common_ty == IrType::I128 || common_ty == IrType::U128 { common_ty }
+            else { IrType::I64 };
         (common_ty, op_ty)
     }
 
