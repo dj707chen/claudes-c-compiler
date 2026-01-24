@@ -637,14 +637,32 @@ impl Lowerer {
                 let mut bytes = vec![0u8; field_size];
                 if let Some(nested_layout) = self.get_struct_layout_for_ctype(&field_ty_clone) {
                     self.fill_struct_global_bytes(nested_items, &nested_layout, &mut bytes, 0);
+                } else if let CType::Array(ref inner_ty, Some(arr_size)) = field_ty_clone {
+                    if inner_ty.is_complex() {
+                        // Array of complex elements: use complex-aware fill
+                        let elem_size = self.resolve_ctype_size(inner_ty);
+                        self.fill_array_of_complex(nested_items, inner_ty, arr_size, elem_size, &mut bytes, 0);
+                    } else {
+                        // Simple array of scalars
+                        let elem_ir_ty = IrType::from_ctype(inner_ty);
+                        let elem_size = elem_ir_ty.size().max(1);
+                        for (idx, ni) in nested_items.iter().enumerate() {
+                            let byte_offset = idx * elem_size;
+                            if byte_offset >= field_size { break; }
+                            if let Initializer::Expr(ref e) = ni.init {
+                                if let Some(val) = self.eval_const_expr(e) {
+                                    let e_ty = self.get_expr_type(e);
+                                    let val = self.coerce_const_to_type_with_src(val, elem_ir_ty, e_ty);
+                                    self.write_const_to_bytes(&mut bytes, byte_offset, &val, elem_ir_ty);
+                                }
+                            }
+                        }
+                    }
                 } else {
-                    // Simple array or scalar list
-                    let mut byte_offset = 0;
-                    let elem_ir_ty = match &field_ty_clone {
-                        CType::Array(inner, _) => IrType::from_ctype(inner),
-                        other => IrType::from_ctype(other),
-                    };
+                    // Scalar list: e.g., int x = { 1 }
+                    let elem_ir_ty = IrType::from_ctype(&field_ty_clone);
                     let elem_size = elem_ir_ty.size().max(1);
+                    let mut byte_offset = 0;
                     for ni in nested_items {
                         if byte_offset >= field_size { break; }
                         if let Initializer::Expr(ref e) = ni.init {

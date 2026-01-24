@@ -237,7 +237,7 @@ impl Lowerer {
 
     /// Lower a {real, imag} list initializer for a complex field.
     /// Stores the real and imaginary parts at dest_addr and dest_addr+comp_size.
-    fn lower_complex_list_init(
+    pub(super) fn lower_complex_list_init(
         &mut self,
         sub_items: &[InitializerItem],
         dest_addr: Value,
@@ -270,6 +270,20 @@ impl Lowerer {
             let zero = Self::complex_zero(comp_ty);
             self.emit(Instruction::Store { val: zero, ptr: imag_ptr, ty: comp_ty });
         }
+    }
+
+    /// Emit a complex expression to a memory location at the given offset.
+    /// Handles integer-to-complex conversion properly by using lower_expr_to_complex
+    /// and then memcpy-ing the result to the destination.
+    pub(super) fn emit_complex_expr_to_offset(&mut self, expr: &Expr, base_alloca: Value, offset: usize, complex_ctype: &CType) {
+        let complex_size = complex_ctype.size();
+        let src = self.lower_expr_to_complex(expr, complex_ctype);
+        let dest_addr = self.emit_gep_offset(base_alloca, offset, IrType::Ptr);
+        self.emit(Instruction::Memcpy {
+            dest: dest_addr,
+            src,
+            size: complex_size,
+        });
     }
 
     /// Lower an expression to a complex value, converting if needed.
@@ -1572,6 +1586,29 @@ impl Lowerer {
                                     }
                                 }
                                 }
+                            } else if elem_ty.is_complex() {
+                                // Array of complex elements: use complex-aware init
+                                let complex_ctype = elem_ty.as_ref().clone();
+                                let mut ai = 0usize;
+                                for sub_item in sub_items.iter() {
+                                    if let Some(Designator::Index(ref idx_expr)) = sub_item.designators.first() {
+                                        if let Some(idx) = self.eval_const_expr_for_designator(idx_expr) {
+                                            ai = idx;
+                                        }
+                                    }
+                                    if ai >= *arr_size { break; }
+                                    let elem_offset = field_offset + ai * elem_size;
+                                    match &sub_item.init {
+                                        Initializer::Expr(e) => {
+                                            self.emit_complex_expr_to_offset(e, base_alloca, elem_offset, &complex_ctype);
+                                        }
+                                        Initializer::List(inner_items) => {
+                                            let dest_addr = self.emit_gep_offset(base_alloca, elem_offset, IrType::Ptr);
+                                            self.lower_complex_list_init(inner_items, dest_addr, &complex_ctype);
+                                        }
+                                    }
+                                    ai += 1;
+                                }
                             } else {
                                 // Supports [idx]=val designators within the sub-list
                                 let elem_is_bool = **elem_ty == CType::Bool;
@@ -1634,6 +1671,32 @@ impl Lowerer {
                                 } else {
                                     item_idx += 1;
                                 }
+                            } else if elem_ty.is_complex() {
+                                // Flat init for array of complex: each init item is one complex element
+                                let complex_ctype = elem_ty.as_ref().clone();
+                                let start_ai = array_start_idx.unwrap_or(0);
+                                let mut consumed = 0usize;
+                                let mut ai = start_ai;
+                                while ai < *arr_size && (item_idx + consumed) < items.len() {
+                                    let cur_item = &items[item_idx + consumed];
+                                    if !cur_item.designators.is_empty() && consumed > 0 { break; }
+                                    match &cur_item.init {
+                                        Initializer::Expr(expr) => {
+                                            let elem_offset = field_offset + ai * elem_size;
+                                            self.emit_complex_expr_to_offset(expr, base_alloca, elem_offset, &complex_ctype);
+                                            consumed += 1;
+                                            ai += 1;
+                                        }
+                                        Initializer::List(inner_items) => {
+                                            let elem_offset = field_offset + ai * elem_size;
+                                            let dest_addr = self.emit_gep_offset(base_alloca, elem_offset, IrType::Ptr);
+                                            self.lower_complex_list_init(inner_items, dest_addr, &complex_ctype);
+                                            consumed += 1;
+                                            ai += 1;
+                                        }
+                                    }
+                                }
+                                item_idx += consumed.max(1);
                             } else {
                                 // Flat init: consume up to arr_size items from the init list
                                 // to fill the array elements (e.g., struct { int a[3]; int b; } x = {1,2,3,4};)

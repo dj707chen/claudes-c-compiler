@@ -545,6 +545,9 @@ impl Lowerer {
                         sub_items, inner_elem, *inner_size, arr_size, elem_size,
                         bytes, field_offset,
                     );
+                } else if elem_ty.is_complex() {
+                    // Array of complex elements: each sub-item initializes one complex value
+                    self.fill_array_of_complex(sub_items, elem_ty, arr_size, elem_size, bytes, field_offset);
                 } else {
                     self.fill_array_of_scalars(sub_items, arr_size, elem_size, elem_ir_ty, bytes, field_offset);
                 }
@@ -584,6 +587,11 @@ impl Lowerer {
                     let total_scalars = if leaf_size > 0 { (arr_size * elem_size) / leaf_size } else { 0 };
                     self.fill_flat_array_of_scalars(
                         items, item_idx, total_scalars, leaf_size, leaf_ir_ty,
+                        bytes, field_offset, start_ai,
+                    )
+                } else if elem_ty.is_complex() {
+                    self.fill_flat_array_of_complex(
+                        items, item_idx, elem_ty, arr_size, elem_size,
                         bytes, field_offset, start_ai,
                     )
                 } else {
@@ -835,6 +843,46 @@ impl Lowerer {
             self.write_const_to_bytes(bytes, elem_offset, &val, elem_ir_ty);
             ai += 1;
         }
+    }
+
+    /// Fill an array of complex elements from a braced sub-item list.
+    /// Each sub-item initializes one complex element using write_complex_field_to_bytes.
+    pub(super) fn fill_array_of_complex(
+        &self, sub_items: &[InitializerItem], complex_ctype: &CType,
+        arr_size: usize, elem_size: usize, bytes: &mut [u8], field_offset: usize,
+    ) {
+        let mut ai = 0usize;
+        for sub_item in sub_items.iter() {
+            if let Some(Designator::Index(ref idx_expr)) = sub_item.designators.first() {
+                if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
+                    ai = idx;
+                }
+            }
+            if ai >= arr_size { break; }
+            let elem_offset = field_offset + ai * elem_size;
+            self.write_complex_field_to_bytes(bytes, elem_offset, complex_ctype, &sub_item.init);
+            ai += 1;
+        }
+    }
+
+    /// Fill flat init of an array of complex elements from consecutive items.
+    /// Each item initializes one complex element. Returns the new item_idx.
+    pub(super) fn fill_flat_array_of_complex(
+        &self, items: &[InitializerItem], item_idx: usize,
+        complex_ctype: &CType, arr_size: usize, elem_size: usize,
+        bytes: &mut [u8], field_offset: usize, start_ai: usize,
+    ) -> usize {
+        let mut consumed = 0usize;
+        let mut ai = start_ai;
+        while ai < arr_size && (item_idx + consumed) < items.len() {
+            let cur_item = &items[item_idx + consumed];
+            if !cur_item.designators.is_empty() && consumed > 0 { break; }
+            let elem_offset = field_offset + ai * elem_size;
+            self.write_complex_field_to_bytes(bytes, elem_offset, complex_ctype, &cur_item.init);
+            consumed += 1;
+            ai += 1;
+        }
+        item_idx + consumed.max(1)
     }
 
     /// Fill flat init of an array of composites from consecutive items.

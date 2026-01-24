@@ -519,7 +519,64 @@ impl Lowerer {
             });
             match &item.init {
                 Initializer::List(sub_items) => {
-                    if is_multidim {
+                    if let Some(ref fname) = field_designator_name {
+                        // Field-designated list init: [idx].field = { ... }
+                        // Initialize just the specified field of the struct at this array index
+                        if let Some(field) = s_layout.fields.iter().find(|f| f.name == *fname) {
+                            let field_offset = base_byte_offset + field.offset;
+                            if field.ty.is_complex() {
+                                // Complex field: use complex list init
+                                let dest_addr = self.emit_gep_offset(alloca, field_offset, IrType::Ptr);
+                                self.lower_complex_list_init(sub_items, dest_addr, &field.ty);
+                            } else if let CType::Array(ref elem_ty, Some(arr_size)) = field.ty {
+                                // Array field: init elements from sub_items
+                                let elem_size = self.resolve_ctype_size(elem_ty);
+                                if elem_ty.is_complex() {
+                                    let complex_ctype = elem_ty.as_ref().clone();
+                                    for (ai, sub_item) in sub_items.iter().enumerate() {
+                                        if ai >= arr_size { break; }
+                                        let elem_offset = field_offset + ai * elem_size;
+                                        match &sub_item.init {
+                                            Initializer::Expr(e) => {
+                                                self.emit_complex_expr_to_offset(e, alloca, elem_offset, &complex_ctype);
+                                            }
+                                            Initializer::List(inner_items) => {
+                                                let dest = self.emit_gep_offset(alloca, elem_offset, IrType::Ptr);
+                                                self.lower_complex_list_init(inner_items, dest, &complex_ctype);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let elem_ir_ty = IrType::from_ctype(elem_ty);
+                                    let elem_is_bool = **elem_ty == CType::Bool;
+                                    for (ai, sub_item) in sub_items.iter().enumerate() {
+                                        if ai >= arr_size { break; }
+                                        if let Initializer::Expr(e) = &sub_item.init {
+                                            let elem_offset = field_offset + ai * elem_size;
+                                            self.emit_init_expr_to_offset_bool(e, alloca, elem_offset, elem_ir_ty, elem_is_bool);
+                                        }
+                                    }
+                                }
+                            } else if let CType::Struct(ref key) | CType::Union(ref key) = field.ty {
+                                // Nested struct field
+                                if let Some(sub_layout) = self.types.struct_layouts.get(key).cloned() {
+                                    let dest = self.emit_gep_offset(alloca, field_offset, IrType::I8);
+                                    self.lower_local_struct_init(sub_items, dest, &sub_layout);
+                                }
+                            } else {
+                                // Scalar field with braces: .field = { val }
+                                if let Some(first) = sub_items.first() {
+                                    if let Initializer::Expr(e) = &first.init {
+                                        let field_ir_ty = IrType::from_ctype(&field.ty);
+                                        let val = self.lower_and_cast_init_expr(e, field_ir_ty);
+                                        self.emit_store_at_offset(alloca, field_offset, val, field_ir_ty);
+                                    }
+                                }
+                            }
+                        }
+                        item_idx += 1;
+                        continue;
+                    } else if is_multidim {
                         let mut sub_idx = 0usize;
                         let mut row_elem = 0usize;
                         while sub_idx < sub_items.len() && row_elem < row_size {
@@ -556,15 +613,21 @@ impl Lowerer {
                 Initializer::Expr(e) => {
                     if let Some(ref fname) = field_designator_name {
                         if let Some(field) = s_layout.fields.iter().find(|f| &f.name == fname) {
-                            let field_ty = IrType::from_ctype(&field.ty);
-                            let val = if field.ty == CType::Bool {
-                                let v = self.lower_expr(e);
-                                let et = self.get_expr_type(e);
-                                self.emit_bool_normalize_typed(v, et)
+                            if field.ty.is_complex() {
+                                // Complex field: use complex-aware lowering
+                                let field_offset = base_byte_offset + field.offset;
+                                self.emit_complex_expr_to_offset(e, alloca, field_offset, &field.ty);
                             } else {
-                                self.lower_and_cast_init_expr(e, field_ty)
-                            };
-                            self.emit_store_at_offset(alloca, base_byte_offset + field.offset, val, field_ty);
+                                let field_ty = IrType::from_ctype(&field.ty);
+                                let val = if field.ty == CType::Bool {
+                                    let v = self.lower_expr(e);
+                                    let et = self.get_expr_type(e);
+                                    self.emit_bool_normalize_typed(v, et)
+                                } else {
+                                    self.lower_and_cast_init_expr(e, field_ty)
+                                };
+                                self.emit_store_at_offset(alloca, base_byte_offset + field.offset, val, field_ty);
+                            }
                         }
                         item_idx += 1;
                     } else if self.struct_value_size(e).is_some() {
