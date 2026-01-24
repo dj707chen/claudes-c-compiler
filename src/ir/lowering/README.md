@@ -53,7 +53,6 @@ The `Lowerer` processes a `TranslationUnit` in multiple passes:
 
 ### Key Helpers
 
-- `extract_func_typedef_info(base, derived)` - Extract function typedef info from declarator (used by sema and stmt.rs)
 - `extract_fptr_typedef_info(base, derived)` - Extract function-pointer typedef info (used by sema and stmt.rs)
 - `shadow_local_for_scope(name)` - Remove local and track for scope restoration
 - `register_block_func_meta(name, ...)` - Register function metadata for block-scope declarations

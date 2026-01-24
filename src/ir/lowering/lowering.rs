@@ -203,37 +203,6 @@ pub struct FunctionTypedefInfo {
     pub variadic: bool,
 }
 
-/// Extract function typedef info from a declarator with `Function` derived declarators.
-///
-/// For typedefs like `typedef int func_t(int x);`, finds the `Function` derived
-/// and builds the return type by counting leading `Pointer` deriveds. Returns None
-/// if no `Function` derived is present or if `FunctionPointer` is also present.
-pub(super) fn extract_func_typedef_info(
-    base_type: &TypeSpecifier,
-    derived: &[DerivedDeclarator],
-) -> Option<FunctionTypedefInfo> {
-    let has_func = derived.iter().any(|d| matches!(d, DerivedDeclarator::Function(_, _)));
-    let has_fptr = derived.iter().any(|d| matches!(d, DerivedDeclarator::FunctionPointer(_, _)));
-    if !has_func || has_fptr {
-        return None;
-    }
-    let (params, variadic) = derived.iter().find_map(|d| {
-        if let DerivedDeclarator::Function(p, v) = d { Some((p, v)) } else { None }
-    })?;
-    let ptr_count = derived.iter()
-        .take_while(|d| matches!(d, DerivedDeclarator::Pointer))
-        .count();
-    let mut return_type = base_type.clone();
-    for _ in 0..ptr_count {
-        return_type = TypeSpecifier::Pointer(Box::new(return_type));
-    }
-    Some(FunctionTypedefInfo {
-        return_type,
-        params: params.clone(),
-        variadic: *variadic,
-    })
-}
-
 /// Extract function pointer typedef info from a declarator with `FunctionPointer`
 /// derived declarators.
 ///
@@ -770,25 +739,6 @@ struct IrParamBuildResult {
 }
 
 impl Lowerer {
-    pub fn new(target: Target) -> Self {
-        Self {
-            target,
-            next_label: 0,
-            next_string: 0,
-            next_anon_struct: 0,
-            next_static_local: 0,
-            module: IrModule::new(),
-            func_state: None,
-            globals: HashMap::new(),
-            known_functions: HashSet::new(),
-            defined_functions: HashSet::new(),
-            static_functions: HashSet::new(),
-            types: TypeContext::new(),
-            func_meta: FunctionMeta::default(),
-            emitted_global_names: HashSet::new(),
-        }
-    }
-
     /// Create a new Lowerer with a pre-populated TypeContext from semantic analysis.
     /// The sema-provided TypeContext contains typedefs, enum constants, struct layouts,
     /// and function typedef info collected during the sema pass.
@@ -1878,52 +1828,6 @@ impl Lowerer {
         }
     }
 
-    /// Collect all global typedef declarations so function return types and
-    /// parameter types that use typedefs can be resolved in later passes.
-    fn collect_all_typedefs(&mut self, tu: &TranslationUnit) {
-        for decl in &tu.decls {
-            if let ExternalDecl::Declaration(decl) = decl {
-                if decl.is_typedef {
-                    for declarator in &decl.declarators {
-                        if declarator.name.is_empty() {
-                            continue;
-                        }
-                        if let Some(fti) = extract_func_typedef_info(&decl.type_spec, &declarator.derived) {
-                            self.types.function_typedefs.insert(declarator.name.clone(), fti);
-                        }
-                        if let Some(fti) = extract_fptr_typedef_info(&decl.type_spec, &declarator.derived) {
-                            self.types.func_ptr_typedefs.insert(declarator.name.clone());
-                            self.types.func_ptr_typedef_info.insert(declarator.name.clone(), fti);
-                        }
-                        let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
-                        self.types.typedefs.insert(declarator.name.clone(), resolved_ctype);
-                    }
-                }
-                self.register_struct_type(&decl.type_spec);
-            }
-        }
-    }
-
-    /// Collect all enum constants from the entire translation unit.
-    fn collect_all_enum_constants(&mut self, tu: &TranslationUnit) {
-        // Only collect file-scope (global) enum constants in the pre-pass.
-        // Function-body enum constants are collected during lowering with proper
-        // scope tracking (save/restore in lower_compound_stmt), so they don't
-        // leak across block scopes.
-        for decl in &tu.decls {
-            match decl {
-                ExternalDecl::Declaration(d) => {
-                    self.collect_enum_constants(&d.type_spec);
-                }
-                ExternalDecl::FunctionDef(func) => {
-                    // Only collect enums from the return type (file-scope),
-                    // not from the function body (those are block-scoped).
-                    self.collect_enum_constants(&func.return_type);
-                }
-            }
-        }
-    }
-
     /// Collect enum constants from a type specifier.
     /// When `scoped` is true, uses scope-tracked insertion (for block-scoped enums
     /// that need undo on scope exit). When false, inserts directly (for file-scope).
@@ -1973,11 +1877,6 @@ impl Lowerer {
     pub(super) fn collect_enum_constants_scoped(&mut self, ts: &TypeSpecifier) {
         self.collect_enum_constants_impl(ts, true);
     }
-
-    // NOTE: collect_enum_constants_from_compound and collect_enum_constants_from_stmt
-    // were removed. Enum constants inside function bodies are now collected during
-    // lowering (in lower_compound_stmt) with proper scope save/restore, rather than
-    // pre-collected globally. This fixes enum constant scope leakage across blocks.
 
     /// Get or create a unique IR label for a user-defined goto label.
     pub(super) fn get_or_create_user_label(&mut self, name: &str) -> String {
@@ -2337,8 +2236,4 @@ impl LocalInfo {
     }
 }
 
-impl Default for Lowerer {
-    fn default() -> Self {
-        Self::new(Target::X86_64)
-    }
-}
+
