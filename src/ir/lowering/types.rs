@@ -848,6 +848,17 @@ impl Lowerer {
             | "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll"
             | "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll"
             | "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll" => Some(IrType::I32),
+            // Complex number component extraction builtins
+            "creal" | "__builtin_creal" | "cimag" | "__builtin_cimag" => Some(IrType::F64),
+            "crealf" | "__builtin_crealf" | "cimagf" | "__builtin_cimagf" => Some(IrType::F32),
+            "creall" | "__builtin_creall" | "cimagl" | "__builtin_cimagl" => Some(IrType::F128),
+            // Complex absolute value
+            "cabs" | "__builtin_cabs" => Some(IrType::F64),
+            "cabsf" | "__builtin_cabsf" => Some(IrType::F32),
+            "cabsl" | "__builtin_cabsl" => Some(IrType::F128),
+            // Complex argument
+            "carg" | "__builtin_carg" => Some(IrType::F64),
+            "cargf" | "__builtin_cargf" => Some(IrType::F32),
             _ => None,
         }
     }

@@ -1178,12 +1178,20 @@ impl Parser {
 
         // Skip any trailing type qualifiers, storage class specifiers, and attributes.
         // C allows "int static x;" (storage class after type).
+        let mut base = base;
         loop {
             match self.peek() {
                 TokenKind::Complex => {
                     // _Complex after base type (e.g., "double _Complex")
-                    // TODO: properly support _Complex types
+                    // Update the base type to its complex variant
                     self.advance();
+                    base = match base {
+                        TypeSpecifier::Float => TypeSpecifier::ComplexFloat,
+                        TypeSpecifier::Double => TypeSpecifier::ComplexDouble,
+                        TypeSpecifier::LongDouble => TypeSpecifier::ComplexLongDouble,
+                        // standalone _Complex defaults to _Complex double
+                        _ => TypeSpecifier::ComplexDouble,
+                    };
                 }
                 TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
                     self.advance();
