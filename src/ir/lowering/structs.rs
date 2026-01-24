@@ -390,7 +390,14 @@ impl Lowerer {
                 // Get the type of the field `p` from the struct layout of `s`.
                 if let Some(outer_layout) = self.get_layout_for_expr(inner_base) {
                     if let Some((_offset, ctype)) = outer_layout.field_offset(inner_field) {
-                        return self.resolve_struct_from_pointer_ctype(ctype);
+                        // If the field is a pointer to struct, resolve directly
+                        if let Some(layout) = self.resolve_struct_from_pointer_ctype(ctype) {
+                            return Some(layout);
+                        }
+                        // If the field is an array of structs/unions, handle array decay
+                        if let CType::Array(elem, _) = ctype {
+                            return self.struct_layout_from_ctype(elem);
+                        }
                     }
                 }
                 None
@@ -399,7 +406,15 @@ impl Lowerer {
                 // expr is something like p->q where q is also a pointer to struct
                 if let Some(inner_layout) = self.get_pointed_struct_layout(inner_base) {
                     if let Some((_offset, ctype)) = inner_layout.field_offset(inner_field) {
-                        return self.resolve_struct_from_pointer_ctype(ctype);
+                        // If the field is a pointer to struct, resolve directly
+                        if let Some(layout) = self.resolve_struct_from_pointer_ctype(ctype) {
+                            return Some(layout);
+                        }
+                        // If the field is an array of structs/unions, the array decays to a
+                        // pointer to the first element, so resolve the element struct layout
+                        if let CType::Array(elem, _) = ctype {
+                            return self.struct_layout_from_ctype(elem);
+                        }
                     }
                 }
                 None

@@ -3023,10 +3023,25 @@ impl Lowerer {
 
         let ty = self.get_expr_type(lhs);
         let lhs_ir_ty = self.infer_expr_type(lhs);
+        let rhs_ir_ty = self.infer_expr_type(rhs);
         let rhs_ty = self.get_expr_type(rhs);
-        // Float promotion if either side is float
-        let op_ty = if ty.is_float() || rhs_ty.is_float() {
-            if ty == IrType::F64 || rhs_ty == IrType::F64 { IrType::F64 } else { IrType::F32 }
+
+        // Compute the common type for the operation using usual arithmetic conversions.
+        // This determines both the signedness of the operation and the type conversions needed.
+        let common_ty = if ty.is_float() || rhs_ty.is_float() {
+            if ty == IrType::F128 || rhs_ty == IrType::F128 { IrType::F128 }
+            else if ty == IrType::F64 || rhs_ty == IrType::F64 { IrType::F64 }
+            else { IrType::F32 }
+        } else {
+            Self::common_type(
+                Self::integer_promote(lhs_ir_ty),
+                Self::integer_promote(rhs_ir_ty),
+            )
+        };
+
+        // The operation type is the common type widened to at least 64 bits for integers
+        let op_ty = if common_ty.is_float() {
+            common_ty
         } else {
             IrType::I64
         };
@@ -3034,14 +3049,12 @@ impl Lowerer {
         let rhs_val = self.lower_expr_with_type(rhs, op_ty);
         if let Some(lv) = self.lower_lvalue(lhs) {
             let loaded = self.load_lvalue_typed(&lv, ty);
-            // Cast loaded value to op_ty if needed
+            // Cast loaded value to op_ty if needed, respecting the common type's signedness
             let loaded_promoted = if ty != op_ty && op_ty.is_float() && !ty.is_float() {
                 // int -> float promotion
                 let dest = self.fresh_value();
                 // Use the actual LHS IR type so codegen knows if it's unsigned
                 let cast_from = if lhs_ir_ty.size() <= 4 && lhs_ir_ty.is_unsigned() {
-                    // For small unsigned types, the value is already zero-extended to I64
-                    // but we need to tell codegen it's unsigned for the conversion
                     IrType::U64
                 } else if lhs_ir_ty == IrType::U64 {
                     IrType::U64
@@ -3055,12 +3068,49 @@ impl Lowerer {
                 let dest = self.fresh_value();
                 self.emit(Instruction::Cast { dest, src: loaded, from_ty: ty, to_ty: op_ty });
                 Operand::Value(dest)
+            } else if !op_ty.is_float() && lhs_ir_ty.size() < 8 {
+                // Integer promotion to 64-bit for the operation.
+                // For shift operators, always extend based on LHS signedness
+                // (the result type of a shift is the promoted LHS type).
+                // For other operators, when the common type is unsigned (e.g., int %= unsigned int),
+                // we must zero-extend the LHS even if it's signed, because the
+                // C standard converts both operands to the common (unsigned) type first.
+                let dest = self.fresh_value();
+                let extend_unsigned = if matches!(op, BinOp::Shl | BinOp::Shr) {
+                    // For shifts, use the LHS's own signedness
+                    lhs_ir_ty.is_unsigned()
+                } else {
+                    // For other ops, use common type signedness
+                    common_ty.is_unsigned() || lhs_ir_ty.is_unsigned()
+                };
+                self.emit(Instruction::Cast {
+                    dest, src: loaded,
+                    from_ty: if extend_unsigned {
+                        // Force zero-extension by marking source as unsigned
+                        match lhs_ir_ty {
+                            IrType::I32 => IrType::U32,
+                            IrType::I16 => IrType::U16,
+                            IrType::I8 => IrType::U8,
+                            _ => lhs_ir_ty,
+                        }
+                    } else {
+                        lhs_ir_ty
+                    },
+                    to_ty: IrType::I64,
+                });
+                Operand::Value(dest)
             } else {
                 loaded
             };
 
-            // For compound assignment, use signedness of the LHS type
-            let is_unsigned = lhs_ir_ty.is_unsigned();
+            // Use the common type's signedness for the operation,
+            // EXCEPT for shift operators where C standard says the result type
+            // is the promoted type of the left operand (not the common type).
+            let is_unsigned = if matches!(op, BinOp::Shl | BinOp::Shr) {
+                Self::integer_promote(lhs_ir_ty).is_unsigned()
+            } else {
+                common_ty.is_unsigned()
+            };
             let ir_op = Self::compound_assign_to_ir(op, is_unsigned);
 
             // Scale RHS for pointer += and -=
