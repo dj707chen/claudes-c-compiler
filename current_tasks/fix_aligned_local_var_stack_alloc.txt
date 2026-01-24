@@ -1,0 +1,24 @@
+Fix __attribute__((aligned(N))) on local variables
+
+Bug: Local variables with __attribute__((aligned(N))) where N > 16 (the default
+stack alignment) are not properly aligned on the stack. The compiler ignores the
+alignment attribute when allocating stack slots for locals.
+
+Example:
+    char aligned_val __attribute__((aligned(32)));
+    uintptr_t addr = (uintptr_t)&aligned_val;
+    // addr % 32 should be 0, but it's not
+
+Impact: 20+ test failures in the callee-saved-registers and stack-alignment test
+categories. The compiler_suite_0103_* tests all fail because they test aligned locals
+combined with callee-saved register variables.
+
+Fix: Need to:
+1. Track max local variable alignment in stack frame layout
+2. When any local has alignment > 16, dynamically align the stack pointer (AND rsp with mask)
+3. Save the original RSP in a frame pointer (RBP) so we can restore it on function exit
+4. Allocate aligned locals relative to the dynamically-aligned stack pointer
+
+This requires changes to the codegen for all three backends (x86, arm, riscv).
+
+Status: IN PROGRESS
