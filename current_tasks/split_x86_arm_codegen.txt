@@ -1,0 +1,4 @@
+Task: split_x86_arm_codegen
+Status: in_progress
+
+Extract inline asm helpers from x86 and ARM codegen into inline_asm.rs submodules.
