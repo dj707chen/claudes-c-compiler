@@ -1,0 +1,13 @@
+Unify type computation between sema and lowering
+
+Problem: type_spec_to_ctype(), build_full_ctype(), find_function_pointer_core(),
+and convert_param_decls_to_ctypes() are duplicated between sema.rs and lowering/types.rs.
+This is a correctness timebomb.
+
+Plan:
+1. Extract find_function_pointer_core() as a free function (it only examines &[DerivedDeclarator])
+2. Extract convert_param_decls_to_ctypes() as a shared function parameterized by a callback
+3. Extract type_spec_to_ctype() into a shared module with trait-based callbacks for
+   capabilities that differ (expr type inference, const eval)
+4. Extract build_full_ctype() into shared module, fixing sema's prefix pointer bug
+5. Remove duplicate implementations from sema and lowering
