@@ -649,6 +649,14 @@ impl Lowerer {
                 ArrayFillResult { new_item_idx: item_idx + 1, skip_update: false }
             }
             Initializer::Expr(expr) => {
+                // String literal initializing a char FAM: write bytes directly
+                if let Expr::StringLiteral(s, _) = expr {
+                    if matches!(elem_ty, CType::Char | CType::UChar) {
+                        let max_len = bytes.len().saturating_sub(field_offset);
+                        Self::write_string_to_bytes(bytes, field_offset, s, max_len);
+                        return ArrayFillResult { new_item_idx: item_idx + 1, skip_update: true };
+                    }
+                }
                 let mut ai = 0usize;
                 let val = self.eval_const_expr(expr).unwrap_or(IrConst::I64(0));
                 let elem_offset = field_offset + ai * elem_size;

@@ -333,9 +333,13 @@ impl SemanticAnalyzer {
                     && !self.result.enum_constants.contains_key(name)
                     && !builtins::is_builtin(name)
                     && !self.result.functions.contains_key(name)
+                    && name != "__func__" && name != "__FUNCTION__"
+                    && name != "__PRETTY_FUNCTION__"
                 {
-                    // Not a fatal error - might be a forward declaration or extern
-                    // The lowerer will handle it
+                    // Emit warning for undeclared identifier
+                    let warning = format!("'{}' undeclared", name);
+                    eprintln!("warning: {}", warning);
+                    self.result.warnings.push(warning);
                 }
             }
             Expr::FunctionCall(callee, args, _) => {
@@ -347,6 +351,13 @@ impl SemanticAnalyzer {
                         && self.symbol_table.lookup(name).is_none()
                     {
                         // Implicit function declaration (C89 style) - register it
+                        // Emit warning matching GCC's -Wimplicit-function-declaration format
+                        let warning = format!(
+                            "implicit declaration of function '{}'",
+                            name
+                        );
+                        eprintln!("warning: {}", warning);
+                        self.result.warnings.push(warning);
                         let func_info = FunctionInfo {
                             name: name.clone(),
                             return_type: CType::Int, // implicit return int

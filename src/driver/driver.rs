@@ -281,6 +281,11 @@ impl Driver {
             eprintln!("Parsed {} declarations", ast.decls.len());
         }
 
+        // Check for parse errors - must fail with non-zero exit code
+        if parser.error_count > 0 {
+            return Err(format!("{} parse error(s) in {}", parser.error_count, input_file));
+        }
+
         // Semantic analysis
         let mut sema = SemanticAnalyzer::new();
         if let Err(errors) = sema.analyze(&ast) {

@@ -40,6 +40,8 @@ pub struct Parser {
     pub(super) pragma_pack_stack: Vec<Option<usize>>,
     /// Current #pragma pack alignment. None means default (natural) alignment.
     pub(super) pragma_pack_align: Option<usize>,
+    /// Number of parse errors encountered.
+    pub error_count: usize,
 }
 
 impl Parser {
@@ -58,6 +60,7 @@ impl Parser {
             parsing_destructor: false,
             pragma_pack_stack: Vec::new(),
             pragma_pack_align: None,
+            error_count: 0,
         }
     }
 
@@ -166,7 +169,8 @@ impl Parser {
                     other => format!("{:?}", other),
                 }
             }).collect();
-            eprintln!("parser error: expected {:?}, got {:?} at pos {} context: [{}]", expected, self.peek(), self.pos, context.join(", "));
+            eprintln!("error: expected {:?}, got {:?} at pos {} context: [{}]", expected, self.peek(), self.pos, context.join(", "));
+            self.error_count += 1;
             span
         }
     }

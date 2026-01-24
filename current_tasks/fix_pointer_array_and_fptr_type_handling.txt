@@ -1,8 +1,0 @@
-Fix pointer array and function pointer type handling in compute_decl_info
-
-Working on:
-1. Array of pointers (int *ptrs[3]) misclassified - wrong alloc_size, is_array=false
-2. Function pointer globals called via variable generate direct call instead of indirect
-3. String array pattern (const char *strs[]) sizing issues
-
-This is marked as HIGH priority and should fix ~50+ tests.

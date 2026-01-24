@@ -640,7 +640,8 @@ impl Parser {
             }
             result_type
         } else {
-            eprintln!("parser error: expected type in __builtin_va_arg");
+            eprintln!("error: expected type in __builtin_va_arg");
+            self.error_count += 1;
             TypeSpecifier::Int
         }
     }

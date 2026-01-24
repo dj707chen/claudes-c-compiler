@@ -208,10 +208,13 @@ impl Lowerer {
                     };
 
                     // Array of structs: emit as byte array using struct layout.
-                    // But skip byte-serialization if any struct field is a pointer type
-                    // (pointers need .quad directives for address relocations).
+                    // But skip byte-serialization if any struct field is or contains
+                    // a pointer type (pointers need .quad directives for address relocations).
                     let has_ptr_fields = struct_layout.as_ref().map_or(false, |layout| {
-                        layout.fields.iter().any(|f| matches!(f.ty, CType::Pointer(_) | CType::Function(_)))
+                        layout.fields.iter().any(|f| {
+                            matches!(f.ty, CType::Pointer(_) | CType::Function(_))
+                            || Self::type_has_pointer_elements(&f.ty)
+                        })
                     });
                     if let Some(ref layout) = struct_layout {
                         if has_ptr_fields {
@@ -512,6 +515,14 @@ impl Lowerer {
                     if field_idx == last_field_idx {
                         let num_elems = match &item.init {
                             Initializer::List(sub_items) => sub_items.len(),
+                            Initializer::Expr(Expr::StringLiteral(s, _)) => {
+                                // String literal: length + null terminator
+                                if matches!(elem_ty.as_ref(), CType::Char | CType::UChar) {
+                                    s.len() + 1
+                                } else {
+                                    items.len() - item_idx
+                                }
+                            }
                             Initializer::Expr(_) => items.len() - item_idx,
                         };
                         return num_elems * elem_size;

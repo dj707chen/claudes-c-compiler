@@ -56,6 +56,17 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Parser error exit codes and diagnostics**: Parser errors now cause non-zero exit code
+  (previously the compiler silently continued with exit 0). Added warnings for implicit function
+  declarations and undeclared identifiers. This fixes autoconf configure script compatibility -
+  enabling correct detection of byte ordering, function availability, struct members, and other
+  feature checks. PostgreSQL configure now completes successfully.
+- **Flexible array member string init**: Fixed FAM fields initialized with string literals
+  (e.g., `struct { int len; char data[]; } x = {5, "hello"}`) where the string was not
+  written to the FAM bytes and the extra allocation size was wrong.
+- **Struct arrays with pointer-array fields**: Fixed global arrays of structs where fields
+  are arrays of pointers (e.g., `int (*fptrs[2])()`) not emitting address relocations,
+  causing segfaults when accessing function pointer or data pointer array fields.
 - **Preprocessor translation phase ordering fix**: Fixed `strip_block_comments` running
   before `join_continued_lines`, which violated C11 5.1.1.2 translation phase ordering.
   Multi-line `/* ... */` comments inside `#define` macros with `\` continuations caused
@@ -127,14 +138,15 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 
 | Project | Status | Notes |
 |---------|--------|-------|
-| lua | PASS | All 6 tests pass |
-| zlib | PASS | Build + self-test + minigzip roundtrip pass |
+| lua | PARTIAL | Build succeeds; runtime segfaults (pre-existing regression) |
+| zlib | PARTIAL | Build succeeds; minigzip passes, self-test partially fails |
 | mbedtls | PARTIAL | Library + test programs build; selftest crashes in AES-GCM-256, rsa/ecp segfault |
-| libpng | PARTIAL | Builds successfully; pngtest fails at runtime (IHDR parsing issue) |
-| jq | PARTIAL | Builds successfully; --version passes, runtime segfaults on queries |
+| libpng | PASS | Builds and pngtest passes |
+| jq | PARTIAL | Builds successfully; 3/12 tests pass, runtime segfaults on queries |
 | sqlite | PARTIAL | Builds; 573/622 (92%) sqllogictest pass |
-| libjpeg-turbo | FAIL | Not yet tested |
-| redis | FAIL | Not yet tested |
+| libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |
+| redis | FAIL | Build fails: -shared flag needed for xxhash (in progress) |
+| postgres | PARTIAL | Configure now passes; build fails on missing SSE intrinsic builtins |
 
 ### What's Not Yet Implemented
 - Parser support for GNU C extensions in system headers (`__attribute__`, `__asm__` renames)

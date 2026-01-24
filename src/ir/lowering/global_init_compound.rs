@@ -625,6 +625,8 @@ impl Lowerer {
                             let field_offset = base_offset + field.offset;
                             let field_ir_ty = IrType::from_ctype(&field.ty);
                             let is_ptr_field = matches!(field.ty, CType::Pointer(_) | CType::Function(_));
+                            let is_ptr_array = Self::type_has_pointer_elements(&field.ty)
+                                && matches!(field.ty, CType::Array(..));
 
                             if let Initializer::Expr(expr) = &sub_item.init {
                                 if is_ptr_field {
@@ -633,13 +635,60 @@ impl Lowerer {
                                     } else if let Some(val) = self.eval_const_expr(expr) {
                                         self.write_const_to_bytes(&mut bytes, field_offset, &val, field_ir_ty);
                                     }
+                                } else if is_ptr_array {
+                                    // Single expr for a pointer array field (flat init start)
+                                    // Resolve as address for the first element
+                                    if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
+                                        ptr_ranges.push((field_offset, addr_init));
+                                    } else if let Some(val) = self.eval_const_expr(expr) {
+                                        self.write_const_to_bytes(&mut bytes, field_offset, &val, IrType::I64);
+                                    }
                                 } else if let (Some(bit_offset), Some(bit_width)) = (field.bit_offset, field.bit_width) {
-                                    // Bitfield: use read-modify-write to pack into storage unit
                                     let val = self.eval_init_scalar(&sub_item.init);
                                     self.write_bitfield_to_bytes(&mut bytes, field_offset, &val, field_ir_ty, bit_offset, bit_width);
                                 } else {
                                     if let Some(val) = self.eval_const_expr(expr) {
                                         self.write_const_to_bytes(&mut bytes, field_offset, &val, field_ir_ty);
+                                    }
+                                }
+                            } else if let Initializer::List(ref inner_items) = sub_item.init {
+                                if is_ptr_array {
+                                    // Array-of-pointers field with braced init: {f1, f2, ...}
+                                    let arr_size = match &field.ty {
+                                        CType::Array(_, Some(s)) => *s,
+                                        _ => inner_items.len(),
+                                    };
+                                    for (ai, inner_item) in inner_items.iter().enumerate() {
+                                        if ai >= arr_size { break; }
+                                        let elem_offset = field_offset + ai * 8;
+                                        if let Initializer::Expr(ref expr) = inner_item.init {
+                                            if let Some(addr_init) = self.resolve_ptr_field_init(expr) {
+                                                ptr_ranges.push((elem_offset, addr_init));
+                                            } else if let Some(val) = self.eval_const_expr(expr) {
+                                                self.write_const_to_bytes(&mut bytes, elem_offset, &val, IrType::I64);
+                                            }
+                                        }
+                                    }
+                                } else if let Some(sub_layout) = self.get_struct_layout_for_ctype(&field.ty) {
+                                    // Nested struct with braced init
+                                    self.fill_struct_global_bytes(inner_items, &sub_layout, &mut bytes, field_offset);
+                                } else {
+                                    // Array of scalars with braced init
+                                    let elem_size = match &field.ty {
+                                        CType::Array(inner, _) => inner.size(),
+                                        _ => field_ir_ty.size(),
+                                    };
+                                    let elem_ir_ty = match &field.ty {
+                                        CType::Array(inner, _) => IrType::from_ctype(inner),
+                                        _ => field_ir_ty,
+                                    };
+                                    for (ai, inner_item) in inner_items.iter().enumerate() {
+                                        let elem_offset = field_offset + ai * elem_size;
+                                        if let Initializer::Expr(ref expr) = inner_item.init {
+                                            if let Some(val) = self.eval_const_expr(expr) {
+                                                self.write_const_to_bytes(&mut bytes, elem_offset, &val, elem_ir_ty);
+                                            }
+                                        }
                                     }
                                 }
                             }
