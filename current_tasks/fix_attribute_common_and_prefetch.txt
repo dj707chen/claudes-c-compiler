@@ -1,6 +1,6 @@
 Task: Implement __attribute__((common)) and __builtin_prefetch
-Status: In Progress
-Lock: LOCKED
+Status: Completed
+Lock: UNLOCKED
 
 Changes:
 1. Added __attribute__((common)) / __attribute__((__common__)) support:
