@@ -159,8 +159,10 @@ pub trait ArchCodegen {
     /// Emit va_start: initialize a va_list for variadic argument access.
     fn emit_va_start(&mut self, va_list_ptr: &Value);
 
-    /// Emit va_end: clean up a va_list (typically no-op).
-    fn emit_va_end(&mut self, va_list_ptr: &Value);
+    /// Emit va_end: clean up a va_list. No-op on all current targets (x86-64, AArch64, RISC-V).
+    fn emit_va_end(&mut self, _va_list_ptr: &Value) {
+        // va_end is a no-op on all supported architectures
+    }
 
     /// Emit va_copy: copy src va_list to dest va_list.
     fn emit_va_copy(&mut self, dest_ptr: &Value, src_ptr: &Value);
@@ -186,17 +188,63 @@ pub trait ArchCodegen {
     /// Emit a return terminator.
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64);
 
-    /// Emit an unconditional branch.
-    fn emit_branch(&mut self, label: &str);
+    // ---- Architecture-specific instruction primitives ----
+    // These small methods provide the building blocks for default implementations
+    // of higher-level codegen methods, avoiding duplication across backends.
 
-    /// Emit a conditional branch.
-    fn emit_cond_branch(&mut self, cond: &Operand, true_label: &str, false_label: &str);
+    /// The unconditional jump mnemonic for this architecture.
+    /// x86: "jmp", ARM: "b", RISC-V: "j"
+    fn jump_mnemonic(&self) -> &'static str;
 
-    /// Emit an unreachable trap instruction.
-    fn emit_unreachable(&mut self);
+    /// The trap/unreachable instruction for this architecture.
+    /// x86: "ud2", ARM: "brk #0", RISC-V: "ebreak"
+    fn trap_instruction(&self) -> &'static str;
+
+    /// Emit a branch-if-nonzero instruction: if the accumulator register is
+    /// nonzero, branch to `label`. Does NOT emit the preceding operand load.
+    /// x86: "testq %rax, %rax; jne label", ARM: "cbnz x0, label", RISC-V: "bnez t0, label"
+    fn emit_branch_nonzero(&mut self, label: &str);
+
+    /// Emit an indirect jump through the accumulator register.
+    /// x86: "jmpq *%rax", ARM: "br x0", RISC-V: "jr t0"
+    fn emit_jump_indirect(&mut self);
+
+    // ---- Default implementations for simple terminators and branches ----
+    // These use the primitives above to provide shared control flow logic.
+
+    /// Emit an unconditional branch. Default uses jump_mnemonic().
+    fn emit_branch(&mut self, label: &str) {
+        let mnemonic = self.jump_mnemonic();
+        self.state().emit(&format!("    {} {}", mnemonic, label));
+    }
+
+    /// Emit an unreachable trap instruction. Default uses trap_instruction().
+    fn emit_unreachable(&mut self) {
+        let trap = self.trap_instruction();
+        self.state().emit(&format!("    {}", trap));
+    }
+
+    /// Emit a conditional branch: load cond, branch to true_label if nonzero,
+    /// fall through to false_label. Default uses emit_load_operand + emit_branch_nonzero + emit_branch.
+    fn emit_cond_branch(&mut self, cond: &Operand, true_label: &str, false_label: &str) {
+        self.emit_load_operand(cond);
+        self.emit_branch_nonzero(true_label);
+        self.emit_branch(false_label);
+    }
+
+    /// Emit an indirect branch (computed goto: goto *addr).
+    /// Default: load target into accumulator, emit indirect jump.
+    fn emit_indirect_branch(&mut self, target: &Operand) {
+        self.emit_load_operand(target);
+        self.emit_jump_indirect();
+    }
 
     /// Emit a label address load (GCC &&label extension for computed goto).
-    fn emit_label_addr(&mut self, dest: &Value, label: &str);
+    /// Default delegates to emit_global_addr since on all current backends,
+    /// loading a label address uses the same mechanism as loading a global symbol address.
+    fn emit_label_addr(&mut self, dest: &Value, label: &str) {
+        self.emit_global_addr(dest, label);
+    }
 
     /// Emit code to capture the second F64 return value after a function call.
     /// On x86-64: read xmm1 into dest. On ARM64: read d1. On RISC-V: read fa1.
@@ -205,9 +253,6 @@ pub trait ArchCodegen {
     /// Emit code to set the second F64 return value before a return.
     /// On x86-64: write xmm1. On ARM64: write d1. On RISC-V: write fa1.
     fn emit_set_return_f64_second(&mut self, src: &Operand);
-
-    /// Emit an indirect branch (computed goto: goto *addr).
-    fn emit_indirect_branch(&mut self, target: &Operand);
 
     /// Emit the function directive for the function type attribute.
     /// x86 uses "@function", ARM uses "%function".
@@ -218,7 +263,12 @@ pub trait ArchCodegen {
     fn emit_dyn_alloca(&mut self, dest: &Value, size: &Operand, align: usize);
 
     /// Emit a 128-bit value copy (src -> dest, both 16-byte stack slots).
-    fn emit_copy_i128(&mut self, dest: &Value, src: &Operand);
+    /// Default: truncates to 64-bit (used by ARM/RISC-V where i128 is not fully supported).
+    /// x86-64 overrides this to use rax:rdx register pair.
+    fn emit_copy_i128(&mut self, dest: &Value, src: &Operand) {
+        self.emit_load_operand(src);
+        self.emit_store_result(dest);
+    }
 
     /// Frame size including alignment and saved registers.
     fn aligned_frame_size(&self, raw_space: i64) -> i64;

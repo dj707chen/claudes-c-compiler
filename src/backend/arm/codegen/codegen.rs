@@ -408,6 +408,17 @@ const ARM_TMP_REGS: [&str; 8] = ["x9", "x10", "x11", "x12", "x13", "x14", "x15",
 impl ArchCodegen for ArmCodegen {
     fn state(&mut self) -> &mut CodegenState { &mut self.state }
     fn state_ref(&self) -> &CodegenState { &self.state }
+
+    fn jump_mnemonic(&self) -> &'static str { "b" }
+    fn trap_instruction(&self) -> &'static str { "brk #0" }
+
+    fn emit_branch_nonzero(&mut self, label: &str) {
+        self.state.emit(&format!("    cbnz x0, {}", label));
+    }
+
+    fn emit_jump_indirect(&mut self) {
+        self.state.emit("    br x0");
+    }
     fn ptr_directive(&self) -> PtrDirective { PtrDirective::Xword }
     fn function_type_directive(&self) -> &'static str { "%function" }
 
@@ -1441,9 +1452,7 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit("    str w1, [x0, #28]");  // __vr_offs at offset 28
     }
 
-    fn emit_va_end(&mut self, _va_list_ptr: &Value) {
-        // va_end is a no-op on AArch64
-    }
+    // emit_va_end: uses default no-op implementation
 
     fn emit_va_copy(&mut self, dest_ptr: &Value, src_ptr: &Value) {
         // Copy va_list struct (32 bytes on AArch64)
@@ -1489,26 +1498,10 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit("    ret");
     }
 
-    fn emit_branch(&mut self, label: &str) {
-        self.state.emit(&format!("    b {}", label));
-    }
+    // emit_branch, emit_cond_branch, emit_unreachable, emit_indirect_branch:
+    // use default implementations from ArchCodegen trait
 
-    fn emit_cond_branch(&mut self, cond: &Operand, true_label: &str, false_label: &str) {
-        self.operand_to_x0(cond);
-        self.state.emit(&format!("    cbnz x0, {}", true_label));
-        self.state.emit(&format!("    b {}", false_label));
-    }
-
-    fn emit_unreachable(&mut self) {
-        self.state.emit("    brk #0");
-    }
-
-    fn emit_label_addr(&mut self, dest: &Value, label: &str) {
-        // Load address of a label for computed goto (GCC &&label extension)
-        self.state.emit(&format!("    adrp x0, {}", label));
-        self.state.emit(&format!("    add x0, x0, :lo12:{}", label));
-        self.store_x0_to(dest);
-    }
+    // emit_label_addr: uses default implementation (delegates to emit_global_addr)
 
     fn emit_get_return_f64_second(&mut self, dest: &Value) {
         // After a function call, the second F64 return value is in d1.
@@ -1536,12 +1529,6 @@ impl ArchCodegen for ArmCodegen {
                 self.state.emit("    fmov d1, x0");
             }
         }
-    }
-
-    fn emit_indirect_branch(&mut self, target: &Operand) {
-        // Computed goto: goto *target
-        self.operand_to_x0(target);
-        self.state.emit("    br x0");
     }
 
     fn emit_dyn_alloca(&mut self, dest: &Value, size: &Operand, align: usize) {
@@ -1781,11 +1768,7 @@ impl ArchCodegen for ArmCodegen {
         }
     }
 
-    fn emit_copy_i128(&mut self, dest: &Value, src: &Operand) {
-        // 128-bit copy on AArch64: not fully supported yet, fall back to 8-byte copy
-        self.emit_load_operand(src);
-        self.emit_store_result(dest);
-    }
+    // emit_copy_i128: uses default implementation (64-bit truncation)
 }
 
 impl Default for ArmCodegen {

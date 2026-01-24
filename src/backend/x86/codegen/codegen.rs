@@ -588,6 +588,18 @@ impl ArchCodegen for X86Codegen {
     fn state_ref(&self) -> &CodegenState { &self.state }
     fn ptr_directive(&self) -> PtrDirective { PtrDirective::Quad }
 
+    fn jump_mnemonic(&self) -> &'static str { "jmp" }
+    fn trap_instruction(&self) -> &'static str { "ud2" }
+
+    fn emit_branch_nonzero(&mut self, label: &str) {
+        self.state.emit("    testq %rax, %rax");
+        self.state.emit(&format!("    jne {}", label));
+    }
+
+    fn emit_jump_indirect(&mut self) {
+        self.state.emit("    jmpq *%rax");
+    }
+
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
         // Track variadic function info
         self.is_variadic = func.is_variadic;
@@ -1607,9 +1619,7 @@ impl ArchCodegen for X86Codegen {
         self.state.emit("    movq %rcx, 16(%rax)");
     }
 
-    fn emit_va_end(&mut self, _va_list_ptr: &Value) {
-        // va_end is a no-op on x86-64
-    }
+    // emit_va_end: uses default no-op implementation
 
     fn emit_va_copy(&mut self, dest_ptr: &Value, src_ptr: &Value) {
         // Copy 24 bytes from src va_list to dest va_list
@@ -1661,26 +1671,10 @@ impl ArchCodegen for X86Codegen {
         self.state.emit("    ret");
     }
 
-    fn emit_branch(&mut self, label: &str) {
-        self.state.emit(&format!("    jmp {}", label));
-    }
+    // emit_branch, emit_cond_branch, emit_unreachable, emit_indirect_branch:
+    // use default implementations from ArchCodegen trait
 
-    fn emit_cond_branch(&mut self, cond: &Operand, true_label: &str, false_label: &str) {
-        self.operand_to_rax(cond);
-        self.state.emit("    testq %rax, %rax");
-        self.state.emit(&format!("    jne {}", true_label));
-        self.state.emit(&format!("    jmp {}", false_label));
-    }
-
-    fn emit_unreachable(&mut self) {
-        self.state.emit("    ud2");
-    }
-
-    fn emit_label_addr(&mut self, dest: &Value, label: &str) {
-        // Load address of a label for computed goto (GCC &&label extension)
-        self.state.emit(&format!("    leaq {}(%rip), %rax", label));
-        self.store_rax_to(dest);
-    }
+    // emit_label_addr: uses default implementation (delegates to emit_global_addr)
 
     fn emit_get_return_f64_second(&mut self, dest: &Value) {
         // After a function call, the second F64 return value is in xmm1.
@@ -1708,12 +1702,6 @@ impl ArchCodegen for X86Codegen {
                 self.state.emit("    movq %rax, %xmm1");
             }
         }
-    }
-
-    fn emit_indirect_branch(&mut self, target: &Operand) {
-        // Computed goto: goto *target
-        self.operand_to_rax(target);
-        self.state.emit("    jmpq *%rax");
     }
 
     fn emit_dyn_alloca(&mut self, dest: &Value, size: &Operand, align: usize) {

@@ -1,33 +1,30 @@
-MEDIUM PRIORITY: Remaining backend codegen deduplication opportunities
+LOW PRIORITY: Remaining backend codegen deduplication opportunities
 
-Items 1 and 2 have been completed:
-- CastKind enum + classify_cast() extracts shared cast classification (Ptr normalization,
-  F128 reduction, float/int/widen/narrow dispatch) into codegen_shared.rs
-- classify_float_binop() + FloatOp enum fixes the latent fadd-fallback bug and shares
-  the float operation dispatch across all three backends
-
-Items 1, 2, 4, and additional consistency fixes completed:
+Completed items:
 - CastKind enum + classify_cast() extracts shared cast classification
 - classify_float_binop() + FloatOp enum shares float operation dispatch
-- ARM operand_to_x0 movz/movk inlining deduplicated via emit_load_imm64 (I64/F32/F64/LongDouble)
-- ARM emit_sub_sp/emit_add_sp simplified to use emit_load_imm64 for large offsets
-- ARM emit_inline_asm const loading simplified to use emit_load_imm64
+- ARM operand_to_x0 movz/movk inlining deduplicated via emit_load_imm64
+- ARM emit_sub_sp/emit_add_sp simplified to use emit_load_imm64
 - classify_float_binop() unwrap_or(FloatOp::Add) latent bug now panics on all 3 backends
-- ARM emit_va_start/emit_va_copy/emit_va_arg large-offset bug fixed via emit_add_fp_offset
+- ARM emit_va_start/emit_va_copy/emit_va_arg large-offset bug fixed
 - SignedToUnsignedSameSize cast now properly masks sub-word types on ARM and RISC-V
-- RISC-V emit_ctz hardcoded .+12 offset replaced with proper label reference
-- ARM emit_call comment corrected: AAPCS64 passes variadic floats in FP registers (not GP)
+- Default trait implementations for simple methods: emit_branch, emit_cond_branch,
+  emit_unreachable, emit_indirect_branch, emit_label_addr, emit_va_end, emit_copy_i128.
+  Each backend provides small primitives (jump_mnemonic, trap_instruction,
+  emit_branch_nonzero, emit_jump_indirect) and the defaults compose them.
 
-Remaining opportunities:
+Remaining opportunities (diminishing returns):
 
-3. Parameter classification: emit_store_params and emit_call all independently classify
+1. Parameter classification: emit_store_params and emit_call all independently classify
    params as int-reg/float-reg/stack. A shared classify_params() helper could reduce this,
    but the three ABIs differ significantly (x86-64 SysV, AAPCS64, RISC-V LP64D), so the
-   benefit is lower than items 1-2.
-   NOTE: RISC-V FP->GPR spill inconsistency was fixed - emit_store_params now correctly
-   routes excess FP args (beyond fa0-fa7) to integer registers before the stack,
-   matching emit_call's classification logic.
+   benefit is lower.
 
-5. emit_memcpy: ARM and RISC-V share the same loop algorithm but differ in addressing
+2. emit_memcpy: ARM and RISC-V share the same loop algorithm but differ in addressing
    modes (ARM post-increment vs RISC-V explicit pointer advance). x86 uses rep movsb.
    The savings are marginal (~10 lines) since the loop bodies are structurally different.
+
+3. Integer binop table: ARM and RISC-V have very similar instruction mnemonics for
+   integer binary operations (add/sub/mul/div etc. with w/no-w variants). A table-driven
+   approach could save ~30-40 lines per backend, but adds indirection. Consider only if
+   the backends grow significantly larger.

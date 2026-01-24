@@ -330,6 +330,17 @@ impl ArchCodegen for RiscvCodegen {
     fn state_ref(&self) -> &CodegenState { &self.state }
     fn ptr_directive(&self) -> PtrDirective { PtrDirective::Dword }
 
+    fn jump_mnemonic(&self) -> &'static str { "j" }
+    fn trap_instruction(&self) -> &'static str { "ebreak" }
+
+    fn emit_branch_nonzero(&mut self, label: &str) {
+        self.state.emit(&format!("    bnez t0, {}", label));
+    }
+
+    fn emit_jump_indirect(&mut self) {
+        self.state.emit("    jr t0");
+    }
+
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
         let mut space = calculate_stack_space_common(&mut self.state, func, 16, |space, alloc_size| {
             // RISC-V uses negative offsets from s0 (frame pointer)
@@ -1174,9 +1185,7 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    sd t1, 0(t0)");
     }
 
-    fn emit_va_end(&mut self, _va_list_ptr: &Value) {
-        // va_end is a no-op on RISC-V
-    }
+    // emit_va_end: uses default no-op implementation
 
     fn emit_va_copy(&mut self, dest_ptr: &Value, src_ptr: &Value) {
         // Copy va_list (just 8 bytes on RISC-V - a single pointer)
@@ -1221,25 +1230,10 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    ret");
     }
 
-    fn emit_branch(&mut self, label: &str) {
-        self.state.emit(&format!("    j {}", label));
-    }
+    // emit_branch, emit_cond_branch, emit_unreachable, emit_indirect_branch:
+    // use default implementations from ArchCodegen trait
 
-    fn emit_cond_branch(&mut self, cond: &Operand, true_label: &str, false_label: &str) {
-        self.operand_to_t0(cond);
-        self.state.emit(&format!("    bnez t0, {}", true_label));
-        self.state.emit(&format!("    j {}", false_label));
-    }
-
-    fn emit_unreachable(&mut self) {
-        self.state.emit("    ebreak");
-    }
-
-    fn emit_label_addr(&mut self, dest: &Value, label: &str) {
-        // Load address of a label for computed goto (GCC &&label extension)
-        self.state.emit(&format!("    la t0, {}", label));
-        self.store_t0_to(dest);
-    }
+    // emit_label_addr: uses default implementation (delegates to emit_global_addr)
 
     fn emit_get_return_f64_second(&mut self, dest: &Value) {
         // After a function call, the second F64 return value is in fa1.
@@ -1267,12 +1261,6 @@ impl ArchCodegen for RiscvCodegen {
                 self.state.emit("    fmv.d.x fa1, t0");
             }
         }
-    }
-
-    fn emit_indirect_branch(&mut self, target: &Operand) {
-        // Computed goto: goto *target
-        self.operand_to_t0(target);
-        self.state.emit("    jr t0");
     }
 
     fn emit_dyn_alloca(&mut self, dest: &Value, size: &Operand, align: usize) {
@@ -1712,11 +1700,7 @@ impl ArchCodegen for RiscvCodegen {
         }
     }
 
-    fn emit_copy_i128(&mut self, dest: &Value, src: &Operand) {
-        // 128-bit copy on RISC-V: not fully supported yet, fall back to 8-byte copy
-        self.emit_load_operand(src);
-        self.emit_store_result(dest);
-    }
+    // emit_copy_i128: uses default implementation (64-bit truncation)
 }
 
 impl Default for RiscvCodegen {
