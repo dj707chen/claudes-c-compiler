@@ -647,40 +647,24 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    mv t2, t0");
 
         let use_32bit = ty == IrType::I32 || ty == IrType::U32;
+        let w = if use_32bit { "w" } else { "" };
 
-        if use_32bit {
-            match op {
-                IrBinOp::Add => self.state.emit("    addw t0, t1, t2"),
-                IrBinOp::Sub => self.state.emit("    subw t0, t1, t2"),
-                IrBinOp::Mul => self.state.emit("    mulw t0, t1, t2"),
-                IrBinOp::SDiv => self.state.emit("    divw t0, t1, t2"),
-                IrBinOp::UDiv => self.state.emit("    divuw t0, t1, t2"),
-                IrBinOp::SRem => self.state.emit("    remw t0, t1, t2"),
-                IrBinOp::URem => self.state.emit("    remuw t0, t1, t2"),
-                IrBinOp::And => self.state.emit("    and t0, t1, t2"),
-                IrBinOp::Or => self.state.emit("    or t0, t1, t2"),
-                IrBinOp::Xor => self.state.emit("    xor t0, t1, t2"),
-                IrBinOp::Shl => self.state.emit("    sllw t0, t1, t2"),
-                IrBinOp::AShr => self.state.emit("    sraw t0, t1, t2"),
-                IrBinOp::LShr => self.state.emit("    srlw t0, t1, t2"),
-            }
-        } else {
-            match op {
-                IrBinOp::Add => self.state.emit("    add t0, t1, t2"),
-                IrBinOp::Sub => self.state.emit("    sub t0, t1, t2"),
-                IrBinOp::Mul => self.state.emit("    mul t0, t1, t2"),
-                IrBinOp::SDiv => self.state.emit("    div t0, t1, t2"),
-                IrBinOp::UDiv => self.state.emit("    divu t0, t1, t2"),
-                IrBinOp::SRem => self.state.emit("    rem t0, t1, t2"),
-                IrBinOp::URem => self.state.emit("    remu t0, t1, t2"),
-                IrBinOp::And => self.state.emit("    and t0, t1, t2"),
-                IrBinOp::Or => self.state.emit("    or t0, t1, t2"),
-                IrBinOp::Xor => self.state.emit("    xor t0, t1, t2"),
-                IrBinOp::Shl => self.state.emit("    sll t0, t1, t2"),
-                IrBinOp::AShr => self.state.emit("    sra t0, t1, t2"),
-                IrBinOp::LShr => self.state.emit("    srl t0, t1, t2"),
-            }
-        }
+        let mnemonic = match op {
+            IrBinOp::Add => format!("add{}", w),
+            IrBinOp::Sub => format!("sub{}", w),
+            IrBinOp::Mul => format!("mul{}", w),
+            IrBinOp::SDiv => format!("div{}", w),
+            IrBinOp::UDiv => format!("divu{}", w),
+            IrBinOp::SRem => format!("rem{}", w),
+            IrBinOp::URem => format!("remu{}", w),
+            IrBinOp::And => "and".to_string(),
+            IrBinOp::Or => "or".to_string(),
+            IrBinOp::Xor => "xor".to_string(),
+            IrBinOp::Shl => format!("sll{}", w),
+            IrBinOp::AShr => format!("sra{}", w),
+            IrBinOp::LShr => format!("srl{}", w),
+        };
+        self.state.emit(&format!("    {} t0, t1, t2", mnemonic));
 
         self.store_t0_to(dest);
     }
@@ -733,34 +717,20 @@ impl ArchCodegen for RiscvCodegen {
 
         if ty.is_float() {
             // F128 uses F64 instructions (long double computed at double precision)
-            if ty == IrType::F64 || ty == IrType::F128 {
-                self.state.emit("    fmv.d.x ft0, t1");
-                self.state.emit("    fmv.d.x ft1, t2");
-                match op {
-                    IrCmpOp::Eq => self.state.emit("    feq.d t0, ft0, ft1"),
-                    IrCmpOp::Ne => {
-                        self.state.emit("    feq.d t0, ft0, ft1");
-                        self.state.emit("    xori t0, t0, 1");
-                    }
-                    IrCmpOp::Slt | IrCmpOp::Ult => self.state.emit("    flt.d t0, ft0, ft1"),
-                    IrCmpOp::Sle | IrCmpOp::Ule => self.state.emit("    fle.d t0, ft0, ft1"),
-                    IrCmpOp::Sgt | IrCmpOp::Ugt => self.state.emit("    flt.d t0, ft1, ft0"),
-                    IrCmpOp::Sge | IrCmpOp::Uge => self.state.emit("    fle.d t0, ft1, ft0"),
+            let s = if ty == IrType::F64 || ty == IrType::F128 { "d" } else { "s" };
+            let fmv = if s == "d" { "fmv.d.x" } else { "fmv.w.x" };
+            self.state.emit(&format!("    {} ft0, t1", fmv));
+            self.state.emit(&format!("    {} ft1, t2", fmv));
+            match op {
+                IrCmpOp::Eq => self.state.emit(&format!("    feq.{} t0, ft0, ft1", s)),
+                IrCmpOp::Ne => {
+                    self.state.emit(&format!("    feq.{} t0, ft0, ft1", s));
+                    self.state.emit("    xori t0, t0, 1");
                 }
-            } else {
-                self.state.emit("    fmv.w.x ft0, t1");
-                self.state.emit("    fmv.w.x ft1, t2");
-                match op {
-                    IrCmpOp::Eq => self.state.emit("    feq.s t0, ft0, ft1"),
-                    IrCmpOp::Ne => {
-                        self.state.emit("    feq.s t0, ft0, ft1");
-                        self.state.emit("    xori t0, t0, 1");
-                    }
-                    IrCmpOp::Slt | IrCmpOp::Ult => self.state.emit("    flt.s t0, ft0, ft1"),
-                    IrCmpOp::Sle | IrCmpOp::Ule => self.state.emit("    fle.s t0, ft0, ft1"),
-                    IrCmpOp::Sgt | IrCmpOp::Ugt => self.state.emit("    flt.s t0, ft1, ft0"),
-                    IrCmpOp::Sge | IrCmpOp::Uge => self.state.emit("    fle.s t0, ft1, ft0"),
-                }
+                IrCmpOp::Slt | IrCmpOp::Ult => self.state.emit(&format!("    flt.{} t0, ft0, ft1", s)),
+                IrCmpOp::Sle | IrCmpOp::Ule => self.state.emit(&format!("    fle.{} t0, ft0, ft1", s)),
+                IrCmpOp::Sgt | IrCmpOp::Ugt => self.state.emit(&format!("    flt.{} t0, ft1, ft0", s)),
+                IrCmpOp::Sge | IrCmpOp::Uge => self.state.emit(&format!("    fle.{} t0, ft1, ft0", s)),
             }
             self.store_t0_to(dest);
             return;
