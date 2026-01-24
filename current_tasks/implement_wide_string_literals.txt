@@ -1,14 +1,14 @@
 Task: Implement wide string literal (L"...") support
+Status: COMPLETED
 
-Currently L"..." strings are parsed as regular narrow strings, losing the wide prefix.
-This means wchar_t x[] = L"hello" gets the wrong size (defaults to 256 elements)
-and wrong contents (stores narrow char bytes instead of wchar_t values).
+Implemented full wide string literal support:
+1. Added WideStringLiteral token kind and AST variant
+2. Lexer decodes UTF-8 source chars to Unicode code points for wide strings
+3. Parser handles L"a" "b" and L"a" L"b" concatenation
+4. IR lowering emits wchar_t (4-byte int) values for local and global arrays
+5. Backend emits .long directives for wide string data in .rodata
+6. Fixed sizeof for wide strings: (chars + 1) * 4
+7. Fixed preprocessor UTF-8 double-encoding in strip_block_comments
 
-Fix needed:
-1. Add WideStringLiteral token kind and AST variant
-2. Parse L"..." as WideStringLiteral preserving the content
-3. Fix unsized array fixup for wide string initializers
-4. Emit wide string data as 4-byte (wchar_t) values in local and global init
-5. Fix sizeof for wide string literals
-
-Affects ~668 test files that use L"..." syntax.
+Results: 14/17 wide string tests pass (remaining 3 are unrelated vswscanf/%ls issues).
+No regressions on broader test suite.
