@@ -137,14 +137,10 @@ impl Lowerer {
             return Operand::Const(IrConst::I64(0));
         }
 
-
-        // Enum constants are compile-time integer values
-        if let Some(&val) = self.enum_constants.get(name) {
-            return Operand::Const(IrConst::I64(val));
-        }
-
         // Local variables: arrays/structs/complex decay to address, scalars are loaded.
-        // Check locals first so that inner-scope locals shadow outer static locals.
+        // Check locals FIRST so that local variables shadow enum constants of the same name.
+        // This is critical for C semantics: a local `int a = 5;` must shadow an enum
+        // constant `a` from an enclosing or later scope.
         if let Some(info) = self.locals.get(name).cloned() {
             // Static locals: emit fresh GlobalAddr at point of use (the declaration
             // may be in an unreachable block due to goto/switch skip)
@@ -170,6 +166,12 @@ impl Lowerer {
             let dest = self.fresh_value();
             self.emit(Instruction::Load { dest, ptr: info.alloca, ty: info.ty });
             return Operand::Value(dest);
+        }
+
+        // Enum constants are compile-time integer values.
+        // Checked after locals so that local variables shadow enum constants of the same name.
+        if let Some(&val) = self.enum_constants.get(name) {
+            return Operand::Const(IrConst::I64(val));
         }
 
         // Static local variables: resolve through static_local_names to their

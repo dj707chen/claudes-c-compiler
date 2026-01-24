@@ -5,10 +5,13 @@ use super::lowering::{Lowerer, LocalInfo, GlobalInfo, SwitchFrame};
 
 impl Lowerer {
     pub(super) fn lower_compound_stmt(&mut self, compound: &CompoundStmt) {
-        // Save current locals, static local names, and const values for block scope restoration
+        // Save current locals, static local names, const values, and enum constants
+        // for block scope restoration. Enum constants declared in this block should
+        // not be visible in outer scopes.
         let saved_locals = self.locals.clone();
         let saved_static_local_names = self.static_local_names.clone();
         let saved_const_local_values = self.const_local_values.clone();
+        let saved_enum_constants = self.enum_constants.clone();
 
         for item in &compound.items {
             match item {
@@ -21,10 +24,11 @@ impl Lowerer {
             }
         }
 
-        // Restore outer scope locals, static local names, and const values
+        // Restore outer scope locals, static local names, const values, and enum constants
         self.locals = saved_locals;
         self.static_local_names = saved_static_local_names;
         self.const_local_values = saved_const_local_values;
+        self.enum_constants = saved_enum_constants;
     }
 
     pub(super) fn lower_local_decl(&mut self, decl: &Declaration) {
@@ -1030,11 +1034,15 @@ impl Lowerer {
                 let saved_locals = self.locals.clone();
                 let saved_static_local_names = self.static_local_names.clone();
                 let saved_const_local_values = self.const_local_values.clone();
+                let saved_enum_constants = self.enum_constants.clone();
 
                 // Init
                 if let Some(init) = init {
                     match init.as_ref() {
-                        ForInit::Declaration(decl) => self.lower_local_decl(decl),
+                        ForInit::Declaration(decl) => {
+                            self.collect_enum_constants(&decl.type_spec);
+                            self.lower_local_decl(decl);
+                        }
                         ForInit::Expr(expr) => { self.lower_expr(expr); },
                     }
                 }
@@ -1080,10 +1088,12 @@ impl Lowerer {
 
                 self.start_block(end_label);
 
-                // Restore locals, static local names, and const values to exit for-init scope
+                // Restore locals, static local names, const values, and enum constants
+                // to exit for-init scope
                 self.locals = saved_locals;
                 self.static_local_names = saved_static_local_names;
                 self.const_local_values = saved_const_local_values;
+                self.enum_constants = saved_enum_constants;
             }
             Stmt::DoWhile(body, cond, _span) => {
                 let body_label = self.fresh_label("do_body");

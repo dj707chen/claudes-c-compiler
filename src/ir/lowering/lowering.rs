@@ -552,6 +552,9 @@ impl Lowerer {
         self.break_labels.clear();
         self.continue_labels.clear();
         self.user_labels.clear();
+        // Save global enum constants before function body. Enum constants declared
+        // inside function bodies should not leak to other functions.
+        let saved_enum_constants = self.enum_constants.clone();
         self.current_function_name = func.name.clone();
 
         let return_type = self.type_spec_to_ir(&func.return_type);
@@ -868,6 +871,10 @@ impl Lowerer {
             stack_size: 0,
         };
         self.module.functions.push(ir_func);
+
+        // Restore enum constants to global-only state so function-body enum constants
+        // don't leak to subsequent functions.
+        self.enum_constants = saved_enum_constants;
     }
 
     /// For pointer-to-array function parameters with VLA (runtime) dimensions,
@@ -3117,14 +3124,19 @@ impl Lowerer {
 
     /// Collect all enum constants from the entire translation unit.
     fn collect_all_enum_constants(&mut self, tu: &TranslationUnit) {
+        // Only collect file-scope (global) enum constants in the pre-pass.
+        // Function-body enum constants are collected during lowering with proper
+        // scope tracking (save/restore in lower_compound_stmt), so they don't
+        // leak across block scopes.
         for decl in &tu.decls {
             match decl {
                 ExternalDecl::Declaration(d) => {
                     self.collect_enum_constants(&d.type_spec);
                 }
                 ExternalDecl::FunctionDef(func) => {
+                    // Only collect enums from the return type (file-scope),
+                    // not from the function body (those are block-scoped).
                     self.collect_enum_constants(&func.return_type);
-                    self.collect_enum_constants_from_compound(&func.body);
                 }
             }
         }
@@ -3163,46 +3175,10 @@ impl Lowerer {
         }
     }
 
-    /// Recursively collect enum constants from a compound statement.
-    fn collect_enum_constants_from_compound(&mut self, compound: &CompoundStmt) {
-        for item in &compound.items {
-            match item {
-                BlockItem::Declaration(decl) => {
-                    self.collect_enum_constants(&decl.type_spec);
-                }
-                BlockItem::Statement(stmt) => {
-                    self.collect_enum_constants_from_stmt(stmt);
-                }
-            }
-        }
-    }
-
-    /// Recursively collect enum constants from a statement.
-    fn collect_enum_constants_from_stmt(&mut self, stmt: &Stmt) {
-        match stmt {
-            Stmt::Compound(compound) => self.collect_enum_constants_from_compound(compound),
-            Stmt::If(_, then_stmt, else_stmt, _) => {
-                self.collect_enum_constants_from_stmt(then_stmt);
-                if let Some(else_s) = else_stmt {
-                    self.collect_enum_constants_from_stmt(else_s);
-                }
-            }
-            Stmt::While(_, body, _) | Stmt::DoWhile(body, _, _) => {
-                self.collect_enum_constants_from_stmt(body);
-            }
-            Stmt::For(_, _, _, body, _) => {
-                self.collect_enum_constants_from_stmt(body);
-            }
-            Stmt::Switch(_, body, _) => {
-                self.collect_enum_constants_from_stmt(body);
-            }
-            Stmt::Case(_, stmt, _) | Stmt::Default(stmt, _) | Stmt::Label(_, stmt, _) => {
-                self.collect_enum_constants_from_stmt(stmt);
-            }
-            _ => {}
-        }
-    }
-
+    // NOTE: collect_enum_constants_from_compound and collect_enum_constants_from_stmt
+    // were removed. Enum constants inside function bodies are now collected during
+    // lowering (in lower_compound_stmt) with proper scope save/restore, rather than
+    // pre-collected globally. This fixes enum constant scope leakage across blocks.
 
     /// For a pointer-to-struct parameter type (e.g., `struct TAG *p`), get the
     /// pointed-to struct's layout. This enables `p->field` access.
