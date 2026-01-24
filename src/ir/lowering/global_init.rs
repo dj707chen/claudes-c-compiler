@@ -104,8 +104,9 @@ impl Lowerer {
                 }
                 // Complex global initializer: try to evaluate as {real, imag} pair
                 {
-                    let resolved = self.resolve_type_spec(_type_spec).clone();
-                    if matches!(resolved, TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble) {
+                    let ctype = self.type_spec_to_ctype(_type_spec);
+                    if ctype.is_complex() {
+                        let resolved = self.resolve_type_spec(_type_spec).clone();
                         if let Some(init) = self.eval_complex_global_init(expr, &resolved) {
                             return init;
                         }
@@ -132,10 +133,8 @@ impl Lowerer {
                 // Complex types (e.g., double _Complex) have base_ty=Ptr in IR but are
                 // actually stored as {real, imag} pairs. We detect this case early and
                 // use eval_complex_global_init to properly evaluate each element.
-                let is_complex_element = is_array && matches!(
-                    self.resolve_type_spec(_type_spec),
-                    TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble
-                );
+                let complex_ctype = self.type_spec_to_ctype(_type_spec);
+                let is_complex_element = is_array && complex_ctype.is_complex();
                 if is_complex_element {
                     let resolved = self.resolve_type_spec(_type_spec).clone();
                     let num_elems = total_size / elem_size.max(1);

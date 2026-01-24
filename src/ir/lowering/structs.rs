@@ -96,6 +96,13 @@ impl Lowerer {
     /// Get the cached struct layout for a TypeSpecifier, if it's a struct/union type.
     /// Prefers cached layout from struct_layouts when a tag name is available.
     pub(super) fn get_struct_layout_for_type(&self, ts: &TypeSpecifier) -> Option<StructLayout> {
+        // For TypedefName, resolve through CType
+        if let TypeSpecifier::TypedefName(name) = ts {
+            if let Some(ctype) = self.types.typedefs.get(name) {
+                return self.struct_layout_from_ctype(ctype);
+            }
+            return None;
+        }
         let ts = self.resolve_type_spec(ts);
         match ts {
             TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack, _) => {
@@ -561,7 +568,7 @@ impl Lowerer {
 
     /// Get struct layout from a CType (struct or union).
     /// Prefers cached layout from struct_layouts when available.
-    fn struct_layout_from_ctype(&self, ctype: &CType) -> Option<StructLayout> {
+    pub(super) fn struct_layout_from_ctype(&self, ctype: &CType) -> Option<StructLayout> {
         match ctype {
             CType::Struct(key) | CType::Union(key) => {
                 self.types.struct_layouts.get(key).cloned()
@@ -572,8 +579,7 @@ impl Lowerer {
 
     /// Get struct layout from a type specifier that should be a pointer to struct
     fn get_struct_layout_for_pointer_type(&self, type_spec: &TypeSpecifier) -> Option<StructLayout> {
-        let resolved = self.resolve_type_spec(type_spec);
-        let ctype = self.type_spec_to_ctype(resolved);
+        let ctype = self.type_spec_to_ctype(type_spec);
         if let CType::Pointer(pointee) = &ctype {
             return self.struct_layout_from_ctype(pointee);
         }

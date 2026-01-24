@@ -573,12 +573,20 @@ impl Lowerer {
     }
 
     /// Compute the element size for a pointer type specifier.
-    /// Resolves typedef names before pattern matching.
+    /// Resolves typedef names through CType.
     pub(super) fn pointee_elem_size(&self, type_spec: &TypeSpecifier) -> usize {
+        // Try TypeSpecifier match first
         let resolved = self.resolve_type_spec(type_spec);
         match &resolved {
-            TypeSpecifier::Pointer(inner) => self.sizeof_type(inner),
-            TypeSpecifier::Array(inner, _) => self.sizeof_type(inner),
+            TypeSpecifier::Pointer(inner) => return self.sizeof_type(inner),
+            TypeSpecifier::Array(inner, _) => return self.sizeof_type(inner),
+            _ => {}
+        }
+        // Fall back to CType for typedef'd pointer/array types
+        let ctype = self.type_spec_to_ctype(type_spec);
+        match &ctype {
+            CType::Pointer(inner) | CType::Array(inner, _) =>
+                inner.size_ctx(&self.types.struct_layouts),
             _ => 0,
         }
     }

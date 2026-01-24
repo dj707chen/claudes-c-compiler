@@ -585,8 +585,7 @@ impl Lowerer {
     // -----------------------------------------------------------------------
 
     fn lower_cast(&mut self, target_type: &TypeSpecifier, inner: &Expr) -> Operand {
-        let target_resolved = self.resolve_type_spec(target_type);
-        let target_ctype = self.type_spec_to_ctype(&target_resolved);
+        let target_ctype = self.type_spec_to_ctype(target_type);
         let inner_ctype = self.expr_ctype(inner);
 
         // Handle complex type casts
@@ -703,9 +702,10 @@ impl Lowerer {
 
     fn lower_compound_literal(&mut self, type_spec: &TypeSpecifier, init: &Initializer) -> Operand {
         let ty = self.type_spec_to_ir(type_spec);
-        let size = match (self.resolve_type_spec(type_spec), init) {
-            (TypeSpecifier::Array(ref elem, None), Initializer::List(items)) => {
-                let elem_size = self.sizeof_type(elem);
+        let ctype = self.type_spec_to_ctype(type_spec);
+        let size = match (&ctype, init) {
+            (CType::Array(ref elem_ct, None), Initializer::List(items)) => {
+                let elem_size = elem_ct.size_ctx(&self.types.struct_layouts).max(1);
                 elem_size * items.len()
             }
             _ => self.sizeof_type(type_spec),
@@ -713,8 +713,7 @@ impl Lowerer {
         let alloca = self.alloc_and_init_compound_literal(type_spec, init, ty, size);
 
         let struct_layout = self.get_struct_layout_for_type(type_spec);
-        let resolved = self.resolve_type_spec(type_spec);
-        let is_scalar = struct_layout.is_none() && !matches!(resolved, TypeSpecifier::Array(..));
+        let is_scalar = struct_layout.is_none() && !matches!(ctype, CType::Array(_, _));
         if is_scalar {
             let loaded = self.fresh_value();
             self.emit(Instruction::Load { dest: loaded, ptr: alloca, ty });
@@ -1426,29 +1425,32 @@ impl Lowerer {
     }
 
     pub(super) fn resolve_va_arg_type(&self, type_spec: &TypeSpecifier) -> IrType {
-        match type_spec {
-            TypeSpecifier::Int | TypeSpecifier::Signed => IrType::I32,
-            TypeSpecifier::Long | TypeSpecifier::LongLong => IrType::I64,
-            TypeSpecifier::Short => IrType::I16,
-            TypeSpecifier::Char => IrType::I8,
-            TypeSpecifier::UnsignedChar => IrType::U8,
-            TypeSpecifier::UnsignedInt | TypeSpecifier::Unsigned => IrType::U32,
-            TypeSpecifier::UnsignedLong | TypeSpecifier::UnsignedLongLong => IrType::U64,
-            TypeSpecifier::UnsignedShort => IrType::U16,
-            TypeSpecifier::Float => IrType::F32,
-            TypeSpecifier::Double => IrType::F64,
-            TypeSpecifier::LongDouble => IrType::F128,
-            TypeSpecifier::Pointer(_) => IrType::Ptr,
-            TypeSpecifier::Void => IrType::I64,
-            TypeSpecifier::Bool => IrType::I8,
-            TypeSpecifier::TypedefName(name) => {
-                if let Some(resolved) = self.types.typedefs.get(name) {
-                    self.resolve_va_arg_type(resolved)
-                } else {
-                    IrType::I64
-                }
-            }
-            TypeSpecifier::Struct(..) | TypeSpecifier::Union(..) => IrType::I64,
+        // Use type_spec_to_ctype for typedef resolution, then map CType to IrType
+        let ctype = self.type_spec_to_ctype(type_spec);
+        Self::ctype_to_ir_type(&ctype)
+    }
+
+    /// Map a CType to an IrType (used for va_arg type resolution).
+    fn ctype_to_ir_type(ctype: &CType) -> IrType {
+        match ctype {
+            CType::Int => IrType::I32,
+            CType::Long | CType::LongLong => IrType::I64,
+            CType::Short => IrType::I16,
+            CType::Char => IrType::I8,
+            CType::UChar => IrType::U8,
+            CType::UInt => IrType::U32,
+            CType::ULong | CType::ULongLong => IrType::U64,
+            CType::UShort => IrType::U16,
+            CType::Float => IrType::F32,
+            CType::Double => IrType::F64,
+            CType::LongDouble => IrType::F128,
+            CType::Pointer(_) => IrType::Ptr,
+            CType::Void => IrType::I64,
+            CType::Bool => IrType::I8,
+            CType::Int128 => IrType::I128,
+            CType::UInt128 => IrType::U128,
+            CType::Array(_, _) => IrType::Ptr,
+            CType::Struct(_) | CType::Union(_) => IrType::I64,
             _ => IrType::I64,
         }
     }

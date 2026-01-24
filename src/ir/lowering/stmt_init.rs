@@ -100,7 +100,7 @@ impl Lowerer {
             self.type_spec_to_ir(&p.type_spec)
         }).collect();
         let param_bool_flags: Vec<bool> = params.iter().map(|p| {
-            matches!(self.resolve_type_spec(&p.type_spec), TypeSpecifier::Bool)
+            self.is_type_bool(&p.type_spec)
         }).collect();
         let sig = if !variadic || !param_tys.is_empty() {
             FuncSig {
@@ -207,8 +207,7 @@ impl Lowerer {
 
     /// Complex variable initialization: `_Complex double z = expr;`
     fn lower_complex_var_init(&mut self, expr: &Expr, alloca: Value, da: &DeclAnalysis, decl: &Declaration) {
-        let resolved_ts = self.resolve_type_spec(&decl.type_spec);
-        let complex_ctype = self.type_spec_to_ctype(&resolved_ts);
+        let complex_ctype = self.type_spec_to_ctype(&decl.type_spec);
         let src = self.lower_expr_to_complex(expr, &complex_ctype);
         self.emit(Instruction::Memcpy {
             dest: alloca,
@@ -285,8 +284,7 @@ impl Lowerer {
 
     /// Complex initializer list: `_Complex double z = {real, imag}`
     fn lower_complex_init_list(&mut self, items: &[InitializerItem], alloca: Value, decl: &Declaration) {
-        let resolved_ts = self.resolve_type_spec(&decl.type_spec);
-        let complex_ctype = self.type_spec_to_ctype(&resolved_ts);
+        let complex_ctype = self.type_spec_to_ctype(&decl.type_spec);
         let comp_ty = Self::complex_component_ir_type(&complex_ctype);
         // Store real part (first item)
         if let Some(item) = items.first() {
@@ -549,10 +547,7 @@ impl Lowerer {
             self.zero_init_alloca(alloca, da.alloc_size);
         }
 
-        let is_complex_elem_array = matches!(
-            self.resolve_type_spec(&decl.type_spec),
-            TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble
-        );
+        let is_complex_elem_array = self.is_type_complex(&decl.type_spec);
 
         let elem_store_ty = if da.is_array_of_pointers || da.is_array_of_func_ptrs { IrType::I64 } else { da.elem_ir_ty };
 

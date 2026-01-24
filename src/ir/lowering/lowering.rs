@@ -6,14 +6,7 @@ use crate::common::types::{IrType, StructLayout, CType};
 use crate::backend::Target;
 
 /// Resolve a typedef's derived declarators into the final TypeSpecifier.
-///
-/// Applies Pointer wrapping and Array dim collection (in reverse order for
-/// correct multi-dimensional nesting). For example:
-/// - `typedef int *intptr;` (Pointer derived) -> `Pointer(Int)`
-/// - `typedef int arr[2][3];` (Array deriveds) -> `Array(Array(Int, 3), 2)`
-///
-/// This is used in both pass 0 (typedef collection) and `lower_global_decl`
-/// to avoid duplicating the derived-declarator resolution logic.
+/// Still used for FunctionTypedefInfo return_type (which stores TypeSpecifier for now).
 pub(super) fn resolve_typedef_derived(base: &TypeSpecifier, derived: &[DerivedDeclarator]) -> TypeSpecifier {
     let mut resolved_type = base.clone();
     let mut i = 0;
@@ -268,6 +261,10 @@ pub(super) struct TypeScopeFrame {
     pub ctype_cache_added: Vec<String>,
     /// Keys that were overwritten in `ctype_cache`: (key, previous_value).
     pub ctype_cache_shadowed: Vec<(String, CType)>,
+    /// Keys newly inserted into `typedefs`.
+    pub typedefs_added: Vec<String>,
+    /// Keys that were overwritten in `typedefs`: (key, previous_value).
+    pub typedefs_shadowed: Vec<(String, CType)>,
 }
 
 impl TypeScopeFrame {
@@ -278,6 +275,8 @@ impl TypeScopeFrame {
             struct_layouts_shadowed: Vec::new(),
             ctype_cache_added: Vec::new(),
             ctype_cache_shadowed: Vec::new(),
+            typedefs_added: Vec::new(),
+            typedefs_shadowed: Vec::new(),
         }
     }
 }
@@ -495,8 +494,8 @@ pub(super) struct TypeContext {
     pub struct_layouts: HashMap<String, StructLayout>,
     /// Enum constant values
     pub enum_constants: HashMap<String, i64>,
-    /// Typedef mappings
-    pub typedefs: HashMap<String, TypeSpecifier>,
+    /// Typedef mappings (name -> resolved CType)
+    pub typedefs: HashMap<String, CType>,
     /// Function typedef info (bare function typedefs like `typedef int func_t(int)`)
     pub function_typedefs: HashMap<String, FunctionTypedefInfo>,
     /// Set of typedef names that are function pointer types
@@ -569,7 +568,7 @@ impl TypeContext {
     }
 
     /// Pop the top type-system scope frame and undo changes to
-    /// enum_constants, struct_layouts, and ctype_cache.
+    /// enum_constants, struct_layouts, ctype_cache, and typedefs.
     pub fn pop_scope(&mut self) {
         if let Some(frame) = self.scope_stack.pop() {
             for key in frame.enums_added {
@@ -589,6 +588,12 @@ impl TypeContext {
                 for (key, val) in frame.ctype_cache_shadowed {
                     cache.insert(key, val);
                 }
+            }
+            for key in frame.typedefs_added {
+                self.typedefs.remove(&key);
+            }
+            for (key, val) in frame.typedefs_shadowed {
+                self.typedefs.insert(key, val);
             }
         }
     }
@@ -615,6 +620,19 @@ impl TypeContext {
             }
         }
         self.struct_layouts.insert(key, layout);
+    }
+
+    /// Insert a typedef, tracking the change in the current scope frame
+    /// so it can be undone on scope exit.
+    pub fn insert_typedef_scoped(&mut self, name: String, ctype: CType) {
+        if let Some(frame) = self.scope_stack.last_mut() {
+            if let Some(prev) = self.typedefs.get(&name).cloned() {
+                frame.typedefs_shadowed.push((name.clone(), prev));
+            } else {
+                frame.typedefs_added.push(name.clone());
+            }
+        }
+        self.typedefs.insert(name, ctype);
     }
 
     /// Invalidate a ctype_cache entry, tracking the change in the current scope frame
@@ -863,8 +881,9 @@ impl Lowerer {
                                 }
                             }
 
-                            let resolved_type = resolve_typedef_derived(&decl.type_spec, &declarator.derived);
-                            self.types.typedefs.insert(declarator.name.clone(), resolved_type);
+                            // Store CType directly in typedefs map
+                            let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                            self.types.typedefs.insert(declarator.name.clone(), resolved_ctype);
                         }
                     }
                 }
@@ -1013,10 +1032,10 @@ impl Lowerer {
         //   x86-64: packed two F32 in one xmm register -> F64
         //   ARM/RISC-V: real in first FP register -> F32, imag in second FP register
         if ptr_count == 0 {
-            let resolved = self.resolve_type_spec(ret_type_spec).clone();
-            if matches!(resolved, TypeSpecifier::ComplexDouble) {
+            let ret_ctype = self.type_spec_to_ctype(ret_type_spec);
+            if matches!(ret_ctype, CType::ComplexDouble) {
                 ret_ty = IrType::F64;
-            } else if matches!(resolved, TypeSpecifier::ComplexFloat) {
+            } else if matches!(ret_ctype, CType::ComplexFloat) {
                 if self.uses_packed_complex_float() {
                     ret_ty = IrType::F64;
                 } else {
@@ -1042,23 +1061,18 @@ impl Lowerer {
 
         // Record complex return types for expr_ctype resolution
         if ptr_count == 0 {
-            let resolved = self.resolve_type_spec(ret_type_spec);
-            let ret_ct = self.type_spec_to_ctype(&resolved);
+            let ret_ct = self.type_spec_to_ctype(ret_type_spec);
             if ret_ct.is_complex() {
                 self.types.func_return_ctypes.insert(name.to_string(), ret_ct);
             }
         }
 
         // Detect struct/complex returns that need special ABI handling.
-        // Per SysV AMD64 ABI (and equivalent ARM64/RISC-V ABIs):
-        // - Structs <= 8 bytes: returned in one register (rax/x0/a0)
-        // - Structs 9-16 bytes (INTEGER class): returned in two registers (rax+rdx/x0+x1/a0+a1)
-        // - Structs > 16 bytes: use hidden sret pointer as first argument
         let mut sret_size = None;
         let mut two_reg_ret_size = None;
         if ptr_count == 0 {
-            let resolved = self.resolve_type_spec(ret_type_spec).clone();
-            if matches!(resolved, TypeSpecifier::Struct(..) | TypeSpecifier::Union(..)) {
+            let ret_ct = self.type_spec_to_ctype(ret_type_spec);
+            if matches!(ret_ct, CType::Struct(_) | CType::Union(_)) {
                 let size = self.sizeof_type(ret_type_spec);
                 if size > 16 {
                     sret_size = Some(size);
@@ -1066,9 +1080,7 @@ impl Lowerer {
                     two_reg_ret_size = Some(size);
                 }
             }
-            // _Complex long double uses sret (too large for registers).
-            // _Complex double returns via xmm0+xmm1 (two FP registers), not sret.
-            if matches!(resolved, TypeSpecifier::ComplexLongDouble) {
+            if matches!(ret_ct, CType::ComplexLongDouble) {
                 let size = self.sizeof_type(ret_type_spec);
                 sret_size = Some(size);
             }
@@ -1080,17 +1092,16 @@ impl Lowerer {
             if is_kr && ty == IrType::F32 { IrType::F64 } else { ty }
         }).collect();
         let param_bool_flags: Vec<bool> = params.iter().map(|p| {
-            matches!(self.resolve_type_spec(&p.type_spec), TypeSpecifier::Bool)
+            self.is_type_bool(&p.type_spec)
         }).collect();
         // Collect parameter CTypes for complex argument conversion
         let param_ctypes: Vec<CType> = params.iter().map(|p| {
-            self.type_spec_to_ctype(&self.resolve_type_spec(&p.type_spec).clone())
+            self.type_spec_to_ctype(&p.type_spec)
         }).collect();
 
         // Collect per-parameter struct sizes for by-value struct passing ABI
         let param_struct_sizes: Vec<Option<usize>> = params.iter().map(|p| {
-            let resolved = self.resolve_type_spec(&p.type_spec);
-            if matches!(resolved, TypeSpecifier::Struct(..) | TypeSpecifier::Union(..)) {
+            if self.is_type_struct_or_union(&p.type_spec) {
                 Some(self.sizeof_type(&p.type_spec))
             } else {
                 None
@@ -1246,7 +1257,7 @@ impl Lowerer {
         self.defined_functions.insert(func.name.clone());
 
         let mut return_type = self.type_spec_to_ir(&func.return_type);
-        let return_is_bool = matches!(self.resolve_type_spec(&func.return_type), TypeSpecifier::Bool);
+        let return_is_bool = self.is_type_bool(&func.return_type);
 
         // Create fresh per-function build state
         self.func_state = Some(FunctionBuildState::new(
@@ -1259,7 +1270,7 @@ impl Lowerer {
         self.push_scope();
 
         // Record return CType for complex-returning functions
-        let ret_ctype = self.type_spec_to_ctype(&self.resolve_type_spec(&func.return_type).clone());
+        let ret_ctype = self.type_spec_to_ctype(&func.return_type);
         if ret_ctype.is_complex() {
             self.types.func_return_ctypes.insert(func.name.clone(), ret_ctype);
         }
@@ -1280,10 +1291,10 @@ impl Lowerer {
         //   x86-64: two packed F32 in one xmm0 -> F64
         //   ARM/RISC-V: real in first FP reg (F32), imag in second FP reg (F32)
         if !uses_sret && !uses_two_reg_return {
-            let resolved_ret = self.resolve_type_spec(&func.return_type).clone();
-            if matches!(resolved_ret, TypeSpecifier::ComplexDouble) {
+            let ret_ct = self.type_spec_to_ctype(&func.return_type);
+            if matches!(ret_ct, CType::ComplexDouble) {
                 return_type = IrType::F64;
-            } else if matches!(resolved_ret, TypeSpecifier::ComplexFloat) {
+            } else if matches!(ret_ct, CType::ComplexFloat) {
                 if self.uses_packed_complex_float() {
                     return_type = IrType::F64;
                 } else {
@@ -1309,27 +1320,22 @@ impl Lowerer {
         let mut complex_float_params: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let uses_packed_cf = self.uses_packed_complex_float();
         for (orig_idx, p) in func.params.iter().enumerate() {
-            let resolved = self.resolve_type_spec(&p.type_spec).clone();
-            // On ARM/RISC-V, ComplexFloat is decomposed into two F32 params just like ComplexDouble.
-            // On x86-64, ComplexFloat is packed into a single F64 param.
+            let param_ct = self.type_spec_to_ctype(&p.type_spec);
             let is_complex_decomposed = if uses_packed_cf {
-                matches!(resolved, TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble)
+                matches!(param_ct, CType::ComplexDouble | CType::ComplexLongDouble)
             } else {
-                matches!(resolved, TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble)
+                param_ct.is_complex()
             };
-            let is_complex_float = uses_packed_cf && matches!(resolved, TypeSpecifier::ComplexFloat);
+            let is_complex_float = uses_packed_cf && matches!(param_ct, CType::ComplexFloat);
             if is_complex_decomposed {
-                let ct = self.type_spec_to_ctype(&resolved);
-                let comp_ty = Self::complex_component_ir_type(&ct);
+                let comp_ty = Self::complex_component_ir_type(&param_ct);
                 let name = p.name.clone().unwrap_or_default();
-                // Two params: real and imag parts
                 params.push(IrParam { name: format!("{}_real", name), ty: comp_ty, struct_size: None });
                 ir_param_to_orig.push(Some(orig_idx));
                 params.push(IrParam { name: format!("{}_imag", name), ty: comp_ty, struct_size: None });
                 ir_param_to_orig.push(Some(orig_idx));
                 complex_decomposed.insert(orig_idx);
             } else if is_complex_float {
-                // _Complex float: packed two F32 in one XMM register as F64 (x86-64 only)
                 let name = p.name.clone().unwrap_or_default();
                 params.push(IrParam { name: format!("{}_packed", name), ty: IrType::F64, struct_size: None });
                 ir_param_to_orig.push(Some(orig_idx));
@@ -1337,8 +1343,7 @@ impl Lowerer {
             } else {
                 let ty = self.type_spec_to_ir(&p.type_spec);
                 let ty = if func.is_kr && ty == IrType::F32 { IrType::F64 } else { ty };
-                // Check if this is a struct/union parameter for by-value passing
-                let struct_size = if matches!(resolved, TypeSpecifier::Struct(..) | TypeSpecifier::Union(..)) {
+                let struct_size = if matches!(param_ct, CType::Struct(_) | CType::Union(_)) {
                     Some(self.sizeof_type(&p.type_spec))
                 } else {
                     None
@@ -1464,15 +1469,13 @@ impl Lowerer {
 
             if !param.name.is_empty() {
                 let is_struct_param = if let Some(orig_param) = func.params.get(orig_idx) {
-                    let resolved = self.resolve_type_spec(&orig_param.type_spec);
-                    matches!(resolved, TypeSpecifier::Struct(..) | TypeSpecifier::Union(..))
+                    self.is_type_struct_or_union(&orig_param.type_spec)
                 } else {
                     false
                 };
 
                 let is_complex_param = if let Some(orig_param) = func.params.get(orig_idx) {
-                    let resolved = self.resolve_type_spec(&orig_param.type_spec);
-                    matches!(resolved, TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble)
+                    self.is_type_complex(&orig_param.type_spec)
                 } else {
                     false
                 };
@@ -1531,7 +1534,7 @@ impl Lowerer {
 
                     let c_type = func.params.get(orig_idx).map(|p| self.param_ctype(p));
                     let is_bool = func.params.get(orig_idx).map_or(false, |p| {
-                        matches!(self.resolve_type_spec(&p.type_spec), TypeSpecifier::Bool)
+                        self.is_type_bool(&p.type_spec)
                     });
 
                     // For pointer-to-array params (e.g., int (*)[3] from int arr[N][3]),
@@ -1816,6 +1819,15 @@ impl Lowerer {
                 if dim_infos.iter().any(|d| d.is_vla) {
                     vla_params.push((param_name, dim_infos));
                 }
+            } else {
+                // Check CType for typedef'd pointer-to-array
+                let ctype = self.type_spec_to_ctype(&param.type_spec);
+                if let CType::Pointer(ref inner_ct) = ctype {
+                    if matches!(inner_ct.as_ref(), CType::Array(_, _)) {
+                        // TypeSpecifier-based VLA detection won't work for typedef'd types,
+                        // but VLA dimensions in typedef'd pointers are rare
+                    }
+                }
             }
         }
 
@@ -1962,8 +1974,9 @@ impl Lowerer {
         if decl.is_typedef {
             for declarator in &decl.declarators {
                 if !declarator.name.is_empty() {
-                    let resolved_type = resolve_typedef_derived(&decl.type_spec, &declarator.derived);
-                    self.types.typedefs.insert(declarator.name.clone(), resolved_type);
+                    // Store CType directly in typedefs map
+                    let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                    self.types.typedefs.insert(declarator.name.clone(), resolved_ctype);
                 }
             }
             return;
@@ -2309,34 +2322,40 @@ impl Lowerer {
         // type_spec_to_ir returns Ptr (array decays to pointer), but we need
         // the element type for correct storage/initialization.
         if is_array && base_ty == IrType::Ptr && !is_pointer {
-            // Peel through nested Array layers resolving typedefs to find
-            // the true element type for multi-dimensional typedef'd arrays.
+            // First try TypeSpecifier::Array peeling
             let mut resolved = self.resolve_type_spec(type_spec);
+            let mut found = false;
             while let TypeSpecifier::Array(ref inner, _) = resolved {
                 let inner_resolved = self.resolve_type_spec(inner);
                 if matches!(inner_resolved, TypeSpecifier::Array(_, _)) {
                     resolved = inner_resolved;
                 } else {
                     base_ty = self.type_spec_to_ir(inner);
+                    found = true;
                     break;
                 }
+            }
+            // Fall back to CType for typedef'd arrays (e.g., va_list)
+            if !found {
+                let ctype = self.type_spec_to_ctype(type_spec);
+                let mut ct = &ctype;
+                while let CType::Array(inner, _) = ct {
+                    ct = inner.as_ref();
+                }
+                base_ty = Self::ctype_to_ir(ct);
             }
         }
 
         // For array-of-pointers (int *arr[N]) or array-of-function-pointers,
         // the element type is Ptr, not the base type.
         // Also detect typedef'd pointer arrays: typedef int *intptr_t; intptr_t arr[N];
-        // where the pointer is in the resolved type spec, not in derived declarators.
         let is_array_of_pointers = is_array && {
             let ptr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
             let arr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Array(_)));
             let has_derived_ptr_before_arr = matches!((ptr_pos, arr_pos), (Some(pp), Some(ap)) if pp < ap);
             // Check if the type spec itself resolves to a pointer type (typedef'd pointer)
-            // and there's an array in derived but no pointer in derived
-            let typedef_ptr_array = ptr_pos.is_none() && arr_pos.is_some() && {
-                let resolved = self.resolve_type_spec(type_spec);
-                matches!(resolved, TypeSpecifier::Pointer(_))
-            };
+            let typedef_ptr_array = ptr_pos.is_none() && arr_pos.is_some() &&
+                self.is_type_pointer(type_spec);
             has_derived_ptr_before_arr || typedef_ptr_array
         };
         let is_array_of_func_ptrs = is_array && derived.iter().any(|d|
@@ -2349,9 +2368,9 @@ impl Lowerer {
 
         // Compute element IR type for arrays (accounts for typedef'd arrays)
         let elem_ir_ty = if is_array && base_ty == IrType::Ptr && !is_array_of_pointers {
-            let resolved = self.resolve_type_spec(type_spec);
-            if let TypeSpecifier::Array(ref elem_ts, _) = resolved {
-                self.type_spec_to_ir(elem_ts)
+            let ctype = self.type_spec_to_ctype(type_spec);
+            if let CType::Array(ref elem_ct, _) = ctype {
+                Self::ctype_to_ir(elem_ct)
             } else {
                 base_ty
             }
@@ -2361,22 +2380,17 @@ impl Lowerer {
 
         // _Bool type: only for direct scalar variables, not pointers or arrays
         let has_derived_ptr = derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
-        let is_bool = matches!(self.resolve_type_spec(type_spec), TypeSpecifier::Bool)
-            && !has_derived_ptr && !is_array;
+        let is_bool = self.is_type_bool(type_spec) && !has_derived_ptr && !is_array;
 
         // Struct/union layout. For pointer-to-struct, we still store the layout
         // so p->field works.
         let struct_layout = self.get_struct_layout_for_type(type_spec)
             .or_else(|| {
-                // For typedef'd pointer-to-struct or array-of-struct, peel wrappers
-                let resolved = self.resolve_type_spec(type_spec);
-                match resolved {
-                    TypeSpecifier::Pointer(inner) => {
-                        self.get_struct_layout_for_type(inner)
-                    }
-                    TypeSpecifier::Array(inner, _) => {
-                        self.get_struct_layout_for_type(inner)
-                    }
+                // For typedef'd pointer-to-struct or array-of-struct, peel CType wrappers
+                let ctype = self.type_spec_to_ctype(type_spec);
+                match &ctype {
+                    CType::Pointer(inner) => self.struct_layout_from_ctype(inner),
+                    CType::Array(inner, _) => self.struct_layout_from_ctype(inner),
                     _ => None,
                 }
             });
@@ -2425,7 +2439,7 @@ impl Lowerer {
     ) {
         let is_unsized = da.is_array && (
             derived.iter().any(|d| matches!(d, DerivedDeclarator::Array(None)))
-            || matches!(self.resolve_type_spec(type_spec), TypeSpecifier::Array(_, None))
+            || matches!(self.type_spec_to_ctype(type_spec), CType::Array(_, None))
         );
         if !is_unsized {
             return;

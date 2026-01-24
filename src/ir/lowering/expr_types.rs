@@ -52,12 +52,13 @@ impl Lowerer {
         match ts {
             TypeSpecifier::LongDouble => true,
             TypeSpecifier::TypedefName(name) => {
-                if let Some(resolved) = self.types.typedefs.get(name) {
-                    self.is_type_spec_long_double(resolved)
+                if let Some(ctype) = self.types.typedefs.get(name) {
+                    matches!(ctype, CType::LongDouble)
                 } else {
                     false
                 }
             }
+            TypeSpecifier::TypeofType(inner) => self.is_type_spec_long_double(inner),
             _ => false,
         }
     }
@@ -100,8 +101,8 @@ impl Lowerer {
                 } else { None }
             }
             Expr::CompoundLiteral(type_spec, _, _) => {
-                let resolved = self.resolve_type_spec(type_spec);
-                if matches!(resolved, TypeSpecifier::Struct(..) | TypeSpecifier::Union(..)) {
+                let ctype = self.type_spec_to_ctype(type_spec);
+                if matches!(ctype, CType::Struct(_) | CType::Union(_)) {
                     Some(self.sizeof_type(type_spec))
                 } else {
                     None
@@ -551,7 +552,7 @@ impl Lowerer {
                     // GCC extension: sizeof(function_type) == 1
                     return 1;
                 }
-                let ct_size = ct.size();
+                let ct_size = ct.size_ctx(&self.types.struct_layouts);
                 if ct_size > 0 {
                     return ct_size;
                 }
@@ -568,7 +569,7 @@ impl Lowerer {
             }
             // Use CType size if available
             if let Some(ref ct) = ginfo.c_type {
-                let ct_size = ct.size();
+                let ct_size = ct.size_ctx(&self.types.struct_layouts);
                 if ct_size > 0 {
                     return ct_size;
                 }
@@ -660,7 +661,7 @@ impl Lowerer {
     /// Get the sizeof for a member access expression.
     fn sizeof_member_access(&self, base_expr: &Expr, field_name: &str, is_pointer: bool) -> usize {
         if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, is_pointer) {
-            let sz = ctype.size();
+            let sz = ctype.size_ctx(&self.types.struct_layouts);
             if sz > 0 { return sz; }
         }
         if is_pointer {
@@ -830,7 +831,7 @@ impl Lowerer {
             Expr::FunctionCall(_, _, _) => {
                 // Prefer CType which has correct struct/union sizes
                 if let Some(ctype) = self.get_expr_ctype(expr) {
-                    ctype.size()
+                    ctype.size_ctx(&self.types.struct_layouts)
                 } else {
                     let ret_ty = self.get_expr_type(expr);
                     ret_ty.size()
@@ -839,10 +840,10 @@ impl Lowerer {
 
             // Compound literal: size of the type (handle incomplete array types)
             Expr::CompoundLiteral(ts, ref init, _) => {
-                let resolved = self.resolve_type_spec(ts);
-                match (resolved, init.as_ref()) {
-                    (TypeSpecifier::Array(ref elem, None), Initializer::List(items)) => {
-                        self.sizeof_type(elem) * items.len()
+                let ctype = self.type_spec_to_ctype(ts);
+                match (&ctype, init.as_ref()) {
+                    (CType::Array(ref elem_ct, None), Initializer::List(items)) => {
+                        elem_ct.size_ctx(&self.types.struct_layouts).max(1) * items.len()
                     }
                     _ => self.sizeof_type(ts),
                 }
@@ -856,9 +857,9 @@ impl Lowerer {
     /// Get the element size for a compound literal type.
     /// For arrays, returns the element size; for scalars/structs, returns the full size.
     pub(super) fn compound_literal_elem_size(&self, ts: &TypeSpecifier) -> usize {
-        let resolved = self.resolve_type_spec(ts);
-        match resolved {
-            TypeSpecifier::Array(elem, _) => self.sizeof_type(elem),
+        let ctype = self.type_spec_to_ctype(ts);
+        match &ctype {
+            CType::Array(elem_ct, _) => elem_ct.size_ctx(&self.types.struct_layouts).max(1),
             _ => self.sizeof_type(ts),
         }
     }
@@ -1125,8 +1126,7 @@ impl Lowerer {
                 None
             }
             Expr::Cast(ref type_spec, _, _) => {
-                let resolved = self.resolve_type_spec(type_spec);
-                Some(self.type_spec_to_ctype(resolved))
+                Some(self.type_spec_to_ctype(type_spec))
             }
             Expr::MemberAccess(base_expr, field_name, _) => {
                 self.get_field_ctype(base_expr, field_name, false)
@@ -1196,8 +1196,7 @@ impl Lowerer {
                 None
             }
             Expr::VaArg(_, type_spec, _) | Expr::CompoundLiteral(type_spec, _, _) => {
-                let resolved = self.resolve_type_spec(type_spec);
-                Some(self.type_spec_to_ctype(resolved))
+                Some(self.type_spec_to_ctype(type_spec))
             }
             _ => None,
         }

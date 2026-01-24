@@ -1,7 +1,7 @@
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, CType, StructLayout};
-use super::lowering::{Lowerer, LocalInfo, GlobalInfo, DeclAnalysis, SwitchFrame, FuncSig, FunctionTypedefInfo, resolve_typedef_derived};
+use super::lowering::{Lowerer, LocalInfo, GlobalInfo, DeclAnalysis, SwitchFrame, FuncSig, FunctionTypedefInfo};
 
 impl Lowerer {
     pub(super) fn lower_compound_stmt(&mut self, compound: &CompoundStmt) {
@@ -61,9 +61,6 @@ impl Lowerer {
         if decl.is_typedef {
             for declarator in &decl.declarators {
                 if !declarator.name.is_empty() {
-                    let resolved_type = resolve_typedef_derived(&decl.type_spec, &declarator.derived);
-                    self.types.typedefs.insert(declarator.name.clone(), resolved_type);
-
                     // Track function pointer typedefs for correct CType resolution
                     let has_fptr_derived = declarator.derived.iter().any(|d|
                         matches!(d, DerivedDeclarator::FunctionPointer(_, _)));
@@ -92,6 +89,10 @@ impl Lowerer {
                             });
                         }
                     }
+
+                    // Store CType directly in typedefs map (with scope tracking)
+                    let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                    self.types.insert_typedef_scoped(declarator.name.clone(), resolved_ctype);
                 }
             }
             return;
@@ -120,16 +121,13 @@ impl Lowerer {
             self.fixup_unsized_array(&mut da, &decl.type_spec, &declarator.derived, &declarator.init);
 
             // Detect complex type variables and arrays of complex elements
-            let resolved_ts = self.resolve_type_spec(&decl.type_spec);
-            let is_complex = !da.is_pointer && !da.is_array && matches!(
-                resolved_ts,
-                TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble
-            );
+            let is_complex = !da.is_pointer && !da.is_array && self.is_type_complex(&decl.type_spec);
             let complex_elem_ctype: Option<CType> = if da.is_array && !da.is_pointer {
-                match &resolved_ts {
-                    TypeSpecifier::ComplexFloat => Some(CType::ComplexFloat),
-                    TypeSpecifier::ComplexDouble => Some(CType::ComplexDouble),
-                    TypeSpecifier::ComplexLongDouble => Some(CType::ComplexLongDouble),
+                let ctype = self.type_spec_to_ctype(&decl.type_spec);
+                match ctype {
+                    CType::ComplexFloat => Some(CType::ComplexFloat),
+                    CType::ComplexDouble => Some(CType::ComplexDouble),
+                    CType::ComplexLongDouble => Some(CType::ComplexLongDouble),
                     _ => None,
                 }
             } else {
@@ -1627,8 +1625,7 @@ impl Lowerer {
         }
 
         // Compute element size (the base type size)
-        let resolved = self.resolve_type_spec(type_spec);
-        let base_elem_size = self.sizeof_type(&resolved);
+        let base_elem_size = self.sizeof_type(type_spec);
 
         // Build runtime product: dim0 * dim1 * ... * base_elem_size
         let mut result: Option<Value> = None;

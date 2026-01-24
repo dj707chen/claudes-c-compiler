@@ -6,21 +6,14 @@ use super::lowering::{Lowerer, FuncSig};
 
 impl Lowerer {
 
-    /// Resolve a TypeSpecifier, following typedef chains.
-    /// Returns the underlying TypeSpecifier (non-TypedefName).
+    /// Resolve a TypeSpecifier, following TypeofType wrappers.
+    /// TypedefName resolution now goes through CType (see type_spec_to_ctype).
+    /// This only resolves non-typedef wrappers like TypeofType.
     pub(super) fn resolve_type_spec<'a>(&'a self, ts: &'a TypeSpecifier) -> &'a TypeSpecifier {
         let mut current = ts;
-        // Follow typedef chains (limit depth to prevent infinite loops)
         for _ in 0..32 {
             match current {
-                TypeSpecifier::TypedefName(name) => {
-                    if let Some(resolved) = self.types.typedefs.get(name) {
-                        current = resolved;
-                        continue;
-                    }
-                }
                 TypeSpecifier::TypeofType(inner) => {
-                    // typeof(type-name): resolve the inner type directly
                     current = inner;
                     continue;
                 }
@@ -31,8 +24,97 @@ impl Lowerer {
         current
     }
 
+    /// Resolve a TypeSpecifier to its CType, following typedef chains.
+    /// This is the primary way to get from a TypeSpecifier to a resolved type
+    /// now that typedefs store CType directly.
+    pub(super) fn resolve_type_to_ctype(&self, ts: &TypeSpecifier) -> CType {
+        self.type_spec_to_ctype(ts)
+    }
+
+    /// Check if a TypeSpecifier resolves to a Bool type (through typedefs).
+    pub(super) fn is_type_bool(&self, ts: &TypeSpecifier) -> bool {
+        match ts {
+            TypeSpecifier::Bool => true,
+            TypeSpecifier::TypedefName(name) => {
+                if let Some(ctype) = self.types.typedefs.get(name) {
+                    matches!(ctype, CType::Bool)
+                } else {
+                    false
+                }
+            }
+            TypeSpecifier::TypeofType(inner) => self.is_type_bool(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a TypeSpecifier resolves to a struct or union type (through typedefs).
+    pub(super) fn is_type_struct_or_union(&self, ts: &TypeSpecifier) -> bool {
+        match ts {
+            TypeSpecifier::Struct(..) | TypeSpecifier::Union(..) => true,
+            TypeSpecifier::TypedefName(name) => {
+                if let Some(ctype) = self.types.typedefs.get(name) {
+                    matches!(ctype, CType::Struct(_) | CType::Union(_))
+                } else {
+                    false
+                }
+            }
+            TypeSpecifier::TypeofType(inner) => self.is_type_struct_or_union(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a TypeSpecifier resolves to a complex type (through typedefs).
+    pub(super) fn is_type_complex(&self, ts: &TypeSpecifier) -> bool {
+        match ts {
+            TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble => true,
+            TypeSpecifier::TypedefName(name) => {
+                if let Some(ctype) = self.types.typedefs.get(name) {
+                    ctype.is_complex()
+                } else {
+                    false
+                }
+            }
+            TypeSpecifier::TypeofType(inner) => self.is_type_complex(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a TypeSpecifier resolves to a pointer type (through typedefs).
+    pub(super) fn is_type_pointer(&self, ts: &TypeSpecifier) -> bool {
+        match ts {
+            TypeSpecifier::Pointer(_) => true,
+            TypeSpecifier::TypedefName(name) => {
+                if let Some(ctype) = self.types.typedefs.get(name) {
+                    matches!(ctype, CType::Pointer(_))
+                } else {
+                    false
+                }
+            }
+            TypeSpecifier::TypeofType(inner) => self.is_type_pointer(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a TypeSpecifier resolves to an array type (through typedefs).
+    pub(super) fn is_type_array(&self, ts: &TypeSpecifier) -> bool {
+        match ts {
+            TypeSpecifier::Array(_, _) => true,
+            TypeSpecifier::TypedefName(name) => {
+                if let Some(ctype) = self.types.typedefs.get(name) {
+                    matches!(ctype, CType::Array(_, _))
+                } else {
+                    false
+                }
+            }
+            TypeSpecifier::TypeofType(inner) => self.is_type_array(inner),
+            _ => false,
+        }
+    }
+
     /// Resolve typeof(expr) to a concrete TypeSpecifier by analyzing the expression type.
     /// Returns a new TypeSpecifier if the input is Typeof, otherwise returns a clone of the input.
+    /// Note: TypedefName resolution now goes through CType, so typeof on a typedef
+    /// is handled by resolving the typedef to CType first.
     pub(super) fn resolve_typeof(&self, ts: &TypeSpecifier) -> TypeSpecifier {
         match ts {
             TypeSpecifier::Typeof(expr) => {
@@ -43,13 +125,13 @@ impl Lowerer {
                 }
             }
             TypeSpecifier::TypeofType(inner) => {
-                // Recursively resolve inner
                 self.resolve_typeof(inner)
             }
             TypeSpecifier::TypedefName(name) => {
-                if let Some(resolved) = self.types.typedefs.get(name) {
-                    // Check if the typedef itself is a typeof
-                    self.resolve_typeof(resolved)
+                // Typedefs now store CType. Convert back to TypeSpecifier for
+                // code that still needs a TypeSpecifier (e.g., typeof resolution).
+                if let Some(ctype) = self.types.typedefs.get(name) {
+                    Self::ctype_to_type_spec(ctype)
                 } else {
                     ts.clone()
                 }
@@ -150,144 +232,135 @@ impl Lowerer {
     }
 
     /// Pre-populate typedef mappings for builtin/standard types.
+    /// Now inserts CType values directly.
     pub(super) fn seed_builtin_typedefs(&mut self) {
-        use TypeSpecifier::*;
-        let builtins: &[(&str, TypeSpecifier)] = &[
+        let builtins: &[(&str, CType)] = &[
             // <stddef.h>
-            ("size_t", UnsignedLong),
-            ("ssize_t", Long),
-            ("ptrdiff_t", Long),
-            ("wchar_t", Int),
-            ("wint_t", UnsignedInt),
+            ("size_t", CType::ULong),
+            ("ssize_t", CType::Long),
+            ("ptrdiff_t", CType::Long),
+            ("wchar_t", CType::Int),
+            ("wint_t", CType::UInt),
             // <stdint.h> - exact width types
-            ("int8_t", Char),
-            ("int16_t", Short),
-            ("int32_t", Int),
-            ("int64_t", Long),
-            ("uint8_t", UnsignedChar),
-            ("uint16_t", UnsignedShort),
-            ("uint32_t", UnsignedInt),
-            ("uint64_t", UnsignedLong),
-            ("intptr_t", Long),
-            ("uintptr_t", UnsignedLong),
-            ("intmax_t", Long),
-            ("uintmax_t", UnsignedLong),
+            ("int8_t", CType::Char),
+            ("int16_t", CType::Short),
+            ("int32_t", CType::Int),
+            ("int64_t", CType::Long),
+            ("uint8_t", CType::UChar),
+            ("uint16_t", CType::UShort),
+            ("uint32_t", CType::UInt),
+            ("uint64_t", CType::ULong),
+            ("intptr_t", CType::Long),
+            ("uintptr_t", CType::ULong),
+            ("intmax_t", CType::Long),
+            ("uintmax_t", CType::ULong),
             // least types
-            ("int_least8_t", Char),
-            ("int_least16_t", Short),
-            ("int_least32_t", Int),
-            ("int_least64_t", Long),
-            ("uint_least8_t", UnsignedChar),
-            ("uint_least16_t", UnsignedShort),
-            ("uint_least32_t", UnsignedInt),
-            ("uint_least64_t", UnsignedLong),
+            ("int_least8_t", CType::Char),
+            ("int_least16_t", CType::Short),
+            ("int_least32_t", CType::Int),
+            ("int_least64_t", CType::Long),
+            ("uint_least8_t", CType::UChar),
+            ("uint_least16_t", CType::UShort),
+            ("uint_least32_t", CType::UInt),
+            ("uint_least64_t", CType::ULong),
             // fast types
-            ("int_fast8_t", Char),
-            ("int_fast16_t", Long),
-            ("int_fast32_t", Long),
-            ("int_fast64_t", Long),
-            ("uint_fast8_t", UnsignedChar),
-            ("uint_fast16_t", UnsignedLong),
-            ("uint_fast32_t", UnsignedLong),
-            ("uint_fast64_t", UnsignedLong),
+            ("int_fast8_t", CType::Char),
+            ("int_fast16_t", CType::Long),
+            ("int_fast32_t", CType::Long),
+            ("int_fast64_t", CType::Long),
+            ("uint_fast8_t", CType::UChar),
+            ("uint_fast16_t", CType::ULong),
+            ("uint_fast32_t", CType::ULong),
+            ("uint_fast64_t", CType::ULong),
             // <signal.h>
-            ("sig_atomic_t", Int),
+            ("sig_atomic_t", CType::Int),
             // <time.h>
-            ("time_t", Long),
-            ("clock_t", Long),
-            ("timer_t", Pointer(Box::new(Void))),
-            ("clockid_t", Int),
+            ("time_t", CType::Long),
+            ("clock_t", CType::Long),
+            ("timer_t", CType::Pointer(Box::new(CType::Void))),
+            ("clockid_t", CType::Int),
             // <sys/types.h>
-            ("off_t", Long),
-            ("pid_t", Int),
-            ("uid_t", UnsignedInt),
-            ("gid_t", UnsignedInt),
-            ("mode_t", UnsignedInt),
-            ("dev_t", UnsignedLong),
-            ("ino_t", UnsignedLong),
-            ("nlink_t", UnsignedLong),
-            ("blksize_t", Long),
-            ("blkcnt_t", Long),
+            ("off_t", CType::Long),
+            ("pid_t", CType::Int),
+            ("uid_t", CType::UInt),
+            ("gid_t", CType::UInt),
+            ("mode_t", CType::UInt),
+            ("dev_t", CType::ULong),
+            ("ino_t", CType::ULong),
+            ("nlink_t", CType::ULong),
+            ("blksize_t", CType::Long),
+            ("blkcnt_t", CType::Long),
             // GNU/glibc common
-            ("ulong", UnsignedLong),
-            ("ushort", UnsignedShort),
-            ("uint", UnsignedInt),
-            ("__u8", UnsignedChar),
-            ("__u16", UnsignedShort),
-            ("__u32", UnsignedInt),
-            ("__u64", UnsignedLong),
-            ("__s8", Char),
-            ("__s16", Short),
-            ("__s32", Int),
-            ("__s64", Long),
-            // <stdarg.h> - va_list is an array type. Size varies by arch:
-            //   x86-64: 24 bytes (gp_offset, fp_offset, overflow_arg_area, reg_save_area)
-            //   AArch64: 32 bytes (__stack, __gr_top, __vr_top, __gr_offs, __vr_offs)
-            //   RISC-V: 8 bytes (just a pointer)
-            // va_list decays to a pointer when passed to functions (it's an array type).
-            // (target-dependent va_list definitions are added below)
+            ("ulong", CType::ULong),
+            ("ushort", CType::UShort),
+            ("uint", CType::UInt),
+            ("__u8", CType::UChar),
+            ("__u16", CType::UShort),
+            ("__u32", CType::UInt),
+            ("__u64", CType::ULong),
+            ("__s8", CType::Char),
+            ("__s16", CType::Short),
+            ("__s32", CType::Int),
+            ("__s64", CType::Long),
             // <locale.h>
-            ("locale_t", Pointer(Box::new(Void))),
+            ("locale_t", CType::Pointer(Box::new(CType::Void))),
             // <pthread.h> - opaque types, treat as unsigned long or pointer
-            ("pthread_t", UnsignedLong),
-            ("pthread_mutex_t", Pointer(Box::new(Void))),
-            ("pthread_cond_t", Pointer(Box::new(Void))),
-            ("pthread_key_t", UnsignedInt),
-            ("pthread_attr_t", Pointer(Box::new(Void))),
-            ("pthread_once_t", Int),
-            ("pthread_mutexattr_t", Pointer(Box::new(Void))),
-            ("pthread_condattr_t", Pointer(Box::new(Void))),
+            ("pthread_t", CType::ULong),
+            ("pthread_mutex_t", CType::Pointer(Box::new(CType::Void))),
+            ("pthread_cond_t", CType::Pointer(Box::new(CType::Void))),
+            ("pthread_key_t", CType::UInt),
+            ("pthread_attr_t", CType::Pointer(Box::new(CType::Void))),
+            ("pthread_once_t", CType::Int),
+            ("pthread_mutexattr_t", CType::Pointer(Box::new(CType::Void))),
+            ("pthread_condattr_t", CType::Pointer(Box::new(CType::Void))),
             // <setjmp.h>
-            ("jmp_buf", Pointer(Box::new(Void))),
-            ("sigjmp_buf", Pointer(Box::new(Void))),
+            ("jmp_buf", CType::Pointer(Box::new(CType::Void))),
+            ("sigjmp_buf", CType::Pointer(Box::new(CType::Void))),
             // <stdio.h>
-            ("FILE", Pointer(Box::new(Void))),
-            ("fpos_t", Long),
+            ("FILE", CType::Pointer(Box::new(CType::Void))),
+            ("fpos_t", CType::Long),
             // <dirent.h>
-            ("DIR", Pointer(Box::new(Void))),
+            ("DIR", CType::Pointer(Box::new(CType::Void))),
         ];
-        for (name, ts) in builtins {
-            self.types.typedefs.insert(name.to_string(), ts.clone());
+        for (name, ct) in builtins {
+            self.types.typedefs.insert(name.to_string(), ct.clone());
         }
         // Target-dependent va_list definition.
-        // On RISC-V, va_list is just `void *` (a pointer passed by value).
-        // On x86-64 and AArch64, va_list is an array/struct type that decays to
-        // a pointer when passed to functions.
         use crate::backend::Target;
         let va_list_type = match self.target {
             Target::Riscv64 => {
                 // RISC-V: va_list = void * (8 bytes, passed by value)
-                Pointer(Box::new(Void))
+                CType::Pointer(Box::new(CType::Void))
             }
             Target::Aarch64 => {
                 // AArch64: va_list is a 32-byte struct, represented as char[32]
-                Array(Box::new(Char), Some(Box::new(Expr::IntLiteral(32, Span::dummy()))))
+                CType::Array(Box::new(CType::Char), Some(32))
             }
             Target::X86_64 => {
                 // x86-64: va_list is __va_list_tag[1], 24 bytes, represented as char[24]
-                Array(Box::new(Char), Some(Box::new(Expr::IntLiteral(24, Span::dummy()))))
+                CType::Array(Box::new(CType::Char), Some(24))
             }
         };
         self.types.typedefs.insert("va_list".to_string(), va_list_type.clone());
         self.types.typedefs.insert("__builtin_va_list".to_string(), va_list_type.clone());
         self.types.typedefs.insert("__gnuc_va_list".to_string(), va_list_type);
-        // Also add the __u_char etc. POSIX internal names
-        let posix_extras: &[(&str, TypeSpecifier)] = &[
-            ("__u_char", UnsignedChar),
-            ("__u_short", UnsignedShort),
-            ("__u_int", UnsignedInt),
-            ("__u_long", UnsignedLong),
-            ("__int8_t", Char),
-            ("__int16_t", Short),
-            ("__int32_t", Int),
-            ("__int64_t", Long),
-            ("__uint8_t", UnsignedChar),
-            ("__uint16_t", UnsignedShort),
-            ("__uint32_t", UnsignedInt),
-            ("__uint64_t", UnsignedLong),
+        // POSIX internal names
+        let posix_extras: &[(&str, CType)] = &[
+            ("__u_char", CType::UChar),
+            ("__u_short", CType::UShort),
+            ("__u_int", CType::UInt),
+            ("__u_long", CType::ULong),
+            ("__int8_t", CType::Char),
+            ("__int16_t", CType::Short),
+            ("__int32_t", CType::Int),
+            ("__int64_t", CType::Long),
+            ("__uint8_t", CType::UChar),
+            ("__uint16_t", CType::UShort),
+            ("__uint32_t", CType::UInt),
+            ("__uint64_t", CType::ULong),
         ];
-        for (name, ts) in posix_extras {
-            self.types.typedefs.insert(name.to_string(), ts.clone());
+        for (name, ct) in posix_extras {
+            self.types.typedefs.insert(name.to_string(), ct.clone());
         }
     }
 
@@ -391,16 +464,15 @@ impl Lowerer {
     }
 
     pub(super) fn type_spec_to_ir(&self, ts: &TypeSpecifier) -> IrType {
-        let ts = self.resolve_type_spec(ts);
         match ts {
             TypeSpecifier::Void => IrType::Void,
-            TypeSpecifier::Bool => IrType::U8, // _Bool is 1 byte, unsigned
+            TypeSpecifier::Bool => IrType::U8,
             TypeSpecifier::Char => IrType::I8,
             TypeSpecifier::UnsignedChar => IrType::U8,
             TypeSpecifier::Short => IrType::I16,
             TypeSpecifier::UnsignedShort => IrType::U16,
-            TypeSpecifier::Int => IrType::I32,
-            TypeSpecifier::UnsignedInt => IrType::U32,
+            TypeSpecifier::Int | TypeSpecifier::Signed => IrType::I32,
+            TypeSpecifier::UnsignedInt | TypeSpecifier::Unsigned => IrType::U32,
             TypeSpecifier::Long | TypeSpecifier::LongLong => IrType::I64,
             TypeSpecifier::UnsignedLong | TypeSpecifier::UnsignedLongLong => IrType::U64,
             TypeSpecifier::Int128 => IrType::I128,
@@ -408,17 +480,54 @@ impl Lowerer {
             TypeSpecifier::Float => IrType::F32,
             TypeSpecifier::Double => IrType::F64,
             TypeSpecifier::LongDouble => IrType::F128,
-            // Complex types are handled as aggregate (pointer to stack slot)
             TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble => IrType::Ptr,
             TypeSpecifier::Pointer(_) => IrType::Ptr,
             TypeSpecifier::Array(_, _) => IrType::Ptr,
             TypeSpecifier::Struct(..) | TypeSpecifier::Union(..) => IrType::Ptr,
             TypeSpecifier::Enum(_, _) => IrType::I32,
-            TypeSpecifier::TypedefName(_) => IrType::I64, // fallback for unresolved typedef
-            TypeSpecifier::Signed => IrType::I32,
-            TypeSpecifier::Unsigned => IrType::U32,
-            TypeSpecifier::Typeof(_) => IrType::I64, // fallback: typeof(expr) not resolved at IR level
+            TypeSpecifier::TypedefName(name) => {
+                // Resolve typedef through CType
+                if let Some(ctype) = self.types.typedefs.get(name) {
+                    Self::ctype_to_ir(ctype)
+                } else {
+                    IrType::I64 // fallback for unresolved typedef
+                }
+            }
+            TypeSpecifier::Typeof(expr) => {
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    Self::ctype_to_ir(&ctype)
+                } else {
+                    IrType::I64
+                }
+            }
             TypeSpecifier::TypeofType(inner) => self.type_spec_to_ir(inner),
+        }
+    }
+
+    /// Convert a CType to an IrType.
+    pub(super) fn ctype_to_ir(ctype: &CType) -> IrType {
+        match ctype {
+            CType::Void => IrType::Void,
+            CType::Bool => IrType::U8,
+            CType::Char => IrType::I8,
+            CType::UChar => IrType::U8,
+            CType::Short => IrType::I16,
+            CType::UShort => IrType::U16,
+            CType::Int => IrType::I32,
+            CType::UInt => IrType::U32,
+            CType::Long | CType::LongLong => IrType::I64,
+            CType::ULong | CType::ULongLong => IrType::U64,
+            CType::Int128 => IrType::I128,
+            CType::UInt128 => IrType::U128,
+            CType::Float => IrType::F32,
+            CType::Double => IrType::F64,
+            CType::LongDouble => IrType::F128,
+            CType::ComplexFloat | CType::ComplexDouble | CType::ComplexLongDouble => IrType::Ptr,
+            CType::Pointer(_) => IrType::Ptr,
+            CType::Array(_, _) => IrType::Ptr,
+            CType::Struct(_) | CType::Union(_) => IrType::Ptr,
+            CType::Enum(_) => IrType::I32,
+            CType::Function(_) => IrType::Ptr,
         }
     }
 
@@ -507,6 +616,13 @@ impl Lowerer {
     }
 
     pub(super) fn sizeof_type(&self, ts: &TypeSpecifier) -> usize {
+        // Handle TypedefName through CType
+        if let TypeSpecifier::TypedefName(name) = ts {
+            if let Some(ctype) = self.types.typedefs.get(name) {
+                return ctype.size_ctx(&self.types.struct_layouts);
+            }
+            return 8; // fallback
+        }
         let ts = self.resolve_type_spec(ts);
         if let Some((size, _)) = Self::scalar_type_size_align(ts) {
             return size;
@@ -522,6 +638,13 @@ impl Lowerer {
 
     /// Compute the alignment of a type in bytes (_Alignof).
     pub(super) fn alignof_type(&self, ts: &TypeSpecifier) -> usize {
+        // Handle TypedefName through CType
+        if let TypeSpecifier::TypedefName(name) = ts {
+            if let Some(ctype) = self.types.typedefs.get(name) {
+                return ctype.align_ctx(&self.types.struct_layouts);
+            }
+            return 8; // fallback
+        }
         let ts = self.resolve_type_spec(ts);
         if let Some((_, align)) = Self::scalar_type_size_align(ts) {
             return align;
@@ -589,7 +712,26 @@ impl Lowerer {
             strides.extend(Self::compute_strides_from_dims(&dims, base_elem_size));
             strides
         } else {
-            vec![]
+            // Fall back to CType for typedef'd pointer-to-array types
+            let ctype = self.type_spec_to_ctype(type_spec);
+            if let CType::Pointer(ref inner_ct) = ctype {
+                let mut dims: Vec<usize> = Vec::new();
+                let mut current_ct = inner_ct.as_ref();
+                while let CType::Array(elem_ct, size) = current_ct {
+                    dims.push(size.unwrap_or(1));
+                    current_ct = elem_ct.as_ref();
+                }
+                if dims.is_empty() {
+                    return vec![];
+                }
+                let base_elem_size = current_ct.size_ctx(&self.types.struct_layouts).max(1);
+                let full_size: usize = dims.iter().product::<usize>() * base_elem_size;
+                let mut strides = vec![full_size];
+                strides.extend(Self::compute_strides_from_dims(&dims, base_elem_size));
+                strides
+            } else {
+                vec![]
+            }
         }
     }
 
@@ -599,27 +741,34 @@ impl Lowerer {
     /// (stride for dim 0 = 3*4=12, stride for dim 1 = 4).
     pub(super) fn compute_decl_info(&self, ts: &TypeSpecifier, derived: &[DerivedDeclarator]) -> (usize, usize, bool, bool, Vec<usize>) {
         let ts = self.resolve_type_spec(ts);
+        // Resolve the type spec through CType for typedef detection
+        let resolved_ctype = self.type_spec_to_ctype(ts);
         // Check for pointer declarators (from derived or from the resolved type itself)
         let has_pointer = derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer))
-            || matches!(ts, TypeSpecifier::Pointer(_));
+            || matches!(ts, TypeSpecifier::Pointer(_))
+            || matches!(resolved_ctype, CType::Pointer(_));
 
-        let has_array = derived.iter().any(|d| matches!(d, DerivedDeclarator::Array(_)));
+        let has_array = derived.iter().any(|d| matches!(d, DerivedDeclarator::Array(_)))
+            || matches!(resolved_ctype, CType::Array(_, _));
 
         // Handle pointer and array combinations
         if has_pointer && !has_array {
             // Simple pointer: int *p, or typedef'd pointer (e.g., typedef struct Foo *FooPtr)
             let ptr_count = derived.iter().filter(|d| matches!(d, DerivedDeclarator::Pointer)).count();
             let elem_size = if let TypeSpecifier::Pointer(inner) = ts {
-                // Pointer is in the type spec itself (typedef'd pointer)
-                // If there are also pointer levels in derived, each derived pointer adds
-                // a level of indirection (e.g., typedef int *intptr; intptr *pp -> int **pp)
                 if ptr_count >= 1 {
-                    8 // element is a pointer itself
+                    8
                 } else {
-                    self.sizeof_type(self.resolve_type_spec(inner))
+                    self.sizeof_type(inner)
+                }
+            } else if let CType::Pointer(ref inner_ct) = resolved_ctype {
+                // Pointer from typedef resolution
+                if ptr_count >= 1 {
+                    8
+                } else {
+                    inner_ct.size_ctx(&self.types.struct_layouts)
                 }
             } else if ptr_count >= 2 {
-                // Multiple pointer levels (e.g., char **p): element type is a pointer (size 8)
                 8
             } else {
                 self.sizeof_type(ts)
@@ -641,7 +790,7 @@ impl Lowerer {
             // If pointer is from resolved type spec (not in derived), and array is in derived,
             // this is an array of typedef'd pointers
             let ptr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
-            let pointer_from_type_spec = ptr_pos.is_none() && matches!(ts, TypeSpecifier::Pointer(_));
+            let pointer_from_type_spec = ptr_pos.is_none() && (matches!(ts, TypeSpecifier::Pointer(_)) || matches!(resolved_ctype, CType::Pointer(_)));
 
             // Check if the outermost (last) derived element is an Array
             let last_is_array = matches!(derived.last(), Some(DerivedDeclarator::Array(_)));
@@ -728,16 +877,26 @@ impl Lowerer {
         // If the resolved type itself is an Array (e.g., va_list = Array(Char, 24),
         // or typedef'd multi-dimensional arrays like typedef int arr_t[2][3])
         // and there are no derived array declarators, handle it as an array type.
-        if !has_array && !has_pointer {
-            if let TypeSpecifier::Array(_, _) = ts {
-                // Collect all dimensions from nested Array types
+        let derived_has_array = derived.iter().any(|d| matches!(d, DerivedDeclarator::Array(_)));
+        if !derived_has_array && !has_pointer {
+            // Check both TypeSpecifier::Array and CType::Array (for typedef'd arrays)
+            let is_ts_array = matches!(ts, TypeSpecifier::Array(_, _));
+            let is_ctype_array = matches!(resolved_ctype, CType::Array(_, _));
+            if is_ts_array {
                 let all_dims = self.collect_type_array_dims(ts);
-                // Find the innermost (non-array) element type
                 let mut inner = ts;
                 while let TypeSpecifier::Array(elem, _) = inner {
                     inner = elem.as_ref();
                 }
                 let base_elem_size = self.sizeof_type(inner).max(1);
+                let total: usize = all_dims.iter().product::<usize>() * base_elem_size;
+                let strides = Self::compute_strides_from_dims(&all_dims, base_elem_size);
+                let elem_size = if strides.len() > 1 { strides[0] } else { base_elem_size };
+                return (total, elem_size, true, false, strides);
+            } else if is_ctype_array && !is_ts_array {
+                // Typedef'd array (e.g., va_list = CType::Array(Char, 24))
+                let all_dims = Self::collect_ctype_array_dims(&resolved_ctype);
+                let base_elem_size = Self::ctype_innermost_elem_size(&resolved_ctype, &self.types.struct_layouts);
                 let total: usize = all_dims.iter().product::<usize>() * base_elem_size;
                 let strides = Self::compute_strides_from_dims(&all_dims, base_elem_size);
                 let elem_size = if strides.len() > 1 { strides[0] } else { base_elem_size };
@@ -749,28 +908,25 @@ impl Lowerer {
         let array_dims = self.collect_derived_array_dims(derived);
 
         if !array_dims.is_empty() {
-            // If derived declarators include Function/FunctionPointer,
-            // the element type is a function pointer (8 bytes), not the return type.
             let has_func_ptr = derived.iter().any(|d| matches!(d,
                 DerivedDeclarator::Function(_, _) | DerivedDeclarator::FunctionPointer(_, _)));
-            // Also account for array dimensions in the type specifier itself
-            // e.g., if type is Array(Array(Int, 3), 2) from the parser,
-            // or from a typedef like: typedef unsigned char byte4_t[4];
-            let type_dims = self.collect_type_array_dims(ts);
+            // Account for array dimensions in the type specifier itself
+            // Check both TypeSpecifier::Array and CType::Array (for typedef'd arrays)
+            let type_dims = if matches!(ts, TypeSpecifier::Array(_, _)) {
+                self.collect_type_array_dims(ts)
+            } else if matches!(resolved_ctype, CType::Array(_, _)) {
+                Self::collect_ctype_array_dims(&resolved_ctype)
+            } else {
+                vec![]
+            };
 
             let base_elem_size = if has_func_ptr {
-                8 // function pointer size
+                8
             } else if !type_dims.is_empty() {
-                // When ts itself is an array type (from typedef), use the innermost
-                // element size, since collect_type_array_dims already extracts the
-                // array dimensions which will be included in all_dims.
-                let mut inner = ts;
-                while let TypeSpecifier::Array(elem, _) = inner {
-                    inner = elem.as_ref();
-                }
-                self.sizeof_type(inner).max(1)
+                // Use CType for innermost element size (works for both direct and typedef'd arrays)
+                Self::ctype_innermost_elem_size(&resolved_ctype, &self.types.struct_layouts)
             } else {
-                self.sizeof_type(ts).max(1)
+                resolved_ctype.size_ctx(&self.types.struct_layouts).max(1)
             };
 
             // Combine: derived dims come first (outermost), then type dims
@@ -794,10 +950,16 @@ impl Lowerer {
         if let Some(layout) = self.get_struct_layout_for_type(ts) {
             return (layout.size, 0, false, false, vec![]);
         }
+        // Also check CType for typedef'd structs/unions
+        if matches!(resolved_ctype, CType::Struct(_) | CType::Union(_)) {
+            if let Some(layout) = self.struct_layout_from_ctype(&resolved_ctype) {
+                return (layout.size, 0, false, false, vec![]);
+            }
+        }
 
         // Regular scalar - use sizeof_type for the allocation size
         // (8 bytes for most scalars, 16 for long double)
-        let scalar_size = self.sizeof_type(ts).max(8);
+        let scalar_size = resolved_ctype.size_ctx(&self.types.struct_layouts).max(8);
         (scalar_size, 0, false, false, vec![])
     }
 
@@ -813,11 +975,40 @@ impl Lowerer {
                     dims.push(n as usize);
                 }
                 current_owned = inner.as_ref().clone();
+            } else if let TypeSpecifier::TypedefName(name) = &resolved {
+                // Follow typedef to CType for typedef'd arrays
+                if let Some(ctype) = self.types.typedefs.get(name) {
+                    if matches!(ctype, CType::Array(_, _)) {
+                        dims.extend(Self::collect_ctype_array_dims(ctype));
+                    }
+                }
+                break;
             } else {
                 break;
             }
         }
         dims
+    }
+
+    /// Collect array dimensions from a CType::Array chain.
+    /// For CType::Array(CType::Array(Int, Some(3)), Some(2)), returns [2, 3].
+    fn collect_ctype_array_dims(ctype: &CType) -> Vec<usize> {
+        let mut dims = Vec::new();
+        let mut current = ctype;
+        while let CType::Array(inner, size) = current {
+            dims.push(size.unwrap_or(1));
+            current = inner.as_ref();
+        }
+        dims
+    }
+
+    /// Get the innermost element size for a CType::Array chain.
+    fn ctype_innermost_elem_size(ctype: &CType, layouts: &std::collections::HashMap<String, StructLayout>) -> usize {
+        let mut current = ctype;
+        while let CType::Array(inner, _) = current {
+            current = inner.as_ref();
+        }
+        current.size_ctx(layouts).max(1)
     }
 
     /// Map an element size in bytes to an appropriate IrType.
@@ -918,24 +1109,27 @@ impl Lowerer {
     }
 
     /// Convert a TypeSpecifier to CType (for struct layout computation).
+    /// TypedefName resolution is now direct: typedefs store CType values.
     pub(super) fn type_spec_to_ctype(&self, ts: &TypeSpecifier) -> CType {
-        // Before resolving, check if this is a function pointer typedef.
-        // resolve_type_spec loses function type info for function pointer typedefs
-        // (e.g., lua_Alloc resolves to Pointer(Void) instead of Pointer(Function(...))).
-        // We intercept here to produce the correct CType.
-        if let TypeSpecifier::TypedefName(tname) = ts {
-            if let Some(fptr_ctype) = self.build_function_pointer_ctype_from_typedef(tname) {
-                return fptr_ctype;
-            }
-        }
-        let ts = self.resolve_type_spec(ts);
         match ts {
+            // TypedefName: direct CType lookup (typedefs now store CType)
+            TypeSpecifier::TypedefName(tname) => {
+                // Check function pointer typedefs first (they carry richer type info)
+                if let Some(fptr_ctype) = self.build_function_pointer_ctype_from_typedef(tname) {
+                    return fptr_ctype;
+                }
+                // Direct CType lookup from typedef map
+                if let Some(ctype) = self.types.typedefs.get(tname) {
+                    return ctype.clone();
+                }
+                CType::Int // fallback for unresolved typedef
+            }
             TypeSpecifier::Void => CType::Void,
             TypeSpecifier::Char => CType::Char,
             TypeSpecifier::UnsignedChar => CType::UChar,
             TypeSpecifier::Short => CType::Short,
             TypeSpecifier::UnsignedShort => CType::UShort,
-            TypeSpecifier::Bool => CType::Bool, // _Bool: 1-byte unsigned, normalizes to 0 or 1 on store
+            TypeSpecifier::Bool => CType::Bool,
             TypeSpecifier::Int | TypeSpecifier::Signed => CType::Int,
             TypeSpecifier::UnsignedInt | TypeSpecifier::Unsigned => CType::UInt,
             TypeSpecifier::Long => CType::Long,
@@ -964,14 +1158,11 @@ impl Lowerer {
             TypeSpecifier::Union(name, fields, is_packed, pragma_pack, _) => {
                 self.struct_or_union_to_ctype(name, fields, true, *is_packed, *pragma_pack)
             }
-            TypeSpecifier::Enum(_, _) => CType::Int, // enums are int-sized
-            TypeSpecifier::TypedefName(_) => CType::Int, // TODO: resolve typedef
+            TypeSpecifier::Enum(_, _) => CType::Int,
             TypeSpecifier::Typeof(expr) => {
-                // typeof(expr): get type from expression
                 self.get_expr_ctype(expr).unwrap_or(CType::Int)
             }
             TypeSpecifier::TypeofType(inner_ts) => {
-                // typeof(type): just use the inner type
                 self.type_spec_to_ctype(inner_ts)
             }
         }
@@ -1241,7 +1432,7 @@ impl Lowerer {
     /// Convert ParamDecl list to CType list for function types.
     fn convert_param_decls_to_ctypes(&self, params: &[ParamDecl]) -> Vec<(CType, Option<String>)> {
         params.iter().map(|p| {
-            let ty = self.type_spec_to_ctype(&self.resolve_type_spec(&p.type_spec));
+            let ty = self.type_spec_to_ctype(&p.type_spec);
             (ty, p.name.clone())
         }).collect()
     }

@@ -13,24 +13,35 @@ impl Lowerer {
     /// For a pointer-to-struct parameter type (e.g., `struct TAG *p`), get the
     /// pointed-to struct's layout. This enables `p->field` access.
     pub(super) fn get_struct_layout_for_pointer_param(&self, type_spec: &TypeSpecifier) -> Option<StructLayout> {
-        // Resolve typedefs first (e.g., typedef union Outer *OuterPtr)
+        // Try TypeSpecifier match first
         let resolved = self.resolve_type_spec(type_spec);
         match resolved {
-            TypeSpecifier::Pointer(inner) => self.get_struct_layout_for_type(inner),
-            _ => None,
+            TypeSpecifier::Pointer(inner) => return self.get_struct_layout_for_type(inner),
+            _ => {}
         }
+        // Fall back to CType for typedef'd pointer types
+        let ctype = self.type_spec_to_ctype(type_spec);
+        if let CType::Pointer(inner) = &ctype {
+            return self.struct_layout_from_ctype(inner);
+        }
+        None
     }
 
     /// Compute the IR type of the pointee for a pointer/array type specifier.
-    /// For `Pointer(Char)`, returns Some(I8).
-    /// For `Pointer(Int)`, returns Some(I32).
-    /// For `Array(Int, _)`, returns Some(I32).
-    /// Resolves typedef names before pattern matching.
+    /// Resolves typedef names through CType.
     pub(super) fn pointee_ir_type(&self, type_spec: &TypeSpecifier) -> Option<IrType> {
+        // Try TypeSpecifier match first
         let resolved = self.resolve_type_spec(type_spec);
         match &resolved {
-            TypeSpecifier::Pointer(inner) => Some(self.type_spec_to_ir(inner)),
-            TypeSpecifier::Array(inner, _) => Some(self.type_spec_to_ir(inner)),
+            TypeSpecifier::Pointer(inner) => return Some(self.type_spec_to_ir(inner)),
+            TypeSpecifier::Array(inner, _) => return Some(self.type_spec_to_ir(inner)),
+            _ => {}
+        }
+        // Fall back to CType for typedef'd pointer/array types
+        let ctype = self.type_spec_to_ctype(type_spec);
+        match &ctype {
+            CType::Pointer(inner) => Some(Self::ctype_to_ir(inner)),
+            CType::Array(inner, _) => Some(Self::ctype_to_ir(inner)),
             _ => None,
         }
     }
@@ -213,8 +224,8 @@ impl Lowerer {
             }
             _ => {}
         }
-        // Fall back to the cached size in the CType itself
-        ctype.size()
+        // Fall back to size_ctx which handles struct/union types properly
+        ctype.size_ctx(&self.types.struct_layouts)
     }
 
     /// Get the element size for a pointer expression (for scaling in pointer arithmetic).
