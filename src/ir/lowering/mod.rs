@@ -6,5 +6,7 @@ pub mod types;
 pub mod structs;
 pub mod complex;
 pub mod global_init;
+pub mod global_init_bytes;
+pub mod global_init_compound;
 
 pub use lowering::Lowerer;
