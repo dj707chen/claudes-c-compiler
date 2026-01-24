@@ -125,9 +125,18 @@ fn find_promotable_allocas(func: &IrFunction) -> Vec<AllocaInfo> {
                         use_blocks.entry(ptr.0).or_default().insert(block_idx);
                     }
                 }
-                Instruction::Store { ptr, .. } => {
+                Instruction::Store { val, ptr, .. } => {
                     if candidate_set.contains(&ptr.0) && !disqualified.contains(&ptr.0) {
                         def_blocks.entry(ptr.0).or_default().insert(block_idx);
+                    }
+                    // If a candidate alloca value appears as the stored VALUE (not ptr),
+                    // it means the alloca's address is being used as data (e.g., array-to-pointer
+                    // decay: Y.p = local_array). This is an address-taken use and the alloca
+                    // must not be promoted, since promotion would lose the stack address.
+                    if let Operand::Value(v) = val {
+                        if candidate_set.contains(&v.0) {
+                            disqualified.insert(v.0);
+                        }
                     }
                 }
                 // Any other use of the alloca value disqualifies it
