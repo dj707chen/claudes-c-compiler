@@ -84,7 +84,7 @@ fn find_promotable_allocas(func: &IrFunction) -> Vec<AllocaInfo> {
         .instructions
         .iter()
         .filter_map(|inst| {
-            if let Instruction::Alloca { dest, ty, size } = inst {
+            if let Instruction::Alloca { dest, ty, size, .. } = inst {
                 let idx = alloca_index;
                 alloca_index += 1;
                 // Skip parameter allocas (first num_params allocas)
@@ -812,7 +812,7 @@ mod tests {
             label: "entry".to_string(),
             instructions: vec![
                 // %0 = alloca i32
-                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4 },
+                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 },
                 // store 42, %0
                 Instruction::Store {
                     val: Operand::Const(IrConst::I32(42)),
@@ -863,9 +863,9 @@ mod tests {
             label: "entry".to_string(),
             instructions: vec![
                 // %0 = alloca i32 (param)
-                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4 },
+                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 },
                 // %1 = alloca i32 (x)
-                Instruction::Alloca { dest: Value(1), ty: IrType::I32, size: 4 },
+                Instruction::Alloca { dest: Value(1), ty: IrType::I32, size: 4, align: 0 },
                 // %2 = load %0 (read param)
                 Instruction::Load { dest: Value(2), ptr: Value(0), ty: IrType::I32 },
                 // %3 = cmp ne %2, 0
@@ -941,7 +941,7 @@ mod tests {
         func.blocks.push(BasicBlock {
             label: "entry".to_string(),
             instructions: vec![
-                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4 },
+                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 },
                 Instruction::Store {
                     val: Operand::Const(IrConst::I32(42)),
                     ptr: Value(0),
@@ -983,8 +983,8 @@ mod tests {
         func.blocks.push(BasicBlock {
             label: "entry".to_string(),
             instructions: vec![
-                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4 }, // sum
-                Instruction::Alloca { dest: Value(1), ty: IrType::I32, size: 4 }, // i
+                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 }, // sum
+                Instruction::Alloca { dest: Value(1), ty: IrType::I32, size: 4, align: 0 }, // i
                 Instruction::Store { val: Operand::Const(IrConst::I32(0)), ptr: Value(0), ty: IrType::I32 },
                 Instruction::Store { val: Operand::Const(IrConst::I32(0)), ptr: Value(1), ty: IrType::I32 },
             ],

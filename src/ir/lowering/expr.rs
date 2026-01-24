@@ -496,7 +496,7 @@ impl Lowerer {
     fn lower_conditional(&mut self, cond: &Expr, then_expr: &Expr, else_expr: &Expr) -> Operand {
         let cond_val = self.lower_condition_expr(cond);
         let result_alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8 });
+        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8, align: 0 });
 
         let mut then_ty = self.get_expr_type(then_expr);
         let mut else_ty = self.get_expr_type(else_expr);
@@ -536,7 +536,7 @@ impl Lowerer {
     fn lower_gnu_conditional(&mut self, cond: &Expr, else_expr: &Expr) -> Operand {
         let cond_val = self.lower_expr(cond);
         let result_alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8 });
+        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8, align: 0 });
 
         let cond_ty = self.get_expr_type(cond);
         let else_ty = self.get_expr_type(else_expr);
@@ -639,7 +639,7 @@ impl Lowerer {
 
             // Allocate stack space for the union and zero-initialize it
             let alloca = self.fresh_value();
-            self.emit(Instruction::Alloca { dest: alloca, size: union_size, ty: IrType::Ptr });
+            self.emit(Instruction::Alloca { dest: alloca, size: union_size, ty: IrType::Ptr, align: 0 });
             self.zero_init_alloca(alloca, union_size);
 
             // Store source value at offset 0 (all union members share offset 0)
@@ -833,7 +833,7 @@ impl Lowerer {
         &mut self, type_spec: &TypeSpecifier, init: &Initializer, ty: IrType, size: usize,
     ) -> Value {
         let alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: alloca, size, ty });
+        self.emit(Instruction::Alloca { dest: alloca, size, ty, align: 0 });
         let struct_layout = self.get_struct_layout_for_type(type_spec);
         match init {
             Initializer::Expr(expr) => {
@@ -1035,7 +1035,7 @@ impl Lowerer {
 
     fn lower_short_circuit(&mut self, lhs: &Expr, rhs: &Expr, is_and: bool) -> Operand {
         let result_alloca = self.fresh_value();
-        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8 });
+        self.emit(Instruction::Alloca { dest: result_alloca, ty: IrType::I64, size: 8, align: 0 });
 
         let prefix = if is_and { "and" } else { "or" };
         let rhs_label = self.fresh_label(&format!("{}_rhs", prefix));

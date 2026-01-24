@@ -248,7 +248,7 @@ impl Lowerer {
                     let val = self.lower_expr(expr);
                     let alloca = self.fresh_value();
                     let alloc_size = if struct_size > 0 { struct_size } else { 8 };
-                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64 });
+                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0 });
                     self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 });
                     alloca
                 }
@@ -261,7 +261,7 @@ impl Lowerer {
                     let val = self.lower_expr(expr);
                     let alloca = self.fresh_value();
                     let alloc_size = if struct_size > 0 { struct_size } else { 8 };
-                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64 });
+                    self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: IrType::I64, align: 0 });
                     self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 });
                     alloca
                 } else {

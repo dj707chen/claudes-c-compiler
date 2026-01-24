@@ -71,6 +71,7 @@ impl Parser {
                 is_typedef: self.parsing_typedef,
                 is_const: self.parsing_const,
                 is_common: false,
+                alignment: None,
                 span: start,
             }));
         }
@@ -356,6 +357,7 @@ impl Parser {
             is_typedef,
             is_const: self.parsing_const,
             is_common,
+            alignment: None,
             span: start,
         }))
     }
@@ -379,7 +381,7 @@ impl Parser {
         // Handle bare type with semicolon (struct/enum/union definition)
         if matches!(self.peek(), TokenKind::Semicolon) {
             self.advance();
-            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_common: false, span: start });
+            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_common: false, alignment: None, span: start });
         }
 
         let mut mode_ti = false;
@@ -433,7 +435,8 @@ impl Parser {
         }
 
         self.expect(&TokenKind::Semicolon);
-        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_common: false, span: start })
+        let alignment = self.parsed_alignas.take();
+        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_common: false, alignment, span: start })
     }
 
     /// Parse an initializer: either a braced initializer list or a single expression.
@@ -522,8 +525,10 @@ impl Parser {
                     }
                 }
                 TokenKind::Attribute => {
-                    self.advance();
-                    self.skip_balanced_parens();
+                    let (_, aligned, _, _) = self.parse_gcc_attributes();
+                    if let Some(a) = aligned {
+                        self.parsed_alignas = Some(self.parsed_alignas.map_or(a, |prev| prev.max(a)));
+                    }
                 }
                 TokenKind::Extension => { self.advance(); }
                 _ => break,

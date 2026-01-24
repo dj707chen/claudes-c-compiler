@@ -558,9 +558,12 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
-        let space = calculate_stack_space_common(&mut self.state, func, 16, |space, alloc_size| {
+        let space = calculate_stack_space_common(&mut self.state, func, 16, |space, alloc_size, align| {
             // RISC-V uses negative offsets from s0 (frame pointer)
-            let new_space = space + ((alloc_size + 7) & !7).max(8);
+            // Honor alignment: round up space to alignment boundary before allocating
+            let effective_align = if align > 0 { align.max(8) } else { 8 };
+            let alloc = ((alloc_size + 7) & !7).max(8);
+            let new_space = ((space + alloc + effective_align - 1) / effective_align) * effective_align;
             (-(new_space as i64), new_space)
         });
 
@@ -1018,6 +1021,42 @@ impl ArchCodegen for RiscvCodegen {
         } else {
             self.emit_load_from_s0("t2", slot.0, "ld");
         }
+    }
+
+    fn emit_alloca_aligned_addr(&mut self, slot: StackSlot, val_id: u32) {
+        let align = self.state.alloca_over_align(val_id).unwrap();
+        // Compute s0 + slot_offset into t5 (pointer register)
+        self.emit_addi_s0("t5", slot.0);
+        // Align: t5 = (t5 + align-1) & -align
+        self.state.emit(&format!("    li t6, {}", align - 1));
+        self.state.emit("    add t5, t5, t6");
+        self.state.emit(&format!("    li t6, -{}", align));
+        self.state.emit("    and t5, t5, t6");
+    }
+
+    fn emit_alloca_aligned_addr_to_acc(&mut self, slot: StackSlot, val_id: u32) {
+        let align = self.state.alloca_over_align(val_id).unwrap();
+        // Compute s0 + slot_offset into t0 (accumulator)
+        self.emit_addi_s0("t0", slot.0);
+        // Align: t0 = (t0 + align-1) & -align
+        self.state.emit(&format!("    li t6, {}", align - 1));
+        self.state.emit("    add t0, t0, t6");
+        self.state.emit(&format!("    li t6, -{}", align));
+        self.state.emit("    and t0, t0, t6");
+    }
+
+    fn emit_acc_to_secondary(&mut self) {
+        self.state.emit("    mv t1, t0");
+    }
+
+    fn emit_memcpy_store_dest_from_acc(&mut self) {
+        // Move from pointer register (t5) to memcpy dest register (t1)
+        self.state.emit("    mv t1, t5");
+    }
+
+    fn emit_memcpy_store_src_from_acc(&mut self) {
+        // Move from pointer register (t5) to memcpy src register (t2)
+        self.state.emit("    mv t2, t5");
     }
 
     fn emit_memcpy_impl(&mut self, size: usize) {

@@ -1077,7 +1077,7 @@ impl Lowerer {
             if uses_sret && i == 0 {
                 // Emit alloca for hidden sret pointer, don't register as local
                 let alloca = self.fresh_value();
-                self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8 });
+                self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8, align: 0 });
                 self.current_sret_ptr = Some(alloca);
                 continue;
             }
@@ -1098,6 +1098,7 @@ impl Lowerer {
                     dest: alloca,
                     ty: IrType::F64,
                     size: 8,
+                    align: 0,
                 });
                 let orig_name = func.params[orig_idx].name.clone().unwrap_or_default();
                 let ct = self.type_spec_to_ctype(&func.params[orig_idx].type_spec);
@@ -1134,6 +1135,7 @@ impl Lowerer {
                     dest: alloca,
                     ty,
                     size: ty.size(),
+                    align: 0,
                 });
 
                 // Determine if this is the real or imag part based on the param name suffix
@@ -1173,6 +1175,7 @@ impl Lowerer {
                     dest: alloca,
                     ty,
                     size: param_size,
+                    align: 0,
                 });
 
                 if is_struct_param || is_complex_param {
@@ -1290,6 +1293,7 @@ impl Lowerer {
                 dest: struct_alloca,
                 ty: IrType::Ptr,
                 size: sp.struct_size,
+                align: 0,
             });
 
             // Load the incoming pointer from the ptr_alloca (stored by emit_store_params)
@@ -1341,6 +1345,7 @@ impl Lowerer {
                 dest: complex_alloca,
                 ty: IrType::Ptr,
                 size: complex_size,
+                align: 0,
             });
 
             // Load real part from its param alloca
@@ -1429,6 +1434,7 @@ impl Lowerer {
                             dest: f32_alloca,
                             ty: IrType::F32,
                             size: 4,
+                            align: 0,
                         });
                         // Store F32 value
                         self.emit(Instruction::Store {

@@ -1,0 +1,15 @@
+Fix typeof(expr) type computation for binary expressions
+
+Bug: typeof(expr) where expr is a binary arithmetic expression between
+non-pointer types (e.g., typeof(1.0 + 2.0), typeof(x + 1.0) where x is int)
+returns CType::Int instead of applying the C "usual arithmetic conversions".
+
+Root cause: get_binop_ctype() in expr_types.rs only handles pointer arithmetic
+(Add/Sub with pointers) and returns None for all other binary operations. When
+get_expr_ctype returns None for a typeof expression, the fallback is CType::Int.
+
+Fix: Add usual arithmetic conversion logic to get_binop_ctype for non-pointer
+arithmetic operations (Add, Sub, Mul, Div, Mod) and return the promoted type.
+Also handle comparison/logical/bitwise operators which return CType::Int.
+
+This affects all architectures since the bug is in the IR lowering type resolution.

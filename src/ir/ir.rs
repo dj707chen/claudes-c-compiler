@@ -90,7 +90,8 @@ pub struct Value(pub u32);
 #[derive(Debug, Clone)]
 pub enum Instruction {
     /// Allocate stack space: %dest = alloca ty
-    Alloca { dest: Value, ty: IrType, size: usize },
+    /// `align` is the alignment override (0 means use default platform alignment).
+    Alloca { dest: Value, ty: IrType, size: usize, align: usize },
 
     /// Dynamic stack allocation: %dest = dynalloca size_operand, align
     /// Used for __builtin_alloca - adjusts stack pointer at runtime.

@@ -29,6 +29,8 @@ pub struct CodegenState {
     pub alloca_values: HashSet<u32>,
     /// Type associated with each alloca (for type-aware loads/stores).
     pub alloca_types: HashMap<u32, IrType>,
+    /// Alloca values that need runtime alignment > 16 bytes.
+    pub alloca_alignments: HashMap<u32, usize>,
     /// Values that are 128-bit integers (need 16-byte copy).
     pub i128_values: HashSet<u32>,
     /// Counter for generating unique labels (e.g., memcpy loops).
@@ -48,6 +50,7 @@ impl CodegenState {
             value_locations: HashMap::new(),
             alloca_values: HashSet::new(),
             alloca_types: HashMap::new(),
+            alloca_alignments: HashMap::new(),
             i128_values: HashSet::new(),
             label_counter: 0,
             pic_mode: false,
@@ -76,7 +79,13 @@ impl CodegenState {
         self.value_locations.clear();
         self.alloca_values.clear();
         self.alloca_types.clear();
+        self.alloca_alignments.clear();
         self.i128_values.clear();
+    }
+
+    /// Get the over-alignment requirement for an alloca (> 16 bytes), or None.
+    pub fn alloca_over_align(&self, v: u32) -> Option<usize> {
+        self.alloca_alignments.get(&v).copied()
     }
 
     pub fn is_alloca(&self, v: u32) -> bool {
@@ -144,6 +153,13 @@ pub trait ArchCodegen {
     /// Store the primary accumulator to a value's stack slot.
     fn emit_store_result(&mut self, dest: &Value);
 
+    /// Compute the runtime-aligned address of an over-aligned alloca into the
+    /// pointer register (same register used by emit_load_ptr_from_slot: rcx on x86).
+    fn emit_alloca_aligned_addr(&mut self, slot: StackSlot, val_id: u32);
+
+    /// Compute aligned alloca address into the accumulator (rax/x0/a0).
+    fn emit_alloca_aligned_addr_to_acc(&mut self, slot: StackSlot, val_id: u32);
+
     /// Emit a store instruction: store val to the address in ptr.
     /// Default implementation uses i128 pair ops and slot primitives.
     fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
@@ -151,7 +167,13 @@ pub trait ArchCodegen {
             self.emit_load_acc_pair(val);
             if let Some(slot) = self.state_ref().get_slot(ptr.0) {
                 if self.state_ref().is_alloca(ptr.0) {
-                    self.emit_store_pair_to_slot(slot);
+                    if self.state_ref().alloca_over_align(ptr.0).is_some() {
+                        self.emit_save_acc_pair();
+                        self.emit_alloca_aligned_addr(slot, ptr.0);
+                        self.emit_store_pair_indirect();
+                    } else {
+                        self.emit_store_pair_to_slot(slot);
+                    }
                 } else {
                     self.emit_save_acc_pair();
                     self.emit_load_ptr_from_slot(slot);
@@ -164,7 +186,13 @@ pub trait ArchCodegen {
         if let Some(slot) = self.state_ref().get_slot(ptr.0) {
             let store_instr = self.store_instr_for_type(ty);
             if self.state_ref().is_alloca(ptr.0) {
-                self.emit_typed_store_to_slot(store_instr, ty, slot);
+                if self.state_ref().alloca_over_align(ptr.0).is_some() {
+                    self.emit_save_acc();
+                    self.emit_alloca_aligned_addr(slot, ptr.0);
+                    self.emit_typed_store_indirect(store_instr, ty);
+                } else {
+                    self.emit_typed_store_to_slot(store_instr, ty, slot);
+                }
             } else {
                 self.emit_save_acc();
                 self.emit_load_ptr_from_slot(slot);
@@ -179,7 +207,12 @@ pub trait ArchCodegen {
         if is_i128_type(ty) {
             if let Some(slot) = self.state_ref().get_slot(ptr.0) {
                 if self.state_ref().is_alloca(ptr.0) {
-                    self.emit_load_pair_from_slot(slot);
+                    if self.state_ref().alloca_over_align(ptr.0).is_some() {
+                        self.emit_alloca_aligned_addr(slot, ptr.0);
+                        self.emit_load_pair_indirect();
+                    } else {
+                        self.emit_load_pair_from_slot(slot);
+                    }
                 } else {
                     self.emit_load_ptr_from_slot(slot);
                     self.emit_load_pair_indirect();
@@ -191,7 +224,12 @@ pub trait ArchCodegen {
         if let Some(slot) = self.state_ref().get_slot(ptr.0) {
             let load_instr = self.load_instr_for_type(ty);
             if self.state_ref().is_alloca(ptr.0) {
-                self.emit_typed_load_from_slot(load_instr, slot);
+                if self.state_ref().alloca_over_align(ptr.0).is_some() {
+                    self.emit_alloca_aligned_addr(slot, ptr.0);
+                    self.emit_typed_load_indirect(load_instr);
+                } else {
+                    self.emit_typed_load_from_slot(load_instr, slot);
+                }
             } else {
                 self.emit_load_ptr_from_slot(slot);
                 self.emit_typed_load_indirect(load_instr);
@@ -273,12 +311,21 @@ pub trait ArchCodegen {
     fn emit_gep(&mut self, dest: &Value, base: &Value, offset: &Operand) {
         if let Some(slot) = self.state_ref().get_slot(base.0) {
             let is_alloca = self.state_ref().is_alloca(base.0);
-            self.emit_slot_addr_to_secondary(slot, is_alloca);
+            if is_alloca && self.state_ref().alloca_over_align(base.0).is_some() {
+                // Over-aligned: compute aligned addr to acc, save to secondary
+                self.emit_alloca_aligned_addr_to_acc(slot, base.0);
+                self.emit_acc_to_secondary();
+            } else {
+                self.emit_slot_addr_to_secondary(slot, is_alloca);
+            }
         }
         self.emit_load_operand(offset);
         self.emit_add_secondary_to_acc();
         self.emit_store_result(dest);
     }
+
+    /// Move accumulator to secondary register (push on x86).
+    fn emit_acc_to_secondary(&mut self);
 
     /// Emit architecture-specific instructions for a type cast, after the source
     /// value has been loaded into the accumulator. Does NOT load/store—only emits
@@ -298,14 +345,29 @@ pub trait ArchCodegen {
     fn emit_memcpy(&mut self, dest: &Value, src: &Value, size: usize) {
         if let Some(dst_slot) = self.state_ref().get_slot(dest.0) {
             let is_alloca = self.state_ref().is_alloca(dest.0);
-            self.emit_memcpy_load_dest_addr(dst_slot, is_alloca);
+            if is_alloca && self.state_ref().alloca_over_align(dest.0).is_some() {
+                self.emit_alloca_aligned_addr(dst_slot, dest.0);
+                self.emit_memcpy_store_dest_from_acc();
+            } else {
+                self.emit_memcpy_load_dest_addr(dst_slot, is_alloca);
+            }
         }
         if let Some(src_slot) = self.state_ref().get_slot(src.0) {
             let is_alloca = self.state_ref().is_alloca(src.0);
-            self.emit_memcpy_load_src_addr(src_slot, is_alloca);
+            if is_alloca && self.state_ref().alloca_over_align(src.0).is_some() {
+                self.emit_alloca_aligned_addr(src_slot, src.0);
+                self.emit_memcpy_store_src_from_acc();
+            } else {
+                self.emit_memcpy_load_src_addr(src_slot, is_alloca);
+            }
         }
         self.emit_memcpy_impl(size);
     }
+
+    /// Store accumulator to memcpy dest register (after computing aligned addr).
+    fn emit_memcpy_store_dest_from_acc(&mut self);
+    /// Store accumulator to memcpy src register (after computing aligned addr).
+    fn emit_memcpy_store_src_from_acc(&mut self);
 
     /// Emit va_arg: extract next variadic argument from va_list and store to dest.
     fn emit_va_arg(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType);
@@ -805,23 +867,30 @@ pub fn calculate_stack_space_common(
     state: &mut CodegenState,
     func: &IrFunction,
     initial_offset: i64,
-    assign_slot: impl Fn(i64, i64) -> (i64, i64),
+    assign_slot: impl Fn(i64, i64, i64) -> (i64, i64),
 ) -> i64 {
     let mut space = initial_offset;
     for block in &func.blocks {
         for inst in &block.instructions {
-            if let Instruction::Alloca { dest, size, ty, .. } = inst {
+            if let Instruction::Alloca { dest, size, ty, align } = inst {
+                let effective_align = *align;
+                // For over-aligned allocas (> 16), over-allocate by align-1 bytes
+                // so runtime alignment can find a properly aligned address within the slot.
+                let extra = if effective_align > 16 { effective_align - 1 } else { 0 };
                 let raw_size = if *size == 0 { 8 } else { *size as i64 };
-                let (slot, new_space) = assign_slot(space, raw_size);
+                let (slot, new_space) = assign_slot(space, raw_size + extra as i64, *align as i64);
                 state.value_locations.insert(dest.0, StackSlot(slot));
                 state.alloca_values.insert(dest.0);
                 state.alloca_types.insert(dest.0, *ty);
+                if effective_align > 16 {
+                    state.alloca_alignments.insert(dest.0, effective_align);
+                }
                 space = new_space;
             } else if let Some(dest) = inst.dest() {
                 // Use 16-byte slots for I128/U128 result types, 8 bytes for everything else
                 let is_i128 = matches!(inst.result_type(), Some(IrType::I128) | Some(IrType::U128));
                 let slot_size = if is_i128 { 16 } else { 8 };
-                let (slot, new_space) = assign_slot(space, slot_size);
+                let (slot, new_space) = assign_slot(space, slot_size, 0);
                 state.value_locations.insert(dest.0, StackSlot(slot));
                 if is_i128 {
                     state.i128_values.insert(dest.0);

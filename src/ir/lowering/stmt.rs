@@ -48,6 +48,7 @@ impl Lowerer {
                 is_extern: decl.is_extern,
                 is_const: decl.is_const,
                 is_common: decl.is_common,
+                alignment: decl.alignment,
                 span: decl.span,
             };
             &resolved_decl
@@ -122,6 +123,7 @@ impl Lowerer {
                 dest: alloca,
                 ty: if da.is_array || da.is_struct || is_complex { IrType::Ptr } else { da.var_ty },
                 size: da.actual_alloc_size,
+                align: decl.alignment.unwrap_or(0),
             });
             let mut local_info = LocalInfo::from_analysis(&da, alloca);
             local_info.vla_size = vla_size;
@@ -710,6 +712,7 @@ impl Lowerer {
                     dest: switch_alloca,
                     ty: IrType::I64,
                     size: 8,
+                    align: 0,
                 });
                 self.emit(Instruction::Store {
                     val,

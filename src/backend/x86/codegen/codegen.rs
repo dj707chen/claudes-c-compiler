@@ -884,9 +884,12 @@ impl ArchCodegen for X86Codegen {
             .filter(|p| p.ty.is_long_double())
             .count() * 16;
 
-        let mut space = calculate_stack_space_common(&mut self.state, func, 0, |space, alloc_size| {
+        let mut space = calculate_stack_space_common(&mut self.state, func, 0, |space, alloc_size, align| {
             // x86 uses negative offsets from rbp
-            let new_space = space + ((alloc_size + 7) & !7);
+            // Honor alignment: round up space to alignment boundary before allocating
+            let effective_align = if align > 0 { align.max(8) } else { 8 };
+            let alloc = (alloc_size + 7) & !7;
+            let new_space = ((space + alloc + effective_align - 1) / effective_align) * effective_align;
             (-new_space, new_space)
         });
 
@@ -1182,6 +1185,32 @@ impl ArchCodegen for X86Codegen {
         } else {
             self.state.emit(&format!("    movq {}(%rbp), %rsi", slot.0));
         }
+    }
+
+    fn emit_alloca_aligned_addr(&mut self, slot: StackSlot, val_id: u32) {
+        let align = self.state.alloca_over_align(val_id).unwrap();
+        self.state.emit(&format!("    leaq {}(%rbp), %rcx", slot.0));
+        self.state.emit(&format!("    addq ${}, %rcx", align - 1));
+        self.state.emit(&format!("    andq ${}, %rcx", -(align as i64)));
+    }
+
+    fn emit_alloca_aligned_addr_to_acc(&mut self, slot: StackSlot, val_id: u32) {
+        let align = self.state.alloca_over_align(val_id).unwrap();
+        self.state.emit(&format!("    leaq {}(%rbp), %rax", slot.0));
+        self.state.emit(&format!("    addq ${}, %rax", align - 1));
+        self.state.emit(&format!("    andq ${}, %rax", -(align as i64)));
+    }
+
+    fn emit_acc_to_secondary(&mut self) {
+        self.state.emit("    pushq %rax");
+    }
+
+    fn emit_memcpy_store_dest_from_acc(&mut self) {
+        self.state.emit("    movq %rcx, %rdi");
+    }
+
+    fn emit_memcpy_store_src_from_acc(&mut self) {
+        self.state.emit("    movq %rcx, %rsi");
     }
 
     fn emit_memcpy_impl(&mut self, size: usize) {

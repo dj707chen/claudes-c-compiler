@@ -584,10 +584,12 @@ impl ArchCodegen for ArmCodegen {
     fn function_type_directive(&self) -> &'static str { "%function" }
 
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
-        let mut space = calculate_stack_space_common(&mut self.state, func, 16, |space, alloc_size| {
+        let mut space = calculate_stack_space_common(&mut self.state, func, 16, |space, alloc_size, align| {
             // ARM uses positive offsets from sp, starting at 16 (after fp/lr)
-            let slot = space;
-            let new_space = space + ((alloc_size + 7) & !7).max(8);
+            // Honor alignment: round up slot offset to alignment boundary
+            let effective_align = if align > 0 { align.max(8) } else { 8 };
+            let slot = (space + effective_align - 1) & !(effective_align - 1);
+            let new_space = slot + ((alloc_size + 7) & !7).max(8);
             (slot, new_space)
         });
 
@@ -974,6 +976,42 @@ impl ArchCodegen for ArmCodegen {
         } else {
             self.emit_load_from_sp("x10", slot.0, "ldr");
         }
+    }
+
+    fn emit_alloca_aligned_addr(&mut self, slot: StackSlot, val_id: u32) {
+        let align = self.state.alloca_over_align(val_id).unwrap();
+        // Compute sp + slot_offset into x9 (pointer register)
+        self.emit_add_sp_offset("x9", slot.0);
+        // Align: x9 = (x9 + align-1) & -align
+        self.load_large_imm("x17", (align - 1) as i64);
+        self.state.emit("    add x9, x9, x17");
+        self.load_large_imm("x17", -(align as i64));
+        self.state.emit("    and x9, x9, x17");
+    }
+
+    fn emit_alloca_aligned_addr_to_acc(&mut self, slot: StackSlot, val_id: u32) {
+        let align = self.state.alloca_over_align(val_id).unwrap();
+        // Compute sp + slot_offset into x0 (accumulator)
+        self.emit_add_sp_offset("x0", slot.0);
+        // Align: x0 = (x0 + align-1) & -align
+        self.load_large_imm("x17", (align - 1) as i64);
+        self.state.emit("    add x0, x0, x17");
+        self.load_large_imm("x17", -(align as i64));
+        self.state.emit("    and x0, x0, x17");
+    }
+
+    fn emit_acc_to_secondary(&mut self) {
+        self.state.emit("    mov x1, x0");
+    }
+
+    fn emit_memcpy_store_dest_from_acc(&mut self) {
+        // x9 already has the aligned addr from emit_alloca_aligned_addr
+        // (which puts result in x9, the pointer/memcpy-dest register)
+    }
+
+    fn emit_memcpy_store_src_from_acc(&mut self) {
+        // Move from pointer register (x9) to memcpy src register (x10)
+        self.state.emit("    mov x10, x9");
     }
 
     fn emit_memcpy_impl(&mut self, size: usize) {

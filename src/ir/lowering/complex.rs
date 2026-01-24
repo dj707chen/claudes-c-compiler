@@ -51,6 +51,7 @@ impl Lowerer {
             dest: alloca,
             ty: IrType::Ptr,
             size,
+            align: 0,
         });
         alloca
     }

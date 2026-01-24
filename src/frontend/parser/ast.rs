@@ -50,6 +50,8 @@ pub struct Declaration {
     pub is_typedef: bool,
     pub is_const: bool,
     pub is_common: bool,
+    /// Alignment override from _Alignas(N) or __attribute__((aligned(N))).
+    pub alignment: Option<usize>,
     pub span: Span,
 }
 
@@ -64,6 +66,7 @@ impl Declaration {
             is_typedef: false,
             is_const: false,
             is_common: false,
+            alignment: None,
             span: Span::dummy(),
         }
     }

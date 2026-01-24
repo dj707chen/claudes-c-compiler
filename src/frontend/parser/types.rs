@@ -82,8 +82,11 @@ impl Parser {
                 }
                 // GNU extensions
                 TokenKind::Attribute => {
-                    let (_, _, mode_ti, _) = self.parse_gcc_attributes();
+                    let (_, aligned, mode_ti, _) = self.parse_gcc_attributes();
                     has_mode_ti = has_mode_ti || mode_ti;
+                    if let Some(a) = aligned {
+                        self.parsed_alignas = Some(self.parsed_alignas.map_or(a, |prev| prev.max(a)));
+                    }
                     // parse_gcc_attributes already sets self.parsing_constructor/destructor
                 }
                 TokenKind::Extension => {

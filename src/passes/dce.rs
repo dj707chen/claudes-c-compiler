@@ -246,7 +246,7 @@ mod tests {
         func.blocks.push(BasicBlock {
             label: "entry".to_string(),
             instructions: vec![
-                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4 },
+                Instruction::Alloca { dest: Value(0), ty: IrType::I32, size: 4, align: 0 },
                 // Dead instruction: result %1 is never used
                 Instruction::BinOp {
                     dest: Value(1),

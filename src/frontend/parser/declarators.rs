@@ -21,7 +21,11 @@ impl Parser {
     pub(super) fn parse_declarator_with_attrs(&mut self) -> (Option<String>, Vec<DerivedDeclarator>, bool, bool, Option<usize>) {
         let mut derived = Vec::new();
 
-        self.skip_gcc_extensions();
+        let mut pre_aligned: Option<usize> = None;
+        let (_, pre_align, _, _) = self.parse_gcc_attributes();
+        if let Some(a) = pre_align {
+            pre_aligned = Some(pre_aligned.map_or(a, |prev: usize| prev.max(a)));
+        }
 
         // Parse pointer(s) with optional qualifiers and attributes
         while self.consume_if(&TokenKind::Star) {
@@ -77,7 +81,13 @@ impl Parser {
         // Combine using inside-out rule
         let combined = self.combine_declarator_parts(derived, inner_derived, outer_suffixes);
 
-        let (_, aligned, has_mode_ti, has_common) = self.parse_gcc_attributes();
+        let (_, post_aligned, has_mode_ti, has_common) = self.parse_gcc_attributes();
+        let aligned = match (pre_aligned, post_aligned) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
 
         (name, combined, has_mode_ti, has_common, aligned)
     }
