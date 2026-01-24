@@ -1,0 +1,19 @@
+Fix stack alignment for variables with _Alignas / __attribute__((aligned(N)))
+
+Struct member alignment is now fixed (per-field _Alignas and aligned attribute
+flow through to struct layout computation). But local variables with alignment
+attributes are NOT yet aligned on the stack.
+
+Examples that fail:
+  _Alignas(16) int x;           // stack variable not 16-byte aligned
+  int y __attribute__((aligned(32)));  // same issue
+
+This requires codegen changes:
+1. Track alignment requirements on alloca/stack slots in the IR
+2. In each backend's stack frame layout, ensure aligned variables get
+   appropriate padding so their stack offsets satisfy alignment requirements
+3. May need to dynamically align the stack pointer for very large alignments
+   (e.g., aligned(256)) using AND masking on the frame pointer
+
+Failing tests: compiler_suite_0103_* (local variable alignment checks),
+gcc_torture_stkalign (uses alloca with alignment)
