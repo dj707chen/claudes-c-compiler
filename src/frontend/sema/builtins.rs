@@ -165,6 +165,14 @@ static BUILTIN_MAP: LazyLock<HashMap<&'static str, BuiltinInfo>> = LazyLock::new
     // Complex construction
     m.insert("__builtin_complex", BuiltinInfo::intrinsic(BuiltinIntrinsic::ComplexConstruct));
 
+    // Variadic argument builtins - these are handled specially in IR lowering
+    // (expr.rs try_lower_builtin_call), but must be registered here so sema
+    // does not emit "implicit declaration" warnings. Those warnings break
+    // configure scripts that check stderr for errors (e.g., zlib).
+    m.insert("__builtin_va_start", BuiltinInfo::intrinsic(BuiltinIntrinsic::VaStart));
+    m.insert("__builtin_va_end", BuiltinInfo::intrinsic(BuiltinIntrinsic::VaEnd));
+    m.insert("__builtin_va_copy", BuiltinInfo::intrinsic(BuiltinIntrinsic::VaCopy));
+
     m
 });
 
@@ -223,6 +231,12 @@ pub enum BuiltinIntrinsic {
     Alloca,
     /// __builtin_complex(real, imag) -> construct complex number
     ComplexConstruct,
+    /// __builtin_va_start(ap, last) -> initialize va_list (lowered specially in IR)
+    VaStart,
+    /// __builtin_va_end(ap) -> cleanup va_list (lowered specially in IR)
+    VaEnd,
+    /// __builtin_va_copy(dest, src) -> copy va_list (lowered specially in IR)
+    VaCopy,
 }
 
 impl BuiltinInfo {

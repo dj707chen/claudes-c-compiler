@@ -1226,6 +1226,11 @@ impl Lowerer {
                             Some(Operand::Const(IrConst::I64(0)))
                         }
                     }
+                    // va_start/va_end/va_copy are handled by name-match earlier in
+                    // try_lower_builtin_call and should never reach this point
+                    BuiltinIntrinsic::VaStart | BuiltinIntrinsic::VaEnd | BuiltinIntrinsic::VaCopy => {
+                        unreachable!("va builtins handled earlier by name match")
+                    }
                 }
             }
         }

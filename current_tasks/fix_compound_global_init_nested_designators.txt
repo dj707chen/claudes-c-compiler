@@ -1,0 +1,18 @@
+Fix nested designator handling in compound global initialization path.
+
+Bug: When a struct containing a union is globally initialized with mixed positional
+and designated initializers (e.g., struct S a = {2, .u.keyword={"hello", -5}}),
+the compound initialization path (lower_struct_global_init_compound) discards
+nested designators during the emission phase. The first designator is used
+correctly to identify the field, but remaining designators (e.g., .keyword
+after .u) are lost when emit_compound_field_init is called.
+
+This causes the brace-enclosed initializer to be treated as positional for
+the wrong union member, resulting in lost/zeroed fields.
+
+Fix: Add nested designator handling to the emission phase of
+lower_struct_global_init_compound, similar to how global_init_bytes.rs
+handles it via fill_nested_designator_composite.
+
+Impact: Fixes redis-server segfault on startup (corrupted command table)
+and likely other struct initialization bugs with complex designated initializers.

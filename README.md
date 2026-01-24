@@ -56,6 +56,13 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Suppress va_start/va_end/va_copy implicit declaration warnings**: Registered `__builtin_va_start`,
+  `__builtin_va_end`, and `__builtin_va_copy` in the sema builtin map so they are recognized as valid
+  builtins. Previously these produced "implicit declaration" warnings on stderr, which caused configure
+  scripts (like zlib's) that check for any compiler output to incorrectly detect features as unavailable.
+  Specifically, zlib's configure set `-DNO_vsnprintf -DHAS_vsprintf_void` because the `va_start` warning
+  made it think vsnprintf was broken, causing the `gzprintf` self-test to fail. This fix makes zlib fully
+  pass all tests and may improve configure detection in other projects.
 - **128-bit function return value fix**: Fixed `maybe_narrow_call_result` to exclude I128/U128
   types from the sub-64-bit narrowing cast. Previously, 128-bit return values from function calls
   had their high 64 bits destroyed by a spurious `cqto` sign-extension (cast from I64 to I128).
@@ -164,8 +171,8 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 | Project | Status | Notes |
 |---------|--------|-------|
 | lua | PASS | All 6 tests pass |
-| zlib | PASS | Build + self-test + minigzip roundtrip pass |
-| mbedtls | PARTIAL | Library builds; selftest: md5/sha/aes/gcm/mpi pass, rsa sign fails, ecp segfault |
+| zlib | PASS | Build + self-test + minigzip roundtrip all pass (configure now correctly detects vsnprintf) |
+| mbedtls | PARTIAL | Library builds; selftest: md5/sha256/sha512/aes pass; rsa/ecp fail |
 | libpng | PASS | Builds and pngtest passes |
 | jq | PARTIAL | Builds; 139/447 jq.test pass, 0 crashes (was segfaulting on all queries) |
 | sqlite | PARTIAL | Builds; 573/622 (92%) sqllogictest pass |
