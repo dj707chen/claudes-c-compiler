@@ -1,5 +1,0 @@
-Fix PostgreSQL initdb runtime crash
-
-PostgreSQL builds with CCC but initdb crashes at runtime.
-Investigating the crash in MemoryContextAllocZero and fixing
-whatever compiler bug causes it.
