@@ -1,0 +1,18 @@
+Fix typedef'd pointer type array sizeof and global BSS size
+
+Bug: When declaring an array of a typedef'd pointer type, e.g.:
+  typedef struct Foo *FooPtr;
+  FooPtr arr[10];
+
+The compiler treats sizeof(arr) as sizeof(FooPtr) = 8, instead of
+10 * sizeof(FooPtr) = 80. This causes global BSS allocations to be
+too small, leading to overlapping symbols and memory corruption.
+
+This is a critical bug affecting PostgreSQL's initdb bootstrap, where
+Form_pg_attribute attrtypes[MAXATTR] (a typedef'd pointer array)
+gets only 8 bytes instead of 320, causing adjacent globals to overlap
+and corrupting pointer values to small integers like 0x1 or 0x2.
+
+Root cause: The parser/type system loses the array dimension when the
+base type is a typedef'd pointer. The CType for the array variable
+becomes just a pointer instead of an array-of-pointers.
