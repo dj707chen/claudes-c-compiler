@@ -2015,10 +2015,19 @@ impl Lowerer {
 
         // For array-of-pointers (int *arr[N]) or array-of-function-pointers,
         // the element type is Ptr, not the base type.
+        // Also detect typedef'd pointer arrays: typedef int *intptr_t; intptr_t arr[N];
+        // where the pointer is in the resolved type spec, not in derived declarators.
         let is_array_of_pointers = is_array && {
             let ptr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
             let arr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Array(_)));
-            matches!((ptr_pos, arr_pos), (Some(pp), Some(ap)) if pp < ap)
+            let has_derived_ptr_before_arr = matches!((ptr_pos, arr_pos), (Some(pp), Some(ap)) if pp < ap);
+            // Check if the type spec itself resolves to a pointer type (typedef'd pointer)
+            // and there's an array in derived but no pointer in derived
+            let typedef_ptr_array = ptr_pos.is_none() && arr_pos.is_some() && {
+                let resolved = self.resolve_type_spec(type_spec);
+                matches!(resolved, TypeSpecifier::Pointer(_))
+            };
+            has_derived_ptr_before_arr || typedef_ptr_array
         };
         let is_array_of_func_ptrs = is_array && derived.iter().any(|d|
             matches!(d, DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _)));

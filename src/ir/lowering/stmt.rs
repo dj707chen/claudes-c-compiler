@@ -338,6 +338,32 @@ impl Lowerer {
                             src: src_addr,
                             size: field_size,
                         });
+                    } else if let CType::Array(ref elem_ty, Some(arr_size)) = field.ty {
+                        // Char array field initialized by a string literal:
+                        // copy the string bytes instead of storing the pointer.
+                        let is_char_array = matches!(**elem_ty, CType::Char | CType::UChar);
+                        if is_char_array {
+                            if let Expr::StringLiteral(ref s, _) = e {
+                                self.emit_string_to_alloca(base, s, field_offset);
+                                // Zero-fill remaining bytes if string is shorter than array
+                                let str_len = s.chars().count() + 1; // +1 for null terminator
+                                for i in str_len..arr_size {
+                                    let val = Operand::Const(IrConst::I8(0));
+                                    self.emit_store_at_offset(base, field_offset + i, val, IrType::I8);
+                                }
+                            } else {
+                                // Non-string expr initializing char array - shouldn't normally happen,
+                                // but fall through to generic handling
+                                let val = self.lower_and_cast_init_expr(e, field_ty);
+                                let field_addr = self.emit_gep_offset(base, field_offset, field_ty);
+                                self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
+                            }
+                        } else {
+                            // Non-char array field with expression initializer
+                            let val = self.lower_and_cast_init_expr(e, field_ty);
+                            let field_addr = self.emit_gep_offset(base, field_offset, field_ty);
+                            self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
+                        }
                     } else {
                         let val = self.lower_and_cast_init_expr(e, field_ty);
                         let field_addr = self.emit_gep_offset(base, field_offset, field_ty);
@@ -374,7 +400,24 @@ impl Lowerer {
                 let sub_layout = StructLayout::for_union(&st.fields);
                 self.lower_local_struct_init(items, base, &sub_layout);
             }
-            CType::Array(ref elem_ty, _) => {
+            CType::Array(ref elem_ty, arr_size_opt) => {
+                // Check for char array initialized by a brace-wrapped string literal:
+                // e.g., struct field `char a[10]` initialized as `{"hello"}`
+                let is_char_array = matches!(**elem_ty, CType::Char | CType::UChar);
+                if is_char_array && items.len() == 1 {
+                    if let Initializer::Expr(Expr::StringLiteral(ref s, _)) = items[0].init {
+                        self.emit_string_to_alloca(base, s, 0);
+                        // Zero-fill remaining bytes if string is shorter than array
+                        if let Some(arr_size) = arr_size_opt {
+                            let str_len = s.chars().count() + 1; // +1 for null terminator
+                            for i in str_len..*arr_size {
+                                let val = Operand::Const(IrConst::I8(0));
+                                self.emit_store_at_offset(base, i, val, IrType::I8);
+                            }
+                        }
+                        return;
+                    }
+                }
                 // Array field: init elements with [idx]=val designator support
                 let elem_ir_ty = IrType::from_ctype(elem_ty);
                 let elem_size = elem_ty.size();

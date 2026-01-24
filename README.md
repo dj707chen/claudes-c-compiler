@@ -56,6 +56,17 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Fix typedef pointer array global initialization**: Fixed a critical bug where
+  global arrays of typedef'd pointer types (e.g., `typedef const struct S *SPtr;
+  static const SPtr arr[] = { NULL, &s1, &s2 };`) had all address-of initializers
+  silently dropped, resulting in all-NULL arrays. The issue was in `analyze_declaration`:
+  `is_array_of_pointers` only checked for `DerivedDeclarator::Pointer` in the derived
+  declarator list, missing cases where the pointer is embedded in a typedef. This
+  caused the global to be treated as an array of structs (byte-serialized) instead of
+  an array of pointers (needing `.quad` relocations for addresses). Added detection of
+  typedef'd pointer types via `resolve_type_spec`. This directly fixed PostgreSQL's
+  `initdb` "unrecognized lock method: 1" crash (the `LockMethods[]` array typed via
+  `LockMethod` typedef was not initialized).
 - **Fix ARM indirect call crash (x17 clobber)**: Fixed SIGSEGV in ARM-compiled code making
   indirect function calls (through function pointers) in functions with large stack frames
   (offsets > 4095 bytes). The ARM backend stored the function pointer in x17 for `blr x17`,
@@ -271,7 +282,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 | sqlite | PASS | All 622 sqllogictest pass |
 | libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |
 | redis | PASS | All tests pass (version, cli, SET/GET roundtrip) |
-| postgres | PARTIAL | Build succeeds; initdb progresses past spinlock init (fixed inline asm typed operands); bootstrap script segfaults |
+| postgres | PARTIAL | Build succeeds; initdb progresses past spinlock init and lock method init (fixed typedef ptr array global init); bootstrap script hits invalid memory alloc request |
 
 ### What's Not Yet Implemented
 - Parser support for GNU C extensions in system headers (`__attribute__`, `__asm__` renames)
