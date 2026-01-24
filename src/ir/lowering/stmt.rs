@@ -62,7 +62,7 @@ impl Lowerer {
             for declarator in &decl.declarators {
                 if !declarator.name.is_empty() {
                     let resolved_type = resolve_typedef_derived(&decl.type_spec, &declarator.derived);
-                    self.typedefs.insert(declarator.name.clone(), resolved_type);
+                    self.types.typedefs.insert(declarator.name.clone(), resolved_type);
                 }
             }
             return;

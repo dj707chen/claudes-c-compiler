@@ -521,7 +521,7 @@ impl Lowerer {
     /// Get a function's return CType.
     pub(super) fn get_function_return_ctype(&self, name: &str) -> CType {
         // Check complex return types first
-        if let Some(ctype) = self.func_return_ctypes.get(name) {
+        if let Some(ctype) = self.types.func_return_ctypes.get(name) {
             return ctype.clone();
         }
         // Check pointer/struct return CTypes and derive from IR return type

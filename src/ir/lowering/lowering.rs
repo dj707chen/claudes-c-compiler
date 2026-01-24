@@ -365,6 +365,39 @@ impl FunctionBuildState {
     }
 }
 
+/// Type-system state extracted from Lowerer.
+/// Holds struct/union layouts, typedefs, enum constants, and type caches.
+/// This is module-level state that persists across functions.
+#[derive(Debug)]
+pub(super) struct TypeContext {
+    /// Struct/union layouts indexed by tag name
+    pub struct_layouts: HashMap<String, StructLayout>,
+    /// Enum constant values
+    pub enum_constants: HashMap<String, i64>,
+    /// Typedef mappings
+    pub typedefs: HashMap<String, TypeSpecifier>,
+    /// Function typedef info
+    pub function_typedefs: HashMap<String, FunctionTypedefInfo>,
+    /// Return CType for known functions
+    pub func_return_ctypes: HashMap<String, CType>,
+    /// Cache for CType of named struct/union types
+    /// Uses RefCell because type_spec_to_ctype takes &self.
+    pub ctype_cache: std::cell::RefCell<HashMap<String, CType>>,
+}
+
+impl TypeContext {
+    pub fn new() -> Self {
+        Self {
+            struct_layouts: HashMap::new(),
+            enum_constants: HashMap::new(),
+            typedefs: HashMap::new(),
+            function_typedefs: HashMap::new(),
+            func_return_ctypes: HashMap::new(),
+            ctype_cache: std::cell::RefCell::new(HashMap::new()),
+        }
+    }
+}
+
 /// Lowers AST to IR (alloca-based, not yet SSA).
 pub struct Lowerer {
     /// Target architecture, used for ABI-specific lowering decisions
@@ -385,23 +418,12 @@ pub struct Lowerer {
     pub(super) defined_functions: HashSet<String>,
     // Set of function names declared with static linkage
     pub(super) static_functions: HashSet<String>,
-    /// Struct/union layouts indexed by tag name
-    pub(super) struct_layouts: HashMap<String, StructLayout>,
-    /// Enum constant values
-    pub(super) enum_constants: HashMap<String, i64>,
-    /// Typedef mappings
-    pub(super) typedefs: HashMap<String, TypeSpecifier>,
-    /// Function typedef info
-    pub(super) function_typedefs: HashMap<String, FunctionTypedefInfo>,
+    /// Type-system state (struct layouts, typedefs, enum constants, type caches)
+    pub(super) types: TypeContext,
     /// Metadata about known functions (consolidated FuncSig)
     pub(super) func_meta: FunctionMeta,
-    /// Return CType for known functions
-    pub(super) func_return_ctypes: HashMap<String, CType>,
     /// Set of emitted global variable names (O(1) dedup)
     pub(super) emitted_global_names: HashSet<String>,
-    /// Cache for CType of named struct/union types
-    /// Uses RefCell because type_spec_to_ctype takes &self.
-    pub(super) ctype_cache: std::cell::RefCell<HashMap<String, CType>>,
 }
 
 impl Lowerer {
@@ -418,14 +440,9 @@ impl Lowerer {
             known_functions: HashSet::new(),
             defined_functions: HashSet::new(),
             static_functions: HashSet::new(),
-            struct_layouts: HashMap::new(),
-            enum_constants: HashMap::new(),
-            typedefs: HashMap::new(),
-            function_typedefs: HashMap::new(),
+            types: TypeContext::new(),
             func_meta: FunctionMeta::default(),
-            func_return_ctypes: HashMap::new(),
             emitted_global_names: HashSet::new(),
-            ctype_cache: std::cell::RefCell::new(HashMap::new()),
         }
     }
 
@@ -532,20 +549,20 @@ impl Lowerer {
 
             // Undo enum_constants: remove added keys
             for key in frame.enums_added {
-                self.enum_constants.remove(&key);
+                self.types.enum_constants.remove(&key);
             }
 
             // Undo struct_layouts: remove added keys, restore shadowed keys
             for key in frame.struct_layouts_added {
-                self.struct_layouts.remove(&key);
+                self.types.struct_layouts.remove(&key);
             }
             for (key, val) in frame.struct_layouts_shadowed {
-                self.struct_layouts.insert(key, val);
+                self.types.struct_layouts.insert(key, val);
             }
 
             // Undo ctype_cache: remove added keys, restore shadowed keys
             {
-                let mut cache = self.ctype_cache.borrow_mut();
+                let mut cache = self.types.ctype_cache.borrow_mut();
                 for key in frame.ctype_cache_added {
                     cache.remove(&key);
                 }
@@ -593,7 +610,7 @@ impl Lowerer {
 
     /// Insert an enum constant, tracking the change in the current scope frame.
     pub(super) fn insert_enum_scoped(&mut self, name: String, value: i64) {
-        let track = !self.enum_constants.contains_key(&name);
+        let track = !self.types.enum_constants.contains_key(&name);
         if track {
             if let Some(ref mut fs) = self.func_state {
                 if let Some(frame) = fs.scope_stack.last_mut() {
@@ -601,7 +618,7 @@ impl Lowerer {
                 }
             }
         }
-        self.enum_constants.insert(name, value);
+        self.types.enum_constants.insert(name, value);
     }
 
     /// Insert a static local name, tracking the change in the current scope frame.
@@ -683,7 +700,7 @@ impl Lowerer {
                                     for _ in 0..ptr_count {
                                         return_type = TypeSpecifier::Pointer(Box::new(return_type));
                                     }
-                                    self.function_typedefs.insert(declarator.name.clone(), FunctionTypedefInfo {
+                                    self.types.function_typedefs.insert(declarator.name.clone(), FunctionTypedefInfo {
                                         return_type,
                                         params: params.clone(),
                                         variadic: *variadic,
@@ -692,7 +709,7 @@ impl Lowerer {
                             }
 
                             let resolved_type = resolve_typedef_derived(&decl.type_spec, &declarator.derived);
-                            self.typedefs.insert(declarator.name.clone(), resolved_type);
+                            self.types.typedefs.insert(declarator.name.clone(), resolved_type);
                         }
                     }
                 }
@@ -737,7 +754,7 @@ impl Lowerer {
                         // Check if the base type is a function typedef
                         // (e.g., `func_t add;` where func_t is typedef int func_t(int);)
                         if let TypeSpecifier::TypedefName(tname) = &decl.type_spec {
-                            if let Some(fti) = self.function_typedefs.get(tname).cloned() {
+                            if let Some(fti) = self.types.function_typedefs.get(tname).cloned() {
                                 self.register_function_meta(
                                     &declarator.name, &fti.return_type, 0,
                                     &fti.params, fti.variadic, false, false,
@@ -873,7 +890,7 @@ impl Lowerer {
             let resolved = self.resolve_type_spec(ret_type_spec);
             let ret_ct = self.type_spec_to_ctype(&resolved);
             if ret_ct.is_complex() {
-                self.func_return_ctypes.insert(name.to_string(), ret_ct);
+                self.types.func_return_ctypes.insert(name.to_string(), ret_ct);
             }
         }
 
@@ -1089,7 +1106,7 @@ impl Lowerer {
         // Record return CType for complex-returning functions
         let ret_ctype = self.type_spec_to_ctype(&self.resolve_type_spec(&func.return_type).clone());
         if ret_ctype.is_complex() {
-            self.func_return_ctypes.insert(func.name.clone(), ret_ctype);
+            self.types.func_return_ctypes.insert(func.name.clone(), ret_ctype);
         }
 
         // Check if this function uses sret (returns struct > 16 bytes via hidden pointer)
@@ -1791,7 +1808,7 @@ impl Lowerer {
             for declarator in &decl.declarators {
                 if !declarator.name.is_empty() {
                     let resolved_type = resolve_typedef_derived(&decl.type_spec, &declarator.derived);
-                    self.typedefs.insert(declarator.name.clone(), resolved_type);
+                    self.types.typedefs.insert(declarator.name.clone(), resolved_type);
                 }
             }
             return;
@@ -1817,7 +1834,7 @@ impl Lowerer {
             // func_t is `typedef int func_t(int);`). These declare functions, not variables.
             if declarator.init.is_none() {
                 if let TypeSpecifier::TypedefName(tname) = &decl.type_spec {
-                    if self.function_typedefs.contains_key(tname) {
+                    if self.types.function_typedefs.contains_key(tname) {
                         continue;
                     }
                 }
@@ -1960,7 +1977,7 @@ impl Lowerer {
                     if scoped {
                         self.insert_enum_scoped(variant.name.clone(), next_val);
                     } else {
-                        self.enum_constants.insert(variant.name.clone(), next_val);
+                        self.types.enum_constants.insert(variant.name.clone(), next_val);
                     }
                     next_val += 1;
                 }

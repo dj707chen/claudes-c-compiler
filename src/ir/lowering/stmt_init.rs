@@ -69,7 +69,7 @@ impl Lowerer {
         // (e.g., `func_t add;` where func_t is `typedef int func_t(int);`)
         if declarator.derived.is_empty() && declarator.init.is_none() {
             if let TypeSpecifier::TypedefName(tname) = &decl.type_spec {
-                if let Some(fti) = self.function_typedefs.get(tname).cloned() {
+                if let Some(fti) = self.types.function_typedefs.get(tname).cloned() {
                     self.register_block_func_meta(&declarator.name, &fti.return_type, 0, &fti.params, fti.variadic);
                     self.shadow_local_for_scope(&declarator.name);
                     return true;

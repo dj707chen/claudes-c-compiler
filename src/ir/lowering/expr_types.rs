@@ -52,7 +52,7 @@ impl Lowerer {
         match ts {
             TypeSpecifier::LongDouble => true,
             TypeSpecifier::TypedefName(name) => {
-                if let Some(resolved) = self.typedefs.get(name) {
+                if let Some(resolved) = self.types.typedefs.get(name) {
                     self.is_type_spec_long_double(resolved)
                 } else {
                     false
@@ -515,7 +515,7 @@ impl Lowerer {
                 if name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__" {
                     return IrType::Ptr;
                 }
-                if self.enum_constants.contains_key(name) {
+                if self.types.enum_constants.contains_key(name) {
                     return IrType::I32;
                 }
                 if let Some(vi) = self.lookup_var_info(name) {
@@ -1019,7 +1019,7 @@ impl Lowerer {
                     let is_union = matches!(&ctype, CType::Union(_));
                     let prefix = if is_union { "union" } else { "struct" };
                     let cache_key = format!("{}.{}", prefix, tag);
-                    if let Some(cached) = self.ctype_cache.borrow().get(&cache_key) {
+                    if let Some(cached) = self.types.ctype_cache.borrow().get(&cache_key) {
                         // Only use cached version if it actually has fields (is complete)
                         match cached {
                             CType::Struct(cached_st) | CType::Union(cached_st)
@@ -1068,7 +1068,7 @@ impl Lowerer {
                     let is_union = matches!(&base_ctype, CType::Union(_));
                     let prefix = if is_union { "union" } else { "struct" };
                     let key = format!("{}.{}", prefix, tag);
-                    if let Some(layout) = self.struct_layouts.get(&key) {
+                    if let Some(layout) = self.types.struct_layouts.get(&key) {
                         for field in &layout.fields {
                             if field.name == field_name {
                                 return Some(field.ty.clone());

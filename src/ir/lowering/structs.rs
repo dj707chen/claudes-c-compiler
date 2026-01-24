@@ -5,7 +5,7 @@ use super::lowering::Lowerer;
 
 impl Lowerer {
     /// Register a struct/union type definition from a TypeSpecifier, computing and
-    /// caching its layout in self.struct_layouts. Also recursively registers any
+    /// caching its layout in self.types.struct_layouts. Also recursively registers any
     /// nested struct/union types defined in the fields.
     pub(super) fn register_struct_type(&mut self, ts: &TypeSpecifier) {
         match ts {
@@ -40,7 +40,7 @@ impl Lowerer {
     /// Insert a struct layout into the cache, tracking the change in the current
     /// scope frame so it can be undone on scope exit.
     fn insert_struct_layout_scoped(&mut self, key: String, layout: StructLayout) {
-        let prev = self.struct_layouts.get(&key).cloned();
+        let prev = self.types.struct_layouts.get(&key).cloned();
         if let Some(ref mut fs) = self.func_state {
             if let Some(frame) = fs.scope_stack.last_mut() {
                 if let Some(prev) = prev {
@@ -50,14 +50,14 @@ impl Lowerer {
                 }
             }
         }
-        self.struct_layouts.insert(key, layout);
+        self.types.struct_layouts.insert(key, layout);
     }
 
     /// Invalidate a ctype_cache entry for a struct/union tag, tracking the change
     /// in the current scope frame so it can be restored on scope exit.
     fn invalidate_ctype_cache_scoped(&mut self, key: &str) {
         let prev = {
-            let mut cache = self.ctype_cache.borrow_mut();
+            let mut cache = self.types.ctype_cache.borrow_mut();
             cache.remove(key)
         };
         if let Some(ref mut fs) = self.func_state {
@@ -122,7 +122,7 @@ impl Lowerer {
         match ts {
             TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack, _) => {
                 if let Some(tag) = tag {
-                    if let Some(layout) = self.struct_layouts.get(&format!("struct.{}", tag)) {
+                    if let Some(layout) = self.types.struct_layouts.get(&format!("struct.{}", tag)) {
                         return Some(layout.clone());
                     }
                 }
@@ -130,11 +130,11 @@ impl Lowerer {
                 Some(self.compute_struct_union_layout_packed(&fields, false, max_field_align))
             }
             TypeSpecifier::Struct(Some(tag), None, _, _, _) => {
-                self.struct_layouts.get(&format!("struct.{}", tag)).cloned()
+                self.types.struct_layouts.get(&format!("struct.{}", tag)).cloned()
             }
             TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack, _) => {
                 if let Some(tag) = tag {
-                    if let Some(layout) = self.struct_layouts.get(&format!("union.{}", tag)) {
+                    if let Some(layout) = self.types.struct_layouts.get(&format!("union.{}", tag)) {
                         return Some(layout.clone());
                     }
                 }
@@ -142,7 +142,7 @@ impl Lowerer {
                 Some(self.compute_struct_union_layout_packed(&fields, true, max_field_align))
             }
             TypeSpecifier::Union(Some(tag), None, _, _, _) => {
-                self.struct_layouts.get(&format!("union.{}", tag)).cloned()
+                self.types.struct_layouts.get(&format!("union.{}", tag)).cloned()
             }
             // For typedef'd array types like `typedef S arr_t[4]`, peel the
             // Array wrapper(s) to find the inner struct/union element type.
@@ -589,7 +589,7 @@ impl Lowerer {
                 // Try cache first (by tag name)
                 if let Some(ref tag) = st.name {
                     let key = format!("struct.{}", tag);
-                    if let Some(layout) = self.struct_layouts.get(&key) {
+                    if let Some(layout) = self.types.struct_layouts.get(&key) {
                         return Some(layout.clone());
                     }
                 }
@@ -602,7 +602,7 @@ impl Lowerer {
                 // Try cache first (by tag name)
                 if let Some(ref tag) = st.name {
                     let key = format!("union.{}", tag);
-                    if let Some(layout) = self.struct_layouts.get(&key) {
+                    if let Some(layout) = self.types.struct_layouts.get(&key) {
                         return Some(layout.clone());
                     }
                 }

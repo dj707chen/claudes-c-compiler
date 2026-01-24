@@ -14,7 +14,7 @@ impl Lowerer {
         for _ in 0..32 {
             match current {
                 TypeSpecifier::TypedefName(name) => {
-                    if let Some(resolved) = self.typedefs.get(name) {
+                    if let Some(resolved) = self.types.typedefs.get(name) {
                         current = resolved;
                         continue;
                     }
@@ -47,7 +47,7 @@ impl Lowerer {
                 self.resolve_typeof(inner)
             }
             TypeSpecifier::TypedefName(name) => {
-                if let Some(resolved) = self.typedefs.get(name) {
+                if let Some(resolved) = self.types.typedefs.get(name) {
                     // Check if the typedef itself is a typeof
                     self.resolve_typeof(resolved)
                 } else {
@@ -206,7 +206,7 @@ impl Lowerer {
             ("DIR", Pointer(Box::new(Void))),
         ];
         for (name, ts) in builtins {
-            self.typedefs.insert(name.to_string(), ts.clone());
+            self.types.typedefs.insert(name.to_string(), ts.clone());
         }
         // Target-dependent va_list definition.
         // On RISC-V, va_list is just `void *` (a pointer passed by value).
@@ -227,9 +227,9 @@ impl Lowerer {
                 Array(Box::new(Char), Some(Box::new(Expr::IntLiteral(24, Span::dummy()))))
             }
         };
-        self.typedefs.insert("va_list".to_string(), va_list_type.clone());
-        self.typedefs.insert("__builtin_va_list".to_string(), va_list_type.clone());
-        self.typedefs.insert("__gnuc_va_list".to_string(), va_list_type);
+        self.types.typedefs.insert("va_list".to_string(), va_list_type.clone());
+        self.types.typedefs.insert("__builtin_va_list".to_string(), va_list_type.clone());
+        self.types.typedefs.insert("__gnuc_va_list".to_string(), va_list_type);
         // Also add the __u_char etc. POSIX internal names
         let posix_extras: &[(&str, TypeSpecifier)] = &[
             ("__u_char", UnsignedChar),
@@ -246,7 +246,7 @@ impl Lowerer {
             ("__uint64_t", UnsignedLong),
         ];
         for (name, ts) in posix_extras {
-            self.typedefs.insert(name.to_string(), ts.clone());
+            self.types.typedefs.insert(name.to_string(), ts.clone());
         }
     }
 
@@ -328,7 +328,7 @@ impl Lowerer {
         ];
         for name in cd_cd {
             self.insert_builtin_sig(name, F64, Vec::new(), vec![CType::ComplexDouble]);
-            self.func_return_ctypes.insert(name.to_string(), CType::ComplexDouble);
+            self.types.func_return_ctypes.insert(name.to_string(), CType::ComplexDouble);
         }
 
         // Functions returning _Complex float (packed two F32 in I64):
@@ -339,14 +339,14 @@ impl Lowerer {
         ];
         for name in cf_cf {
             self.insert_builtin_sig(name, F64, Vec::new(), vec![CType::ComplexFloat]);
-            self.func_return_ctypes.insert(name.to_string(), CType::ComplexFloat);
+            self.types.func_return_ctypes.insert(name.to_string(), CType::ComplexFloat);
         }
 
         // cpow/cpowf take two complex args
         self.insert_builtin_sig("cpow", F64, Vec::new(), vec![CType::ComplexDouble, CType::ComplexDouble]);
-        self.func_return_ctypes.insert("cpow".to_string(), CType::ComplexDouble);
+        self.types.func_return_ctypes.insert("cpow".to_string(), CType::ComplexDouble);
         self.insert_builtin_sig("cpowf", F64, Vec::new(), vec![CType::ComplexFloat, CType::ComplexFloat]);
-        self.func_return_ctypes.insert("cpowf".to_string(), CType::ComplexFloat);
+        self.types.func_return_ctypes.insert("cpowf".to_string(), CType::ComplexFloat);
     }
 
     pub(super) fn type_spec_to_ir(&self, ts: &TypeSpecifier) -> IrType {
@@ -410,7 +410,7 @@ impl Lowerer {
     /// Look up a struct/union layout by tag name, returning the full layout.
     fn get_struct_union_layout_by_tag(&self, kind: &str, tag: &str) -> Option<&StructLayout> {
         let key = format!("{}.{}", kind, tag);
-        self.struct_layouts.get(&key)
+        self.types.struct_layouts.get(&key)
     }
 
     /// Get the struct/union layout for a resolved TypeSpecifier.
@@ -420,7 +420,7 @@ impl Lowerer {
             TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack, _) => {
                 // Use cached layout for tagged structs
                 if let Some(tag) = tag {
-                    if let Some(layout) = self.struct_layouts.get(&format!("struct.{}", tag)) {
+                    if let Some(layout) = self.types.struct_layouts.get(&format!("struct.{}", tag)) {
                         return Some(layout.clone());
                     }
                 }
@@ -430,7 +430,7 @@ impl Lowerer {
             TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack, _) => {
                 // Use cached layout for tagged unions
                 if let Some(tag) = tag {
-                    if let Some(layout) = self.struct_layouts.get(&format!("union.{}", tag)) {
+                    if let Some(layout) = self.types.struct_layouts.get(&format!("union.{}", tag)) {
                         return Some(layout.clone());
                     }
                 }
@@ -848,7 +848,7 @@ impl Lowerer {
             // when the full definition becomes available.
             if let Some(tag) = name {
                 let cache_key = format!("{}.{}", prefix, tag);
-                if let Some(cached) = self.ctype_cache.borrow().get(&cache_key) {
+                if let Some(cached) = self.types.ctype_cache.borrow().get(&cache_key) {
                     let cached_size = cached.size();
                     if cached_size > 0 {
                         return cached.clone();
@@ -876,17 +876,17 @@ impl Lowerer {
             let result = make(st);
             if let Some(tag) = name {
                 let cache_key = format!("{}.{}", prefix, tag);
-                self.ctype_cache.borrow_mut().insert(cache_key, result.clone());
+                self.types.ctype_cache.borrow_mut().insert(cache_key, result.clone());
             }
             result
         } else if let Some(tag) = name {
             let cache_key = format!("{}.{}", prefix, tag);
             // Check cache first
-            if let Some(cached) = self.ctype_cache.borrow().get(&cache_key) {
+            if let Some(cached) = self.types.ctype_cache.borrow().get(&cache_key) {
                 return cached.clone();
             }
             let key = format!("{}.{}", prefix, tag);
-            if let Some(layout) = self.struct_layouts.get(&key) {
+            if let Some(layout) = self.types.struct_layouts.get(&key) {
                 let struct_fields: Vec<StructField> = layout.fields.iter().map(|f| {
                     StructField {
                         name: f.name.clone(),
@@ -901,7 +901,7 @@ impl Lowerer {
                     crate::common::types::StructType::new_struct(Some(tag.clone()), struct_fields, is_packed, max_field_align)
                 };
                 let result = make(st);
-                self.ctype_cache.borrow_mut().insert(cache_key, result.clone());
+                self.types.ctype_cache.borrow_mut().insert(cache_key, result.clone());
                 result
             } else {
                 make(crate::common::types::StructType::new_empty(Some(tag.clone()), is_packed, max_field_align))

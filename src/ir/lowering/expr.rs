@@ -167,7 +167,7 @@ impl Lowerer {
             return Operand::Value(dest);
         }
 
-        if let Some(&val) = self.enum_constants.get(name) {
+        if let Some(&val) = self.types.enum_constants.get(name) {
             return Operand::Const(IrConst::I64(val));
         }
 
@@ -1183,7 +1183,7 @@ impl Lowerer {
                 if name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__" {
                     return IrType::Ptr;
                 }
-                if self.enum_constants.contains_key(name) { return IrType::I32; }
+                if self.types.enum_constants.contains_key(name) { return IrType::I32; }
                 if let Some(vi) = self.lookup_var_info(name) { return vi.ty; }
                 IrType::I64
             }
@@ -1379,7 +1379,7 @@ impl Lowerer {
             TypeSpecifier::Void => IrType::I64,
             TypeSpecifier::Bool => IrType::I8,
             TypeSpecifier::TypedefName(name) => {
-                if let Some(resolved) = self.typedefs.get(name) {
+                if let Some(resolved) = self.types.typedefs.get(name) {
                     self.resolve_va_arg_type(resolved)
                 } else {
                     IrType::I64

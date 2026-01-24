@@ -69,7 +69,7 @@ impl Lowerer {
 
         // Complex expression returned via sret
         let expr_ct = self.expr_ctype(e);
-        let fname = self.func().name.clone(); let ret_ct = self.func_return_ctypes.get(&fname).cloned();
+        let fname = self.func().name.clone(); let ret_ct = self.types.func_return_ctypes.get(&fname).cloned();
         if expr_ct.is_complex() {
             let val = self.lower_expr(e);
             let src_addr = if let Some(ref rct) = ret_ct {
@@ -156,7 +156,7 @@ impl Lowerer {
             return None;
         }
 
-        let fname = self.func().name.clone(); let ret_ct = self.func_return_ctypes.get(&fname).cloned();
+        let fname = self.func().name.clone(); let ret_ct = self.types.func_return_ctypes.get(&fname).cloned();
         if let Some(ref rct) = ret_ct {
             let val = self.lower_expr(e);
             let src_ptr = if rct.is_complex() && expr_ct != *rct {
@@ -214,7 +214,7 @@ impl Lowerer {
     /// Try converting a non-complex scalar to complex for return from a complex function.
     fn try_scalar_to_complex_return(&mut self, e: &Expr) -> Option<Operand> {
         let expr_ct = self.expr_ctype(e);
-        let fname = self.func().name.clone(); let ret_ct = self.func_return_ctypes.get(&fname).cloned();
+        let fname = self.func().name.clone(); let ret_ct = self.types.func_return_ctypes.get(&fname).cloned();
         let rct = ret_ct.as_ref()?;
         if !rct.is_complex() || expr_ct.is_complex() {
             return None;

@@ -1167,7 +1167,7 @@ impl Lowerer {
                 // First try to look up by name in registered struct_layouts
                 if let Some(ref name) = st.name {
                     let key = format!("struct.{}", name);
-                    if let Some(layout) = self.struct_layouts.get(&key) {
+                    if let Some(layout) = self.types.struct_layouts.get(&key) {
                         return Some(layout.clone());
                     }
                 }
@@ -1177,7 +1177,7 @@ impl Lowerer {
             CType::Union(st) => {
                 if let Some(ref name) = st.name {
                     let key = format!("union.{}", name);
-                    if let Some(layout) = self.struct_layouts.get(&key) {
+                    if let Some(layout) = self.types.struct_layouts.get(&key) {
                         return Some(layout.clone());
                     }
                 }

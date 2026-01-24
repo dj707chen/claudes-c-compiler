@@ -119,7 +119,7 @@ impl Lowerer {
             }
             Expr::Identifier(name, _) => {
                 // Look up enum constants first
-                if let Some(&val) = self.enum_constants.get(name) {
+                if let Some(&val) = self.types.enum_constants.get(name) {
                     return Some(IrConst::I64(val));
                 }
                 // Look up const-qualified local variable values
@@ -551,7 +551,7 @@ impl Lowerer {
                                     CType::Struct(st) => {
                                         if let Some(ref tag) = st.name {
                                             let key = format!("struct.{}", tag);
-                                            if let Some(layout) = self.struct_layouts.get(&key) {
+                                            if let Some(layout) = self.types.struct_layouts.get(&key) {
                                                 layout.clone()
                                             } else {
                                                 StructLayout::for_struct(&st.fields)
@@ -563,7 +563,7 @@ impl Lowerer {
                                     CType::Union(st) => {
                                         if let Some(ref tag) = st.name {
                                             let key = format!("union.{}", tag);
-                                            if let Some(layout) = self.struct_layouts.get(&key) {
+                                            if let Some(layout) = self.types.struct_layouts.get(&key) {
                                                 layout.clone()
                                             } else {
                                                 StructLayout::for_union(&st.fields)

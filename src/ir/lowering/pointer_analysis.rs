@@ -206,7 +206,7 @@ impl Lowerer {
             CType::Struct(st) => {
                 if let Some(tag) = &st.name {
                     let key = format!("struct.{}", tag);
-                    if let Some(layout) = self.struct_layouts.get(&key) {
+                    if let Some(layout) = self.types.struct_layouts.get(&key) {
                         return layout.size;
                     }
                 }
@@ -214,7 +214,7 @@ impl Lowerer {
             CType::Union(st) => {
                 if let Some(tag) = &st.name {
                     let key = format!("union.{}", tag);
-                    if let Some(layout) = self.struct_layouts.get(&key) {
+                    if let Some(layout) = self.types.struct_layouts.get(&key) {
                         return layout.size;
                     }
                 }

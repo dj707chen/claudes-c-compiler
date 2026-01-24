@@ -10,17 +10,16 @@ COMPLETED:
   (17 per-function fields moved into FunctionBuildState sub-struct,
    Lowerer holds Option<FunctionBuildState> — None between functions,
    ~150 access sites updated, func()/func_mut() accessors added)
+- Commit 3: Extract TypeContext from Lowerer
+  (6 type-system fields moved into TypeContext sub-struct:
+   struct_layouts, typedefs, function_typedefs, enum_constants,
+   ctype_cache, func_return_ctypes. Lowerer holds TypeContext field.
+   ~67 access sites updated across 13 files. pop_scope and
+   insert_enum_scoped updated to go through self.types.)
 
 REMAINING (in order):
 
-1. Extract TypeContext from Lowerer
-   - Pull type-system state (struct_layouts, typedefs, function_typedefs,
-     enum_constants, ctype_cache, var_ctypes, func_return_ctypes, const_local_values)
-   - Methods like resolve_ctype_size, type_spec_to_ctype, get_struct_layout
-     become methods on TypeContext
-   - Risk: Medium (some methods need both TypeContext and FunctionBuildState)
-
-3. Move scope undo tracking into TypeContext
+1. Move scope undo tracking into TypeContext
    - ScopeFrame currently tracks undo ops for maps in both TypeContext and
      FunctionBuildState. Split accordingly.
    - Risk: Medium (scope push/pop is subtle)

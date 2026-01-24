@@ -130,7 +130,7 @@ impl Lowerer {
         // For complex returns (non-sret), store into complex alloca
         if sret_size.is_none() {
             if let Expr::Identifier(name, _) = func {
-                if let Some(ret_ct) = self.func_return_ctypes.get(name).cloned() {
+                if let Some(ret_ct) = self.types.func_return_ctypes.get(name).cloned() {
                     if let Some(result) = self.handle_complex_return(dest, &ret_ct) {
                         return result;
                     }
