@@ -640,6 +640,43 @@ impl Lowerer {
         self.next_static_local += 1;
     }
 
+    /// Lower a {real, imag} list initializer for a complex field.
+    /// Stores the real and imaginary parts at dest_addr and dest_addr+comp_size.
+    fn lower_complex_list_init(
+        &mut self,
+        sub_items: &[InitializerItem],
+        dest_addr: Value,
+        complex_ctype: &CType,
+    ) {
+        let comp_ty = Self::complex_component_ir_type(complex_ctype);
+        let comp_size = Self::complex_component_size(complex_ctype);
+        // Store real part
+        if let Some(first) = sub_items.first() {
+            if let Initializer::Expr(e) = &first.init {
+                let val = self.lower_expr(e);
+                let expr_ty = self.get_expr_type(e);
+                let val = self.emit_implicit_cast(val, expr_ty, comp_ty);
+                self.emit(Instruction::Store { val, ptr: dest_addr, ty: comp_ty });
+            }
+        } else {
+            let zero = Self::complex_zero(comp_ty);
+            self.emit(Instruction::Store { val: zero, ptr: dest_addr, ty: comp_ty });
+        }
+        // Store imag part
+        let imag_ptr = self.emit_gep_offset(dest_addr, comp_size, IrType::I8);
+        if let Some(item) = sub_items.get(1) {
+            if let Initializer::Expr(e) = &item.init {
+                let val = self.lower_expr(e);
+                let expr_ty = self.get_expr_type(e);
+                let val = self.emit_implicit_cast(val, expr_ty, comp_ty);
+                self.emit(Instruction::Store { val, ptr: imag_ptr, ty: comp_ty });
+            }
+        } else {
+            let zero = Self::complex_zero(comp_ty);
+            self.emit(Instruction::Store { val: zero, ptr: imag_ptr, ty: comp_ty });
+        }
+    }
+
     /// Lower an expression to a complex value, converting if needed.
     /// Returns a Value (pointer to the complex {real, imag} pair).
     fn lower_expr_to_complex(&mut self, expr: &Expr, target_ctype: &CType) -> Value {
@@ -696,31 +733,7 @@ impl Lowerer {
                         });
                     }
                     Initializer::List(sub_items) => {
-                        let comp_ty = Self::complex_component_ir_type(&complex_ctype);
-                        let comp_size = Self::complex_component_size(&complex_ctype);
-                        if let Some(first) = sub_items.first() {
-                            if let Initializer::Expr(e) = &first.init {
-                                let val = self.lower_expr(e);
-                                let expr_ty = self.get_expr_type(e);
-                                let val = self.emit_implicit_cast(val, expr_ty, comp_ty);
-                                self.emit(Instruction::Store { val, ptr: dest_addr, ty: comp_ty });
-                            }
-                        } else {
-                            let zero = Self::complex_zero(comp_ty);
-                            self.emit(Instruction::Store { val: zero, ptr: dest_addr, ty: comp_ty });
-                        }
-                        let imag_ptr = self.emit_gep_offset(dest_addr, comp_size, IrType::I8);
-                        if let Some(item) = sub_items.get(1) {
-                            if let Initializer::Expr(e) = &item.init {
-                                let val = self.lower_expr(e);
-                                let expr_ty = self.get_expr_type(e);
-                                let val = self.emit_implicit_cast(val, expr_ty, comp_ty);
-                                self.emit(Instruction::Store { val, ptr: imag_ptr, ty: comp_ty });
-                            }
-                        } else {
-                            let zero = Self::complex_zero(comp_ty);
-                            self.emit(Instruction::Store { val: zero, ptr: imag_ptr, ty: comp_ty });
-                        }
+                        self.lower_complex_list_init(sub_items, dest_addr, &complex_ctype);
                     }
                 }
                 current_field_idx = field_idx + 1;
@@ -1878,34 +1891,7 @@ impl Lowerer {
                             });
                         }
                         Initializer::List(sub_items) => {
-                            // {real, imag} list init
-                            let comp_ty = Self::complex_component_ir_type(&complex_ctype);
-                            let comp_size = Self::complex_component_size(&complex_ctype);
-                            // Store real part
-                            if let Some(item) = sub_items.first() {
-                                if let Initializer::Expr(e) = &item.init {
-                                    let val = self.lower_expr(e);
-                                    let expr_ty = self.get_expr_type(e);
-                                    let val = self.emit_implicit_cast(val, expr_ty, comp_ty);
-                                    self.emit(Instruction::Store { val, ptr: dest_addr, ty: comp_ty });
-                                }
-                            } else {
-                                let zero = Self::complex_zero(comp_ty);
-                                self.emit(Instruction::Store { val: zero, ptr: dest_addr, ty: comp_ty });
-                            }
-                            // Store imag part
-                            let imag_ptr = self.emit_gep_offset(dest_addr, comp_size, IrType::I8);
-                            if let Some(item) = sub_items.get(1) {
-                                if let Initializer::Expr(e) = &item.init {
-                                    let val = self.lower_expr(e);
-                                    let expr_ty = self.get_expr_type(e);
-                                    let val = self.emit_implicit_cast(val, expr_ty, comp_ty);
-                                    self.emit(Instruction::Store { val, ptr: imag_ptr, ty: comp_ty });
-                                }
-                            } else {
-                                let zero = Self::complex_zero(comp_ty);
-                                self.emit(Instruction::Store { val: zero, ptr: imag_ptr, ty: comp_ty });
-                            }
+                            self.lower_complex_list_init(sub_items, dest_addr, &complex_ctype);
                         }
                     }
                     item_idx += 1;
