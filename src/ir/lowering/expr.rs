@@ -58,6 +58,7 @@ impl Lowerer {
             }
 
             Expr::StringLiteral(s, _) => self.lower_string_literal(s),
+            Expr::WideStringLiteral(s, _) => self.lower_wide_string_literal(s),
             Expr::Identifier(name, _) => self.lower_identifier(name),
             Expr::BinaryOp(op, lhs, rhs, _) => self.lower_binary_op(op, lhs, rhs),
             Expr::UnaryOp(op, inner, _) => self.lower_unary_op(*op, inner),
@@ -111,6 +112,13 @@ impl Lowerer {
 
     fn lower_string_literal(&mut self, s: &str) -> Operand {
         let label = self.intern_string_literal(s);
+        let dest = self.fresh_value();
+        self.emit(Instruction::GlobalAddr { dest, name: label });
+        Operand::Value(dest)
+    }
+
+    fn lower_wide_string_literal(&mut self, s: &str) -> Operand {
+        let label = self.intern_wide_string_literal(s);
         let dest = self.fresh_value();
         self.emit(Instruction::GlobalAddr { dest, name: label });
         Operand::Value(dest)
@@ -2944,7 +2952,7 @@ impl Lowerer {
             }
             Expr::Comma(_, rhs, _) => self.infer_expr_type(rhs),
             Expr::AddressOf(_, _) => IrType::Ptr,
-            Expr::StringLiteral(_, _) => IrType::Ptr,
+            Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _) => IrType::Ptr,
             Expr::VaArg(_, type_spec, _) => self.resolve_va_arg_type(type_spec),
             _ => IrType::I64,
         }

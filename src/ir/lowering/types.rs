@@ -622,6 +622,21 @@ impl Lowerer {
             if let Initializer::Expr(Expr::StringLiteral(s, _)) = &items[0].init {
                 return s.as_bytes().len() + 1; // +1 for null terminator
             }
+            if let Initializer::Expr(Expr::WideStringLiteral(s, _)) = &items[0].init {
+                return s.as_bytes().len() + 1; // wide string to char array
+            }
+        }
+        // Special case: wchar_t w[] = {L"hello"} - single brace-wrapped wide string literal
+        if base_ty == IrType::I32
+            && items.len() == 1
+            && items[0].designators.is_empty()
+        {
+            if let Initializer::Expr(Expr::WideStringLiteral(s, _)) = &items[0].init {
+                return s.chars().count() + 1; // +1 for null terminator (count in wchar_t elements)
+            }
+            if let Initializer::Expr(Expr::StringLiteral(s, _)) = &items[0].init {
+                return s.len() + 1; // narrow string to wchar_t array (each byte is an element)
+            }
         }
         self.compute_init_list_array_size(items)
     }
@@ -899,7 +914,7 @@ impl Lowerer {
             Expr::FloatLiteralLongDouble(_, _) => IrType::F128,
             Expr::ImaginaryLiteral(_, _) | Expr::ImaginaryLiteralF32(_, _)
             | Expr::ImaginaryLiteralLongDouble(_, _) => IrType::Ptr,
-            Expr::StringLiteral(_, _) => IrType::Ptr,
+            Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _) => IrType::Ptr,
             Expr::Cast(ref target_type, _, _) => self.type_spec_to_ir(target_type),
             Expr::UnaryOp(UnaryOp::RealPart, inner, _) | Expr::UnaryOp(UnaryOp::ImagPart, inner, _) => {
                 let inner_ct = self.expr_ctype(inner);
@@ -1673,6 +1688,8 @@ impl Lowerer {
             Expr::CharLiteral(_, _) => 4,
             // String literal: array of char, size = length + 1 (null terminator)
             Expr::StringLiteral(s, _) => s.len() + 1,
+            // Wide string literal: array of wchar_t (4 bytes each), size = (chars + 1) * 4
+            Expr::WideStringLiteral(s, _) => (s.chars().count() + 1) * 4,
 
             // Variable: look up its alloc_size or type
             Expr::Identifier(name, _) => {
@@ -2525,6 +2542,8 @@ impl Lowerer {
             Expr::FloatLiteralF32(_, _) => Some(CType::Float),
             Expr::FloatLiteralLongDouble(_, _) => Some(CType::LongDouble),
             Expr::StringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Char))),
+            // Wide string literal L"..." has type wchar_t* (which is int* on all targets)
+            Expr::WideStringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Int))),
             Expr::FunctionCall(func, _, _) => {
                 if let Expr::Identifier(name, _) = func.as_ref() {
                     if let Some(ctype) = self.func_meta.return_ctypes.get(name) {

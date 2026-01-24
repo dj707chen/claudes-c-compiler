@@ -46,23 +46,23 @@ pub fn skip_literal_bytes(bytes: &[u8], start: usize, quote: u8) -> usize {
     i
 }
 
-/// Copy a string or character literal from a byte slice into a String result.
+/// Copy a string or character literal from a byte slice into a byte buffer result.
 /// Returns the position after the closing quote. Handles backslash escapes.
-/// Byte-oriented version for code that processes `&[u8]` directly.
-pub fn copy_literal_bytes(bytes: &[u8], start: usize, quote: u8, result: &mut String) -> usize {
+/// Copies raw bytes without any char conversion to preserve UTF-8 sequences.
+pub fn copy_literal_bytes_raw(bytes: &[u8], start: usize, quote: u8, result: &mut Vec<u8>) -> usize {
     let len = bytes.len();
-    result.push(bytes[start] as char); // opening quote
+    result.push(bytes[start]); // opening quote
     let mut i = start + 1;
     while i < len {
         if bytes[i] == b'\\' && i + 1 < len {
-            result.push(bytes[i] as char);
-            result.push(bytes[i + 1] as char);
+            result.push(bytes[i]);
+            result.push(bytes[i + 1]);
             i += 2;
         } else if bytes[i] == quote {
-            result.push(bytes[i] as char);
+            result.push(bytes[i]);
             return i + 1;
         } else {
-            result.push(bytes[i] as char);
+            result.push(bytes[i]);
             i += 1;
         }
     }

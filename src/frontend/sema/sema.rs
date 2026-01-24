@@ -436,6 +436,7 @@ impl SemanticAnalyzer {
             | Expr::ImaginaryLiteralF32(_, _)
             | Expr::ImaginaryLiteralLongDouble(_, _)
             | Expr::StringLiteral(_, _)
+            | Expr::WideStringLiteral(_, _)
             | Expr::CharLiteral(_, _) => {}
             // Label address (&&label) - just a compile-time address
             Expr::LabelAddr(_, _) => {}

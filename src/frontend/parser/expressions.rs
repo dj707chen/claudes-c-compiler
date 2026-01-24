@@ -417,12 +417,43 @@ impl Parser {
                 let mut result = s.clone();
                 let span = self.peek_span();
                 self.advance();
-                // Concatenate adjacent string literals
-                while let TokenKind::StringLiteral(ref s2) = self.peek() {
-                    result.push_str(s2);
-                    self.advance();
+                // Concatenate adjacent string literals. If any is wide, result is wide.
+                let mut is_wide = false;
+                loop {
+                    match self.peek() {
+                        TokenKind::StringLiteral(ref s2) => {
+                            result.push_str(s2);
+                            self.advance();
+                        }
+                        TokenKind::WideStringLiteral(ref s2) => {
+                            result.push_str(s2);
+                            is_wide = true;
+                            self.advance();
+                        }
+                        _ => break,
+                    }
                 }
-                Expr::StringLiteral(result, span)
+                if is_wide {
+                    Expr::WideStringLiteral(result, span)
+                } else {
+                    Expr::StringLiteral(result, span)
+                }
+            }
+            TokenKind::WideStringLiteral(ref s) => {
+                let mut result = s.clone();
+                let span = self.peek_span();
+                self.advance();
+                // Concatenate adjacent string literals (wide + narrow = wide)
+                loop {
+                    match self.peek() {
+                        TokenKind::StringLiteral(ref s2) | TokenKind::WideStringLiteral(ref s2) => {
+                            result.push_str(s2);
+                            self.advance();
+                        }
+                        _ => break,
+                    }
+                }
+                Expr::WideStringLiteral(result, span)
             }
             TokenKind::CharLiteral(c) => {
                 let span = self.peek_span();

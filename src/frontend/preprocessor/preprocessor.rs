@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use super::macro_defs::{MacroDef, MacroTable, parse_define};
 use super::conditionals::{ConditionalStack, evaluate_condition};
 use super::builtin_macros::define_builtin_macros;
-use super::utils::{is_ident_start, is_ident_cont, skip_literal, skip_literal_bytes, copy_literal_bytes};
+use super::utils::{is_ident_start, is_ident_cont, skip_literal, skip_literal_bytes, copy_literal_bytes_raw};
 
 pub struct Preprocessor {
     macros: MacroTable,
@@ -735,8 +735,9 @@ impl Preprocessor {
     /// Strip C-style block comments (/* ... */), preserving newlines
     /// within comments for correct line numbering.
     /// Also strips C++ style line comments (// ...).
+    /// Uses raw byte operations to preserve UTF-8 sequences in string literals.
     fn strip_block_comments(source: &str) -> String {
-        let mut result = String::with_capacity(source.len());
+        let mut result: Vec<u8> = Vec::with_capacity(source.len());
         let bytes = source.as_bytes();
         let len = bytes.len();
         let mut i = 0;
@@ -745,20 +746,20 @@ impl Preprocessor {
             match bytes[i] {
                 b'"' | b'\'' => {
                     // Copy string/char literals verbatim (don't strip comments inside)
-                    i = copy_literal_bytes(bytes, i, bytes[i], &mut result);
+                    i = copy_literal_bytes_raw(bytes, i, bytes[i], &mut result);
                 }
                 b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
                     // Block comment - replace with spaces, preserving newlines
                     i += 2;
-                    result.push(' ');
+                    result.push(b' ');
                     while i < len {
                         if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'/' {
                             i += 2;
-                            result.push(' ');
+                            result.push(b' ');
                             break;
                         }
                         if bytes[i] == b'\n' {
-                            result.push('\n');
+                            result.push(b'\n');
                         }
                         i += 1;
                     }
@@ -771,13 +772,15 @@ impl Preprocessor {
                     }
                 }
                 _ => {
-                    result.push(bytes[i] as char);
+                    result.push(bytes[i]);
                     i += 1;
                 }
             }
         }
 
-        result
+        // SAFETY: input was valid UTF-8, and we only removed/replaced ASCII characters
+        // (comments with spaces/newlines), so result is still valid UTF-8
+        unsafe { String::from_utf8_unchecked(result) }
     }
 
     /// Join lines that end with backslash (line continuation).

@@ -466,6 +466,106 @@ impl Lexer {
         Token::new(TokenKind::StringLiteral(s), Span::new(start as u32, self.pos as u32, self.file_id))
     }
 
+    fn lex_wide_string(&mut self, start: usize) -> Token {
+        self.pos += 1; // skip opening "
+        let mut s = String::new();
+        while self.pos < self.input.len() && self.input[self.pos] != b'"' {
+            if self.input[self.pos] == b'\\' {
+                self.pos += 1;
+                if self.pos < self.input.len() {
+                    s.push(self.lex_escape_char());
+                }
+            } else {
+                // Decode UTF-8 character for wide string
+                let byte = self.input[self.pos];
+                if byte < 0x80 {
+                    // ASCII
+                    s.push(byte as char);
+                    self.pos += 1;
+                } else {
+                    // Multi-byte UTF-8: decode to a single Unicode code point
+                    let remaining = &self.input[self.pos..];
+                    if let Ok(text) = std::str::from_utf8(remaining) {
+                        if let Some(ch) = text.chars().next() {
+                            s.push(ch);
+                            self.pos += ch.len_utf8();
+                        } else {
+                            s.push(byte as char);
+                            self.pos += 1;
+                        }
+                    } else {
+                        // Try to decode just a few bytes
+                        let end = std::cmp::min(self.pos + 4, self.input.len());
+                        let chunk = &self.input[self.pos..end];
+                        if let Ok(text) = std::str::from_utf8(chunk) {
+                            if let Some(ch) = text.chars().next() {
+                                s.push(ch);
+                                self.pos += ch.len_utf8();
+                            } else {
+                                s.push(byte as char);
+                                self.pos += 1;
+                            }
+                        } else {
+                            // Fallback: treat as Latin-1
+                            s.push(byte as char);
+                            self.pos += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if self.pos < self.input.len() {
+            self.pos += 1; // skip closing "
+        }
+        Token::new(TokenKind::WideStringLiteral(s), Span::new(start as u32, self.pos as u32, self.file_id))
+    }
+
+    fn lex_wide_char(&mut self, start: usize) -> Token {
+        self.pos += 1; // skip opening '
+        let mut value: u32 = 0;
+        if self.pos < self.input.len() && self.input[self.pos] != b'\'' {
+            if self.input[self.pos] == b'\\' {
+                self.pos += 1;
+                let ch = self.lex_escape_char();
+                value = ch as u32;
+            } else {
+                // Decode UTF-8 to get Unicode code point
+                let byte = self.input[self.pos];
+                if byte < 0x80 {
+                    value = byte as u32;
+                    self.pos += 1;
+                } else {
+                    let remaining = &self.input[self.pos..];
+                    let end = std::cmp::min(remaining.len(), 4);
+                    if let Ok(text) = std::str::from_utf8(&remaining[..end]) {
+                        if let Some(ch) = text.chars().next() {
+                            value = ch as u32;
+                            self.pos += ch.len_utf8();
+                        }
+                    } else if let Ok(text) = std::str::from_utf8(remaining) {
+                        if let Some(ch) = text.chars().next() {
+                            value = ch as u32;
+                            self.pos += ch.len_utf8();
+                        }
+                    } else {
+                        value = byte as u32;
+                        self.pos += 1;
+                    }
+                }
+            }
+        }
+        // Skip any remaining chars until closing quote
+        while self.pos < self.input.len() && self.input[self.pos] != b'\'' {
+            self.pos += 1;
+        }
+        if self.pos < self.input.len() && self.input[self.pos] == b'\'' {
+            self.pos += 1; // skip closing '
+        }
+        let span = Span::new(start as u32, self.pos as u32, self.file_id);
+        // Wide char literals have type int (wchar_t)
+        Token::new(TokenKind::IntLiteral(value as i64), span)
+    }
+
     fn lex_char(&mut self, start: usize) -> Token {
         self.pos += 1; // skip opening '
         let mut value: i32 = 0;
@@ -560,11 +660,19 @@ impl Lexer {
                 };
                 if is_wide_prefix {
                     if next == b'\'' {
-                        // Wide/unicode char literal: treat as regular char (result is int-valued)
-                        return self.lex_char(start);
+                        // Wide/unicode char literal: value is the Unicode code point
+                        return self.lex_wide_char(start);
                     } else {
-                        // Wide/unicode string literal: treat as regular string
-                        return self.lex_string(start);
+                        // Wide/unicode string literal: L"...", u"...", U"...", u8"..."
+                        // For L/U prefixes, produce WideStringLiteral (wchar_t = 4 bytes)
+                        // For u/u8, also produce WideStringLiteral (we treat all as wchar_t for now)
+                        let is_wide_32 = text_len == 1 && (prefix[0] == b'L' || prefix[0] == b'U');
+                        if is_wide_32 {
+                            return self.lex_wide_string(start);
+                        } else {
+                            // u"..." and u8"..." - treat as narrow string for now
+                            return self.lex_string(start);
+                        }
                     }
                 }
             }

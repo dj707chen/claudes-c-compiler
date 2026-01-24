@@ -18,6 +18,8 @@ pub enum TokenKind {
     /// Imaginary long double literal (e.g. 1.0Li or 1.0il) - GCC extension
     ImaginaryLiteralLongDouble(f64),
     StringLiteral(String),
+    /// Wide string literal (L"..."), stores content as Rust chars (each becomes wchar_t = i32)
+    WideStringLiteral(String),
     CharLiteral(char),
 
     // Identifiers and keywords

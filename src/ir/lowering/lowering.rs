@@ -962,6 +962,17 @@ impl Lowerer {
         label
     }
 
+    /// Intern a wide string literal (L"...") and return its label.
+    /// Each character is stored as a u32 (wchar_t), plus a null terminator.
+    pub(super) fn intern_wide_string_literal(&mut self, s: &str) -> String {
+        let label = format!(".Lwstr{}", self.next_string);
+        self.next_string += 1;
+        let mut chars: Vec<u32> = s.chars().map(|c| c as u32).collect();
+        chars.push(0); // null terminator
+        self.module.wide_string_literals.push((label.clone(), chars));
+        label
+    }
+
     pub(super) fn emit(&mut self, inst: Instruction) {
         self.current_instrs.push(inst);
     }
@@ -2036,7 +2047,7 @@ impl Lowerer {
             Expr::Cast(ref type_spec, _, _) => {
                 matches!(type_spec, TypeSpecifier::Pointer(_))
             }
-            Expr::StringLiteral(_, _) => true,
+            Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _) => true,
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 match op {
                     BinOp::Add => {
@@ -2293,6 +2304,30 @@ impl Lowerer {
         });
     }
 
+    /// Emit a wide string (L"...") to a local alloca. Each character is stored as I32 (wchar_t).
+    pub(super) fn emit_wide_string_to_alloca(&mut self, alloca: Value, s: &str, base_offset: usize) {
+        for (j, ch) in s.chars().enumerate() {
+            let val = Operand::Const(IrConst::I32(ch as i32));
+            let byte_offset = base_offset + j * 4;
+            let offset = Operand::Const(IrConst::I64(byte_offset as i64));
+            let addr = self.fresh_value();
+            self.emit(Instruction::GetElementPtr {
+                dest: addr, base: alloca, offset, ty: IrType::I8,
+            });
+            self.emit(Instruction::Store { val, ptr: addr, ty: IrType::I32 });
+        }
+        // Null terminator (4 bytes of zero)
+        let null_byte_offset = base_offset + s.chars().count() * 4;
+        let null_offset = Operand::Const(IrConst::I64(null_byte_offset as i64));
+        let null_addr = self.fresh_value();
+        self.emit(Instruction::GetElementPtr {
+            dest: null_addr, base: alloca, offset: null_offset, ty: IrType::I8,
+        });
+        self.emit(Instruction::Store {
+            val: Operand::Const(IrConst::I32(0)), ptr: null_addr, ty: IrType::I32,
+        });
+    }
+
     /// Emit a single element store at a given byte offset in an alloca.
     /// Handles implicit type cast from the expression type to the target type.
     pub(super) fn emit_array_element_store(
@@ -2469,6 +2504,25 @@ impl Lowerer {
                     if da.base_ty == IrType::I8 || da.base_ty == IrType::U8 {
                         if let Expr::StringLiteral(s, _) = expr {
                             da.alloc_size = s.as_bytes().len() + 1;
+                            da.actual_alloc_size = da.alloc_size;
+                        }
+                        // Wide string assigned to char array: use byte length
+                        if let Expr::WideStringLiteral(s, _) = expr {
+                            da.alloc_size = s.as_bytes().len() + 1;
+                            da.actual_alloc_size = da.alloc_size;
+                        }
+                    }
+                    // Fix alloc size for unsized wchar_t (I32) arrays with wide strings
+                    if da.base_ty == IrType::I32 {
+                        if let Expr::WideStringLiteral(s, _) = expr {
+                            let char_count = s.chars().count() + 1; // +1 for null terminator
+                            da.alloc_size = char_count * 4;
+                            da.actual_alloc_size = da.alloc_size;
+                        }
+                        // Narrow string assigned to wchar_t array
+                        if let Expr::StringLiteral(s, _) = expr {
+                            let char_count = s.len() + 1; // each byte becomes a wchar_t
+                            da.alloc_size = char_count * 4;
                             da.actual_alloc_size = da.alloc_size;
                         }
                     }

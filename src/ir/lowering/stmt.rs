@@ -232,8 +232,22 @@ impl Lowerer {
                             // Char array from string literal: char s[] = "hello"
                             if let Expr::StringLiteral(s, _) = expr {
                                 self.emit_string_to_alloca(alloca, s, 0);
+                            } else if let Expr::WideStringLiteral(s, _) = expr {
+                                // Wide string to char array: store each byte
+                                self.emit_string_to_alloca(alloca, s, 0);
                             } else {
                                 // Non-string expression initializer for char array (e.g., pointer assignment)
+                                let val = self.lower_expr(expr);
+                                self.emit(Instruction::Store { val, ptr: alloca, ty: da.var_ty });
+                            }
+                        } else if da.is_array && da.base_ty == IrType::I32 {
+                            // wchar_t/int array from wide string: wchar_t s[] = L"hello"
+                            if let Expr::WideStringLiteral(s, _) = expr {
+                                self.emit_wide_string_to_alloca(alloca, s, 0);
+                            } else if let Expr::StringLiteral(s, _) = expr {
+                                // Narrow string to wchar_t array: promote each byte to I32
+                                self.emit_wide_string_to_alloca(alloca, s, 0);
+                            } else {
                                 let val = self.lower_expr(expr);
                                 self.emit(Instruction::Store { val, ptr: alloca, ty: da.var_ty });
                             }

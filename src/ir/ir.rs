@@ -6,6 +6,8 @@ pub struct IrModule {
     pub functions: Vec<IrFunction>,
     pub globals: Vec<IrGlobal>,
     pub string_literals: Vec<(String, String)>, // (label, value)
+    /// Wide string literals (L"..."): (label, chars as u32 values including null terminator)
+    pub wide_string_literals: Vec<(String, Vec<u32>)>,
 }
 
 /// A global variable.
@@ -36,6 +38,9 @@ pub enum GlobalInit {
     Array(Vec<IrConst>),
     /// String literal (stored as bytes with null terminator).
     String(String),
+    /// Wide string literal (stored as array of u32 wchar_t values, no null terminator in vec).
+    /// The backend emits each value as .long and adds a null terminator.
+    WideString(Vec<u32>),
     /// Address of another global (for pointer globals like `const char *s = "hello"`).
     GlobalAddr(String),
     /// Address of a global plus a byte offset (for `&arr[3]`, `&s.field`, etc.).
@@ -801,6 +806,7 @@ impl IrModule {
             functions: Vec::new(),
             globals: Vec::new(),
             string_literals: Vec::new(),
+            wide_string_literals: Vec::new(),
         }
     }
 

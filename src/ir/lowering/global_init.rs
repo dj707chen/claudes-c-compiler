@@ -60,9 +60,28 @@ impl Lowerer {
                     if is_array && (base_ty == IrType::I8 || base_ty == IrType::U8) {
                         // Char array: char s[] = "hello" -> inline the string bytes
                         return GlobalInit::String(s.clone());
+                    } else if is_array && base_ty == IrType::I32 {
+                        // Narrow string to wchar_t array: promote each byte to I32
+                        let chars: Vec<u32> = s.chars().map(|c| c as u32).collect();
+                        return GlobalInit::WideString(chars);
                     } else {
                         // Pointer: const char *s = "hello" -> reference .rodata label
                         let label = self.intern_string_literal(s);
+                        return GlobalInit::GlobalAddr(label);
+                    }
+                }
+                // Wide string literal initializer
+                if let Expr::WideStringLiteral(s, _) = expr {
+                    if is_array && base_ty == IrType::I32 {
+                        // wchar_t array: wchar_t s[] = L"hello" -> inline as I32 array
+                        let chars: Vec<u32> = s.chars().map(|c| c as u32).collect();
+                        return GlobalInit::WideString(chars);
+                    } else if is_array && (base_ty == IrType::I8 || base_ty == IrType::U8) {
+                        // Wide string to char array (just take low bytes)
+                        return GlobalInit::String(s.clone());
+                    } else {
+                        // Pointer: const wchar_t *s = L"hello" -> reference .rodata label
+                        let label = self.intern_wide_string_literal(s);
                         return GlobalInit::GlobalAddr(label);
                     }
                 }

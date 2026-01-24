@@ -150,11 +150,19 @@ impl PtrDirective {
 /// Emit all data sections (rodata for string literals, .data and .bss for globals).
 pub fn emit_data_sections(out: &mut AsmOutput, module: &IrModule, ptr_dir: PtrDirective) {
     // String literals in .rodata
-    if !module.string_literals.is_empty() {
+    if !module.string_literals.is_empty() || !module.wide_string_literals.is_empty() {
         out.emit(".section .rodata");
         for (label, value) in &module.string_literals {
             out.emit(&format!("{}:", label));
             emit_string_bytes(out, value);
+        }
+        // Wide string literals (L"..."): each char is a 4-byte wchar_t value
+        for (label, chars) in &module.wide_string_literals {
+            out.emit(&format!(".align 4"));
+            out.emit(&format!("{}:", label));
+            for &ch in chars {
+                out.emit(&format!("  .long {}", ch));
+            }
         }
         out.emit("");
     }
@@ -251,6 +259,18 @@ fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
                 out.emit(&format!("    .zero {}", g.size - string_bytes));
             }
         }
+        GlobalInit::WideString(chars) => {
+            // Emit wide string as array of .long values (4 bytes each)
+            for &ch in chars {
+                out.emit(&format!("    .long {}", ch));
+            }
+            // Null terminator
+            out.emit("    .long 0");
+            let wide_bytes = (chars.len() + 1) * 4;
+            if g.size > wide_bytes {
+                out.emit(&format!("    .zero {}", g.size - wide_bytes));
+            }
+        }
         GlobalInit::GlobalAddr(label) => {
             out.emit(&format!("    {} {}", ptr_dir.as_str(), label));
         }
@@ -283,6 +303,12 @@ fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
                         } else {
                             out.emit(&format!("    {} {}{}", ptr_dir.as_str(), label, offset));
                         }
+                    }
+                    GlobalInit::WideString(chars) => {
+                        for &ch in chars {
+                            out.emit(&format!("    .long {}", ch));
+                        }
+                        out.emit("    .long 0"); // null terminator
                     }
                     GlobalInit::Zero => {
                         // Emit a zero-initialized element of the appropriate size
