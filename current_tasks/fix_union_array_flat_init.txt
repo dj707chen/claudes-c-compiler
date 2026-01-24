@@ -1,0 +1,12 @@
+Fix union array flat initialization bug.
+
+When a union array is flat-initialized (no braces per element), the compiler
+consumes too many initializers per union element - it treats the union like a
+struct and consumes initializers for all members, but a union should only consume
+one initializer for its first (active) member.
+
+Example: union U { int a; int b; } un[2][2] = { 1, 4, 6, 7 };
+Expected: un[0][0].a=1, un[0][1].a=4, un[1][0].a=6, un[1][1].a=7
+Actual:   un[0][0].a=4, un[0][1].a=7, un[1][0].a=0, un[1][1].a=0
+
+Status: LOCKED
