@@ -785,21 +785,14 @@ impl ArchCodegen for RiscvCodegen {
                         self.emit_store_to_s0("t0", slot.0, "sd");
                         int_reg_idx += 2;
                     } else if is_long_double && is_stack_passed {
-                        // F128 stack-passed: 16 bytes, 16-byte aligned
-                        let extra = if has_f128_reg_params { 64 } else { 0 };
-                        let adj_offset = stack_param_offset + extra;
+                        // F128 stack-passed: 16 bytes, 16-byte aligned.
+                        // Stack params are at positive s0 offsets regardless of
+                        // whether there's an f128 register save area (which is
+                        // at sp, below s0).
                         stack_param_offset = (stack_param_offset + 15) & !15;
-                        // Load the f128 from stack and call __trunctfdf2
-                        self.emit_load_from_s0(
-                            "a0",
-                            (adj_offset + 15) & !15,
-                            "ld",
-                        );
-                        self.emit_load_from_s0(
-                            "a1",
-                            ((adj_offset + 15) & !15) + 8,
-                            "ld",
-                        );
+                        // Load the f128 from caller's stack and call __trunctfdf2
+                        self.emit_load_from_s0("a0", stack_param_offset, "ld");
+                        self.emit_load_from_s0("a1", stack_param_offset + 8, "ld");
                         self.state.emit("    call __trunctfdf2");
                         self.state.emit("    fmv.x.d t0, fa0");
                         self.emit_store_to_s0("t0", slot.0, "sd");
