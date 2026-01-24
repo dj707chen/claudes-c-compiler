@@ -1,0 +1,25 @@
+Bug: Function pointers with typedef'd pointer return types incorrectly classified as struct returns (sret)
+
+Root cause: extract_func_ptr_return_ctype in expr_types.rs unconditionally peeled one
+CType::Pointer wrapper from function return types, assuming it was a syntax artifact from
+build_full_ctype's declarator processing. However, when the return type is a typedef'd
+pointer (e.g., typedef struct TableScanDescData *TableScanDesc), the Pointer IS the actual
+return type. Peeling it exposed CType::Struct(...), triggering incorrect sret classification.
+
+This caused all arguments to shift by one register position (hidden sret pointer inserted
+as first arg in rdi), so callees received wrong values. In PostgreSQL, this manifested as
+table_beginscan calling heap_beginscan through the TableAmRoutine vtable with corrupted
+nkeys argument, causing "invalid memory alloc request size" (~47GB) fatal error during
+bootstrap.
+
+Fix: Rewrote extract_func_ptr_return_ctype to handle three CType shapes correctly:
+1. Pointer(Function(return_type)) - return type used directly (no peeling)
+2. Pointer(Pointer(Function(return_type))) - outer Pointer is return-type pointer,
+   reconstruct as Pointer(return_type)
+3. Pointer(X) where X is not Function - typedef lost Function node, X is return type
+
+Files changed:
+- src/ir/lowering/expr_types.rs (extract_func_ptr_return_ctype rewrite)
+- tests/typedef-ptr-return-fptr-vtable/ (new regression test)
+
+Status: LOCKED

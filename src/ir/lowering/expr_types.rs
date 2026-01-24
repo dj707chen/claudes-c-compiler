@@ -182,30 +182,45 @@ impl Lowerer {
     }
 
     /// Extract the return CType from a function pointer CType.
-    /// Handles Pointer(Function(ft)) patterns and peels the extra Pointer wrapper
-    /// that build_full_ctype adds.
+    ///
+    /// Three CType shapes arise for function pointer variables:
+    ///
+    /// 1. `Pointer(Function(return_type))` - direct function pointer declaration
+    ///    like `struct S (*fp)()`. return_type is the actual C return type.
+    ///
+    /// 2. `Pointer(Pointer(Function(return_type)))` - explicit pointer return like
+    ///    `int *(*fp)()`. The outer Pointer (above Function) is the return-type
+    ///    pointer; return_type is the base type (e.g., Int). We reconstruct the
+    ///    full return type as Pointer(return_type).
+    ///
+    /// 3. `Pointer(X)` where X is not Function - typedef'd function pointer where
+    ///    resolve_typedef_derived lost the Function node (e.g., `typedef S16 (*fn_t)(long, long);
+    ///    fn_t fp;` stores CType as `Pointer(Struct(S16))`). Since this function
+    ///    is only called for known function calls, X is the return type.
     fn extract_func_ptr_return_ctype(ctype: &CType) -> Option<CType> {
         match ctype {
             CType::Pointer(inner) => match inner.as_ref() {
                 CType::Function(ft) => {
-                    // Peel one Pointer wrapper from return type (added by declarator syntax)
-                    match &ft.return_type {
-                        CType::Pointer(ret_inner) => Some(ret_inner.as_ref().clone()),
-                        other => Some(other.clone()),
-                    }
+                    // Shape 1: Pointer(Function(..))
+                    Some(ft.return_type.clone())
                 }
-                // For typedef function pointers, the CType may be Pointer(ReturnType)
-                // without the Function wrapper (build_full_ctype stores only the return
-                // type for typedef'd function pointer variables). Since this function is
-                // only called when we know the expression is a function call, the inner
-                // type IS the return type.
+                CType::Pointer(inner2) => match inner2.as_ref() {
+                    CType::Function(ft) => {
+                        // Shape 2: Pointer(Pointer(Function(..)))
+                        // The extra Pointer is the return-type pointer
+                        Some(CType::Pointer(Box::new(ft.return_type.clone())))
+                    }
+                    // Shape 3 fallback: Pointer(Pointer(X)) where typedef lost
+                    // the Function node. The inner Pointer(X) is the return type
+                    // (a pointer return), so return it as-is.
+                    _ => Some(inner.as_ref().clone()),
+                },
+                // Shape 3: Pointer(X) where X is not Function/Pointer.
+                // Typedef lost the Function node; X is the return type.
                 other => Some(other.clone()),
             },
             CType::Function(ft) => {
-                match &ft.return_type {
-                    CType::Pointer(ret_inner) => Some(ret_inner.as_ref().clone()),
-                    other => Some(other.clone()),
-                }
+                Some(ft.return_type.clone())
             }
             _ => None,
         }
