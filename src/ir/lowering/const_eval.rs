@@ -751,10 +751,22 @@ impl Lowerer {
             if current_idx >= max_idx {
                 max_idx = current_idx + 1;
             }
-            current_idx += 1;
+            // Only advance to next element if this item does NOT have a field
+            // designator (e.g., [0].field = val should NOT advance the index,
+            // since multiple items may target different fields of the same element)
+            let has_field_designator = item.designators.iter().any(|d| matches!(d, Designator::Field(_)));
+            if !has_field_designator {
+                current_idx += 1;
+            }
         }
-        // At minimum, the array size equals items.len() for non-designated cases
-        max_idx.max(items.len())
+        // For non-designated cases, each item is one element so use items.len().
+        // For designated cases, max_idx already accounts for the correct count.
+        let has_any_designator = items.iter().any(|item| !item.designators.is_empty());
+        if has_any_designator {
+            max_idx
+        } else {
+            max_idx.max(items.len())
+        }
     }
 
     /// Compute the number of struct elements in a flat initializer list for an unsized

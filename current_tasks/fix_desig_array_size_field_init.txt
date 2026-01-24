@@ -1,8 +1,0 @@
-Fix compute_init_list_array_size for [idx].field designated initializers
-
-The generic array size computation incorrectly counted each [idx].field
-item as a separate array element. For example:
-  static S arr[] = { [0].a = 1, [0].b = 2, [1].a = 3, [1].b = 4 };
-would compute size 4 instead of 2.
-
-Also adds regression test for [idx].field init with function pointers.
