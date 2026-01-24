@@ -160,10 +160,11 @@ impl Lowerer {
     fn handle_complex_return(&mut self, dest: Value, ret_ct: &CType) -> Option<Operand> {
         match ret_ct {
             CType::ComplexFloat => {
-                // _Complex float: packed {real, imag} in a single I64 register
+                // _Complex float: two packed F32 returned in xmm0 as F64
+                // Store the raw 8 bytes (two F32s) into an alloca
                 let alloca = self.fresh_value();
                 self.emit(Instruction::Alloca { dest: alloca, ty: IrType::Ptr, size: 8 });
-                self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::I64 });
+                self.emit(Instruction::Store { val: Operand::Value(dest), ptr: alloca, ty: IrType::F64 });
                 Some(Operand::Value(alloca))
             }
             CType::ComplexDouble => {

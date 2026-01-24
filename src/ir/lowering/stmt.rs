@@ -1057,10 +1057,10 @@ impl Lowerer {
                                 return real;
                             }
 
-                            // _Complex float: pack into I64 for register return
+                            // _Complex float: load packed 8 bytes as F64 for XMM register return
                             if *rct == CType::ComplexFloat && !self.func_meta.sret_functions.contains_key(&self.current_function_name) {
                                 let packed = self.fresh_value();
-                                self.emit(Instruction::Load { dest: packed, ptr: src_ptr, ty: IrType::I64 });
+                                self.emit(Instruction::Load { dest: packed, ptr: src_ptr, ty: IrType::F64 });
                                 return Operand::Value(packed);
                             }
                         }

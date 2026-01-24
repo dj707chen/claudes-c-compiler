@@ -305,8 +305,37 @@ impl Lowerer {
         self.func_meta.param_ctypes.insert("crealf".to_string(), vec![CType::ComplexFloat]);
         self.func_meta.return_types.insert("cimagf".to_string(), F32);
         self.func_meta.param_ctypes.insert("cimagf".to_string(), vec![CType::ComplexFloat]);
-        self.func_meta.return_types.insert("conj".to_string(), F64);
-        self.func_meta.return_types.insert("conjf".to_string(), F32);
+        // Functions returning _Complex double (real in xmm0, imag in xmm1):
+        let cd_cd: &[&str] = &[
+            "csqrt", "cexp", "clog", "csin", "ccos", "ctan",
+            "casin", "cacos", "catan", "csinh", "ccosh", "ctanh",
+            "casinh", "cacosh", "catanh", "conj",
+        ];
+        for name in cd_cd {
+            self.func_meta.return_types.insert(name.to_string(), F64);
+            self.func_meta.param_ctypes.insert(name.to_string(), vec![CType::ComplexDouble]);
+            self.func_return_ctypes.insert(name.to_string(), CType::ComplexDouble);
+        }
+
+        // Functions returning _Complex float (packed two F32 in I64):
+        let cf_cf: &[&str] = &[
+            "csqrtf", "cexpf", "clogf", "csinf", "ccosf", "ctanf",
+            "casinf", "cacosf", "catanf", "csinhf", "ccoshf", "ctanhf",
+            "casinhf", "cacoshf", "catanhf", "conjf",
+        ];
+        for name in cf_cf {
+            self.func_meta.return_types.insert(name.to_string(), F64);
+            self.func_meta.param_ctypes.insert(name.to_string(), vec![CType::ComplexFloat]);
+            self.func_return_ctypes.insert(name.to_string(), CType::ComplexFloat);
+        }
+
+        // cpow/cpowf take two complex args
+        self.func_meta.return_types.insert("cpow".to_string(), F64);
+        self.func_meta.param_ctypes.insert("cpow".to_string(), vec![CType::ComplexDouble, CType::ComplexDouble]);
+        self.func_return_ctypes.insert("cpow".to_string(), CType::ComplexDouble);
+        self.func_meta.return_types.insert("cpowf".to_string(), F64);
+        self.func_meta.param_ctypes.insert("cpowf".to_string(), vec![CType::ComplexFloat, CType::ComplexFloat]);
+        self.func_return_ctypes.insert("cpowf".to_string(), CType::ComplexFloat);
     }
 
     pub(super) fn type_spec_to_ir(&self, ts: &TypeSpecifier) -> IrType {

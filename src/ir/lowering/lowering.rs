@@ -724,11 +724,14 @@ impl Lowerer {
         if ptr_count > 0 {
             ret_ty = IrType::Ptr;
         }
-        // _Complex double returns real part in xmm0 (F64), imag in xmm1.
-        // Override the Ptr IR type to F64 so the backend uses FP return register.
+        // Complex return types need special IR type overrides:
+        // _Complex double: real in xmm0 (F64), imag in xmm1
+        // _Complex float: packed two F32 in one register (I64)
         if ptr_count == 0 {
             let resolved = self.resolve_type_spec(ret_type_spec).clone();
             if matches!(resolved, TypeSpecifier::ComplexDouble) {
+                ret_ty = IrType::F64;
+            } else if matches!(resolved, TypeSpecifier::ComplexFloat) {
                 ret_ty = IrType::F64;
             }
         }
@@ -959,10 +962,12 @@ impl Lowerer {
             return_type = IrType::I128;
         }
 
-        // _Complex double returns via xmm0+xmm1, not sret. Override return type to F64.
+        // Complex returns via XMM registers, not sret. Override return type to F64.
+        // _Complex double: real in xmm0, imag in xmm1 (F64)
+        // _Complex float: two packed F32 in xmm0 (F64)
         if !uses_sret && !uses_two_reg_return {
             let resolved_ret = self.resolve_type_spec(&func.return_type).clone();
-            if matches!(resolved_ret, TypeSpecifier::ComplexDouble) {
+            if matches!(resolved_ret, TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexFloat) {
                 return_type = IrType::F64;
             }
         }
@@ -981,9 +986,11 @@ impl Lowerer {
         if uses_sret {
             ir_param_to_orig.push(None); // sret param has no original
         }
+        let mut complex_float_params: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for (orig_idx, p) in func.params.iter().enumerate() {
             let resolved = self.resolve_type_spec(&p.type_spec).clone();
             let is_complex_decomposed = matches!(resolved, TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble);
+            let is_complex_float = matches!(resolved, TypeSpecifier::ComplexFloat);
             if is_complex_decomposed {
                 let ct = self.type_spec_to_ctype(&resolved);
                 let comp_ty = Self::complex_component_ir_type(&ct);
@@ -994,6 +1001,12 @@ impl Lowerer {
                 params.push(IrParam { name: format!("{}_imag", name), ty: comp_ty });
                 ir_param_to_orig.push(Some(orig_idx));
                 complex_decomposed.insert(orig_idx);
+            } else if is_complex_float {
+                // _Complex float: packed two F32 in one XMM register as F64
+                let name = p.name.clone().unwrap_or_default();
+                params.push(IrParam { name: format!("{}_packed", name), ty: IrType::F64 });
+                ir_param_to_orig.push(Some(orig_idx));
+                complex_float_params.insert(orig_idx);
             } else {
                 let ty = self.type_spec_to_ir(&p.type_spec);
                 let ty = if func.is_kr && ty == IrType::F32 { IrType::F64 } else { ty };
@@ -1053,6 +1066,41 @@ impl Lowerer {
                 Some(Some(idx)) => *idx,
                 _ => continue, // shouldn't happen
             };
+
+            // Check if this IR param is a packed complex float param
+            if complex_float_params.contains(&orig_idx) {
+                // _Complex float: F64 param holding two packed F32s in one XMM register.
+                // Emit an 8-byte alloca. emit_store_params will store the F64 value here.
+                // Since F64 and complex float are both 8 bytes with the same bit layout,
+                // we can use this alloca directly as the complex local variable.
+                let alloca = self.fresh_value();
+                self.emit(Instruction::Alloca {
+                    dest: alloca,
+                    ty: IrType::F64,
+                    size: 8,
+                });
+                let orig_name = func.params[orig_idx].name.clone().unwrap_or_default();
+                let ct = self.type_spec_to_ctype(&func.params[orig_idx].type_spec);
+                self.insert_local_scoped(orig_name, LocalInfo {
+                    var: VarInfo {
+                        ty: IrType::Ptr,
+                        elem_size: 0,
+                        is_array: false,
+                        pointee_type: None,
+                        struct_layout: None,
+                        is_struct: true,
+                        array_dim_strides: vec![],
+                        c_type: Some(ct),
+                    },
+                    alloca,
+                    alloc_size: 8,
+                    is_bool: false,
+                    static_global_name: None,
+                    vla_strides: vec![],
+                    vla_size: None,
+                });
+                continue;
+            }
 
             // Check if this IR param is part of a decomposed complex param
             let is_decomposed = complex_decomposed.contains(&orig_idx);

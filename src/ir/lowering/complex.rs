@@ -886,6 +886,32 @@ impl Lowerer {
 
         for (i, (val, ty)) in arg_vals.iter().zip(arg_types.iter()).enumerate() {
             let ctype = pctypes.get(i);
+
+            // Check for ComplexFloat: pack two F32 into a single F64 (xmm register)
+            // Per x86-64 SysV ABI: _Complex float is SSE class, both floats in one XMM slot
+            let is_complex_float = match ctype {
+                Some(CType::ComplexFloat) => true,
+                None => {
+                    if *ty == IrType::Ptr && i < args.len() {
+                        matches!(self.expr_ctype(&args[i]), CType::ComplexFloat)
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+
+            if is_complex_float {
+                // Load the 8-byte complex float value as F64 (preserves bit pattern
+                // of two packed F32s) so it passes through an XMM register
+                let ptr = self.operand_to_value(val.clone());
+                let packed = self.fresh_value();
+                self.emit(Instruction::Load { dest: packed, ptr, ty: IrType::F64 });
+                new_vals.push(Operand::Value(packed));
+                new_types.push(IrType::F64);
+                continue;
+            }
+
             let should_decompose = match ctype {
                 Some(CType::ComplexDouble) | Some(CType::ComplexLongDouble) => true,
                 Some(_) => false, // param type is known but not a decomposed complex type
