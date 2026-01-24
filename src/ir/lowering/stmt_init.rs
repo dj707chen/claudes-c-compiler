@@ -411,9 +411,16 @@ impl Lowerer {
                                     sub_idx += 1;
                                     row_elem += 1;
                                 }
-                                Initializer::Expr(_) => {
-                                    let consumed = self.emit_struct_init(&sub_items[sub_idx..], alloca, s_layout, row_offset);
-                                    sub_idx += consumed.max(1);
+                                Initializer::Expr(e) => {
+                                    if self.struct_value_size(e).is_some() {
+                                        // Whole struct copy (e.g., *ptr where ptr is struct *)
+                                        let src_addr = self.get_struct_base_addr(e);
+                                        self.emit_memcpy_at_offset(alloca, row_offset, src_addr, struct_size);
+                                        sub_idx += 1;
+                                    } else {
+                                        let consumed = self.emit_struct_init(&sub_items[sub_idx..], alloca, s_layout, row_offset);
+                                        sub_idx += consumed.max(1);
+                                    }
                                     row_elem += 1;
                                 }
                             }
@@ -434,6 +441,13 @@ impl Lowerer {
                             self.emit_store_at_offset(alloca, base_byte_offset + field.offset, val, field_ty);
                         }
                         item_idx += 1;
+                    } else if self.struct_value_size(e).is_some() {
+                        // Whole struct copy (e.g., *ptr where ptr is struct *)
+                        let src_addr = self.get_struct_base_addr(e);
+                        self.emit_memcpy_at_offset(alloca, base_byte_offset, src_addr, struct_size);
+                        item_idx += 1;
+                        flat_struct_idx += 1;
+                        continue;
                     } else {
                         let consumed = self.emit_struct_init(&items[item_idx..], alloca, s_layout, base_byte_offset);
                         item_idx += consumed.max(1);
