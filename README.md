@@ -56,6 +56,14 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
   - Constant expression evaluation for initializers
 
 ### Recent Additions
+- **Global init nested struct pointer collection and address-of member chains**: Fixed two bugs
+  in global/static initializer system. (1) Nested struct init lists with braced sub-initializers
+  (e.g., `.interface = { .init = myInit }`) were not collecting pointer/function-pointer
+  relocations, producing NULL pointers. Added recursive scanning of nested struct init lists.
+  (2) `&global.a.b` address-of expressions with multi-level member access were not resolved as
+  global address offsets. Added `resolve_member_access_chain` for recursive offset computation.
+  These fixes enable Redis config initialization which uses deeply nested struct/union designated
+  initializers with function pointers and `&server.tls_ctx_config.session_cache_size` patterns.
 - **Self-referential struct pointer arithmetic fix**: Fixed pointer arithmetic on members of
   self-referential struct types (e.g., `struct S { struct S *next; ... }`). When resolving the
   pointee type for `node->next + n`, the CType for the self-referential pointer had `cached_size=0`
@@ -192,7 +200,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 | jq | PASS | All 12 tests pass |
 | sqlite | PARTIAL | Builds; 573/622 (92%) sqllogictest pass |
 | libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |
-| redis | PARTIAL | Builds; redis-cli works; redis-server crashes on startup (separate global struct issue) |
+| redis | PARTIAL | Builds; redis-server --version and redis-cli work; server starts but Lua init fails |
 | postgres | PARTIAL | Configure passes; build fails on missing SSE intrinsic builtins |
 
 ### What's Not Yet Implemented
