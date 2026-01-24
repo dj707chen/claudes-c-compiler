@@ -368,23 +368,13 @@ impl Lowerer {
                     }
                 }
                 // Check if this variable has struct layout info (pointer to struct)
-                if let Some(info) = self.locals.get(name) {
-                    if let Some(ref layout) = info.struct_layout {
+                if let Some(vi) = self.lookup_var_info(name) {
+                    if let Some(ref layout) = vi.struct_layout {
                         return Some(layout.clone());
                     }
                     // Fallback: resolve from c_type if layout was not available at declaration time
                     // (forward-declared struct pointer case)
-                    if let Some(ref ct) = info.c_type {
-                        if let Some(layout) = self.resolve_struct_from_pointer_ctype(ct) {
-                            return Some(layout);
-                        }
-                    }
-                }
-                if let Some(ginfo) = self.globals.get(name) {
-                    if let Some(ref layout) = ginfo.struct_layout {
-                        return Some(layout.clone());
-                    }
-                    if let Some(ref ct) = ginfo.c_type {
+                    if let Some(ref ct) = vi.c_type {
                         if let Some(layout) = self.resolve_struct_from_pointer_ctype(ct) {
                             return Some(layout);
                         }
@@ -569,11 +559,8 @@ impl Lowerer {
                         return ginfo.struct_layout.clone();
                     }
                 }
-                if let Some(info) = self.locals.get(name) {
-                    return info.struct_layout.clone();
-                }
-                if let Some(ginfo) = self.globals.get(name) {
-                    return ginfo.struct_layout.clone();
+                if let Some(vi) = self.lookup_var_info(name) {
+                    return vi.struct_layout.clone();
                 }
                 None
             }

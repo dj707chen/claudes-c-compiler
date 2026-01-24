@@ -480,15 +480,9 @@ impl Lowerer {
         if let Some(ctype) = self.var_ctypes.get(name) {
             return ctype.clone();
         }
-        // Check locals (has c_type field)
-        if let Some(local) = self.locals.get(name) {
-            if let Some(ref ct) = local.c_type {
-                return ct.clone();
-            }
-        }
-        // Check globals
-        if let Some(global) = self.globals.get(name) {
-            if let Some(ref ct) = global.c_type {
+        // Check locals/globals shared VarInfo
+        if let Some(vi) = self.lookup_var_info(name) {
+            if let Some(ref ct) = vi.c_type {
                 return ct.clone();
             }
         }

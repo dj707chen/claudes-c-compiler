@@ -42,18 +42,22 @@ pub(super) fn resolve_typedef_derived(base: &TypeSpecifier, derived: &[DerivedDe
     resolved_type
 }
 
-/// Information about a local variable stored in an alloca.
+/// Type metadata shared between local and global variables.
+///
+/// Both `LocalInfo` and `GlobalInfo` embed this struct via `Deref`, so field
+/// access like `info.ty` or `info.is_array` works transparently on either type.
+/// The `Lowerer::lookup_var_info()` helper returns `&VarInfo` for cases that
+/// only need these shared fields, eliminating the duplicated locals-then-globals
+/// lookup pattern.
 #[derive(Debug, Clone)]
-pub(super) struct LocalInfo {
-    /// The Value (alloca) holding the address of this local.
-    pub alloca: Value,
+pub(super) struct VarInfo {
+    /// The IR type of the variable (I8 for char, I32 for int, I64 for long, Ptr for pointers).
+    pub ty: IrType,
     /// Element size for arrays (used for pointer arithmetic on subscript).
     /// For non-arrays this is 0.
     pub elem_size: usize,
     /// Whether this is an array (the alloca IS the base address, not a pointer to one).
     pub is_array: bool,
-    /// The IR type of the variable (I8 for char, I32 for int, I64 for long, Ptr for pointers).
-    pub ty: IrType,
     /// For pointers and arrays, the type of the pointed-to/element type.
     /// Used for correct loads through pointer dereference and subscript.
     pub pointee_type: Option<IrType>,
@@ -61,14 +65,24 @@ pub(super) struct LocalInfo {
     pub struct_layout: Option<StructLayout>,
     /// Whether this variable is a struct (not a pointer to struct).
     pub is_struct: bool,
-    /// The total allocation size of this variable (for sizeof).
-    pub alloc_size: usize,
     /// For multi-dimensional arrays: stride (in bytes) per dimension level.
     /// E.g., for int a[2][3][4], strides = [48, 16, 4] (row_size, inner_row, elem).
     /// Empty for non-arrays or 1D arrays (use elem_size instead).
     pub array_dim_strides: Vec<usize>,
     /// Full C type for precise multi-level pointer type resolution.
     pub c_type: Option<CType>,
+}
+
+/// Information about a local variable stored in an alloca.
+/// Derefs to `VarInfo` for shared field access.
+#[derive(Debug, Clone)]
+pub(super) struct LocalInfo {
+    /// Shared type metadata (ty, elem_size, is_array, pointee_type, etc.)
+    pub var: VarInfo,
+    /// The Value (alloca) holding the address of this local.
+    pub alloca: Value,
+    /// The total allocation size of this variable (for sizeof).
+    pub alloc_size: usize,
     /// Whether this variable has _Bool type (needs value clamping to 0/1).
     pub is_bool: bool,
     /// For static local variables: the mangled global name. When set, accesses should
@@ -85,25 +99,30 @@ pub(super) struct LocalInfo {
     pub vla_size: Option<Value>,
 }
 
+impl std::ops::Deref for LocalInfo {
+    type Target = VarInfo;
+    fn deref(&self) -> &VarInfo { &self.var }
+}
+
+impl std::ops::DerefMut for LocalInfo {
+    fn deref_mut(&mut self) -> &mut VarInfo { &mut self.var }
+}
+
 /// Information about a global variable tracked by the lowerer.
+/// Derefs to `VarInfo` for shared field access.
 #[derive(Debug, Clone)]
 pub(super) struct GlobalInfo {
-    /// The IR type of the global variable.
-    pub ty: IrType,
-    /// Element size for array globals.
-    pub elem_size: usize,
-    /// Whether this is an array.
-    pub is_array: bool,
-    /// For pointers and arrays, the type of the pointed-to/element type.
-    pub pointee_type: Option<IrType>,
-    /// If this is a struct/union variable, its layout for member access.
-    pub struct_layout: Option<StructLayout>,
-    /// Whether this variable is a struct (not a pointer to struct).
-    pub is_struct: bool,
-    /// For multi-dimensional arrays: stride per dimension level.
-    pub array_dim_strides: Vec<usize>,
-    /// Full C type for precise multi-level pointer type resolution.
-    pub c_type: Option<CType>,
+    /// Shared type metadata (ty, elem_size, is_array, pointee_type, etc.)
+    pub var: VarInfo,
+}
+
+impl std::ops::Deref for GlobalInfo {
+    type Target = VarInfo;
+    fn deref(&self) -> &VarInfo { &self.var }
+}
+
+impl std::ops::DerefMut for GlobalInfo {
+    fn deref_mut(&mut self) -> &mut VarInfo { &mut self.var }
 }
 
 /// Pre-computed declaration analysis shared between `lower_local_decl` and
@@ -317,6 +336,38 @@ impl Lowerer {
             var_ctypes: HashMap::new(),
             func_return_ctypes: HashMap::new(),
             emitted_global_names: HashSet::new(),
+        }
+    }
+
+    /// Look up the shared type metadata for a variable by name.
+    ///
+    /// Checks locals first, then globals. Returns `&VarInfo` which provides
+    /// access to the 8 shared fields (ty, elem_size, is_array, pointee_type,
+    /// struct_layout, is_struct, array_dim_strides, c_type).
+    ///
+    /// Use this instead of duplicating `if let Some(info) = self.locals.get(name)
+    /// ... if let Some(ginfo) = self.globals.get(name)` when only shared fields
+    /// are needed.
+    pub(super) fn lookup_var_info(&self, name: &str) -> Option<&VarInfo> {
+        if let Some(info) = self.locals.get(name) {
+            return Some(&info.var);
+        }
+        if let Some(ginfo) = self.globals.get(name) {
+            return Some(&ginfo.var);
+        }
+        None
+    }
+
+    /// Resolve the CType of a struct/union field, handling both direct member access
+    /// (s.field) and pointer member access (p->field) through a single entry point.
+    ///
+    /// Replaces the previous pattern of dispatching between `resolve_member_field_ctype`
+    /// and `resolve_pointer_member_field_ctype` at every call site.
+    pub(super) fn resolve_field_ctype(&self, base_expr: &Expr, field_name: &str, is_pointer_access: bool) -> Option<CType> {
+        if is_pointer_access {
+            self.resolve_pointer_member_field_ctype(base_expr, field_name)
+        } else {
+            self.resolve_member_field_ctype(base_expr, field_name)
         }
     }
 
@@ -796,16 +847,18 @@ impl Lowerer {
                     } else { vec![] };
 
                     self.locals.insert(param.name.clone(), LocalInfo {
+                        var: VarInfo {
+                            ty,
+                            elem_size,
+                            is_array: false,
+                            pointee_type,
+                            struct_layout,
+                            is_struct: false,
+                            array_dim_strides,
+                            c_type,
+                        },
                         alloca,
-                        elem_size,
-                        is_array: false,
-                        ty,
-                        pointee_type,
-                        struct_layout,
-                        is_struct: false,
                         alloc_size: param_size,
-                        array_dim_strides,
-                        c_type,
                         is_bool,
                         static_global_name: None,
                         vla_strides: vec![],
@@ -861,16 +914,18 @@ impl Lowerer {
 
             // Register the struct/complex alloca as the local variable
             self.locals.insert(sp.param_name, LocalInfo {
+                var: VarInfo {
+                    ty: IrType::Ptr,
+                    elem_size: 0,
+                    is_array: false,
+                    pointee_type: None,
+                    struct_layout: sp.struct_layout,
+                    is_struct: true,
+                    array_dim_strides: vec![],
+                    c_type: sp.c_type,
+                },
                 alloca: struct_alloca,
-                elem_size: 0,
-                is_array: false,
-                ty: IrType::Ptr,
-                pointee_type: None,
-                struct_layout: sp.struct_layout,
-                is_struct: true,
                 alloc_size: sp.struct_size,
-                array_dim_strides: vec![],
-                c_type: sp.c_type,
                 is_bool: false,
                 static_global_name: None,
                 vla_strides: vec![],
@@ -1385,9 +1440,8 @@ impl Lowerer {
                 if let Some(info) = self.locals.get(name) {
                     return info.is_bool;
                 }
-                // Check global variables for _Bool type
-                if let Some(ginfo) = self.globals.get(name) {
-                    if let Some(ref ct) = ginfo.c_type {
+                if let Some(vi) = self.lookup_var_info(name) {
+                    if let Some(ref ct) = vi.c_type {
                         return matches!(ct, CType::Bool);
                     }
                 }
@@ -1411,12 +1465,9 @@ impl Lowerer {
     pub(super) fn expr_is_pointer(&self, expr: &Expr) -> bool {
         match expr {
             Expr::Identifier(name, _) => {
-                if let Some(info) = self.locals.get(name) {
+                if let Some(vi) = self.lookup_var_info(name) {
                     // Arrays decay to pointers in expression context
-                    return (info.ty == IrType::Ptr || info.is_array) && !info.is_struct;
-                }
-                if let Some(ginfo) = self.globals.get(name) {
-                    return (ginfo.ty == IrType::Ptr || ginfo.is_array) && !ginfo.is_struct;
+                    return (vi.ty == IrType::Ptr || vi.is_array) && !vi.is_struct;
                 }
                 false
             }
@@ -1472,15 +1523,13 @@ impl Lowerer {
                 false
             }
             Expr::MemberAccess(base_expr, field_name, _) => {
-                // Struct member that is an array (decays to pointer) or pointer type
-                if let Some(ctype) = self.resolve_member_field_ctype(base_expr, field_name) {
+                if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, false) {
                     return matches!(ctype, CType::Array(_, _) | CType::Pointer(_));
                 }
                 false
             }
             Expr::PointerMemberAccess(base_expr, field_name, _) => {
-                // Pointer member access: p->field where field is array or pointer
-                if let Some(ctype) = self.resolve_pointer_member_field_ctype(base_expr, field_name) {
+                if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, true) {
                     return matches!(ctype, CType::Array(_, _) | CType::Pointer(_));
                 }
                 false
@@ -1517,21 +1566,12 @@ impl Lowerer {
         }
         match expr {
             Expr::Identifier(name, _) => {
-                // Check locals then globals for pointee_type or elem_size.
-                if let Some(info) = self.locals.get(name) {
-                    if let Some(pt) = info.pointee_type {
+                if let Some(vi) = self.lookup_var_info(name) {
+                    if let Some(pt) = vi.pointee_type {
                         return pt.size();
                     }
-                    if info.elem_size > 0 {
-                        return info.elem_size;
-                    }
-                }
-                if let Some(ginfo) = self.globals.get(name) {
-                    if let Some(pt) = ginfo.pointee_type {
-                        return pt.size();
-                    }
-                    if ginfo.elem_size > 0 {
-                        return ginfo.elem_size;
+                    if vi.elem_size > 0 {
+                        return vi.elem_size;
                     }
                 }
                 8
@@ -1587,18 +1627,9 @@ impl Lowerer {
                     8
                 }
             }
-            Expr::MemberAccess(base_expr, field_name, _) => {
-                if let Some(ctype) = self.resolve_member_field_ctype(base_expr, field_name) {
-                    match &ctype {
-                        CType::Array(elem_ty, _) => return elem_ty.size(),
-                        CType::Pointer(pointee_ty) => return pointee_ty.size(),
-                        _ => {}
-                    }
-                }
-                8
-            }
-            Expr::PointerMemberAccess(base_expr, field_name, _) => {
-                if let Some(ctype) = self.resolve_pointer_member_field_ctype(base_expr, field_name) {
+            Expr::MemberAccess(base_expr, field_name, _) | Expr::PointerMemberAccess(base_expr, field_name, _) => {
+                let is_ptr = matches!(expr, Expr::PointerMemberAccess(..));
+                if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, is_ptr) {
                     match &ctype {
                         CType::Array(elem_ty, _) => return elem_ty.size(),
                         CType::Pointer(pointee_ty) => return pointee_ty.size(),
@@ -1629,11 +1660,8 @@ impl Lowerer {
         }
         match expr {
             Expr::Identifier(name, _) => {
-                if let Some(info) = self.locals.get(name) {
-                    return info.pointee_type;
-                }
-                if let Some(ginfo) = self.globals.get(name) {
-                    return ginfo.pointee_type;
+                if let Some(vi) = self.lookup_var_info(name) {
+                    return vi.pointee_type;
                 }
                 None
             }
@@ -1919,10 +1947,10 @@ impl Lowerer {
     }
 }
 
-impl GlobalInfo {
-    /// Construct a GlobalInfo from a DeclAnalysis, avoiding repeated field construction.
+impl VarInfo {
+    /// Construct VarInfo from a DeclAnalysis (shared by both LocalInfo and GlobalInfo).
     pub(super) fn from_analysis(da: &DeclAnalysis) -> Self {
-        GlobalInfo {
+        VarInfo {
             ty: da.var_ty,
             elem_size: da.elem_size,
             is_array: da.is_array,
@@ -1935,20 +1963,20 @@ impl GlobalInfo {
     }
 }
 
+impl GlobalInfo {
+    /// Construct a GlobalInfo from a DeclAnalysis, avoiding repeated field construction.
+    pub(super) fn from_analysis(da: &DeclAnalysis) -> Self {
+        GlobalInfo { var: VarInfo::from_analysis(da) }
+    }
+}
+
 impl LocalInfo {
     /// Construct a LocalInfo for a regular (non-static) local variable from DeclAnalysis.
     pub(super) fn from_analysis(da: &DeclAnalysis, alloca: Value) -> Self {
         LocalInfo {
+            var: VarInfo::from_analysis(da),
             alloca,
-            elem_size: da.elem_size,
-            is_array: da.is_array,
-            ty: da.var_ty,
-            pointee_type: da.pointee_type,
-            struct_layout: da.struct_layout.clone(),
-            is_struct: da.is_struct,
             alloc_size: da.actual_alloc_size,
-            array_dim_strides: da.array_dim_strides.clone(),
-            c_type: da.c_type.clone(),
             is_bool: da.is_bool,
             static_global_name: None,
             vla_strides: vec![],
@@ -1959,16 +1987,9 @@ impl LocalInfo {
     /// Construct a LocalInfo for a static local variable from DeclAnalysis.
     pub(super) fn for_static(da: &DeclAnalysis, static_name: String) -> Self {
         LocalInfo {
+            var: VarInfo::from_analysis(da),
             alloca: Value(0), // placeholder; not used for static locals
-            elem_size: da.elem_size,
-            is_array: da.is_array,
-            ty: da.var_ty,
-            pointee_type: da.pointee_type,
-            struct_layout: da.struct_layout.clone(),
-            is_struct: da.is_struct,
             alloc_size: da.actual_alloc_size,
-            array_dim_strides: da.array_dim_strides.clone(),
-            c_type: da.c_type.clone(),
             is_bool: da.is_bool,
             static_global_name: Some(static_name),
             vla_strides: vec![],

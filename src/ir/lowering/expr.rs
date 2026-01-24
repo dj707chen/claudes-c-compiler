@@ -1946,12 +1946,8 @@ impl Lowerer {
 
         // Correct from_ty for array/struct identifiers (which decay to pointers)
         if let Expr::Identifier(name, _) = inner {
-            if let Some(info) = self.locals.get(name) {
-                if info.is_array || info.is_struct {
-                    from_ty = IrType::Ptr;
-                }
-            } else if let Some(ginfo) = self.globals.get(name) {
-                if ginfo.is_array {
+            if let Some(vi) = self.lookup_var_info(name) {
+                if vi.is_array || vi.is_struct {
                     from_ty = IrType::Ptr;
                 }
             }
@@ -2461,33 +2457,21 @@ impl Lowerer {
 
     /// Check if a struct field is an array type (for array-to-pointer decay).
     fn field_is_array(&self, base_expr: &Expr, field_name: &str, is_pointer_access: bool) -> bool {
-        let ctype = if is_pointer_access {
-            self.resolve_pointer_member_field_ctype(base_expr, field_name)
-        } else {
-            self.resolve_member_field_ctype(base_expr, field_name)
-        };
-        ctype.map(|ct| matches!(ct, CType::Array(_, _))).unwrap_or(false)
+        self.resolve_field_ctype(base_expr, field_name, is_pointer_access)
+            .map(|ct| matches!(ct, CType::Array(_, _))).unwrap_or(false)
     }
 
     /// Check if a struct field is a struct/union type (returns address, not loaded value).
     fn field_is_struct(&self, base_expr: &Expr, field_name: &str, is_pointer_access: bool) -> bool {
-        let ctype = if is_pointer_access {
-            self.resolve_pointer_member_field_ctype(base_expr, field_name)
-        } else {
-            self.resolve_member_field_ctype(base_expr, field_name)
-        };
-        ctype.map(|ct| matches!(ct, CType::Struct(_) | CType::Union(_))).unwrap_or(false)
+        self.resolve_field_ctype(base_expr, field_name, is_pointer_access)
+            .map(|ct| matches!(ct, CType::Struct(_) | CType::Union(_))).unwrap_or(false)
     }
 
     /// Check if a struct field is a complex type (returns address, not loaded value).
     /// Complex types are stored as {real, imag} pairs and use Ptr IR type.
     fn field_is_complex(&self, base_expr: &Expr, field_name: &str, is_pointer_access: bool) -> bool {
-        let ctype = if is_pointer_access {
-            self.resolve_pointer_member_field_ctype(base_expr, field_name)
-        } else {
-            self.resolve_member_field_ctype(base_expr, field_name)
-        };
-        ctype.map(|ct| matches!(ct, CType::ComplexFloat | CType::ComplexDouble | CType::ComplexLongDouble)).unwrap_or(false)
+        self.resolve_field_ctype(base_expr, field_name, is_pointer_access)
+            .map(|ct| matches!(ct, CType::ComplexFloat | CType::ComplexDouble | CType::ComplexLongDouble)).unwrap_or(false)
     }
 
     // -----------------------------------------------------------------------
@@ -2922,8 +2906,7 @@ impl Lowerer {
                     return IrType::Ptr;
                 }
                 if self.enum_constants.contains_key(name) { return IrType::I32; }
-                if let Some(info) = self.locals.get(name) { return info.ty; }
-                if let Some(ginfo) = self.globals.get(name) { return ginfo.ty; }
+                if let Some(vi) = self.lookup_var_info(name) { return vi.ty; }
                 IrType::I64
             }
             Expr::IntLiteral(val, _) => {

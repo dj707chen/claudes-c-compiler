@@ -32,13 +32,26 @@ because it handles every C language construct.
 ## Architecture
 
 The `Lowerer` struct groups its state into logical sub-structs:
+- `VarInfo` - shared type metadata (ty, elem_size, is_array, pointee_type, struct_layout,
+  is_struct, array_dim_strides, c_type) embedded in both `LocalInfo` and `GlobalInfo` via
+  `Deref`. This enables `lookup_var_info(name)` to unify the common "check locals then
+  globals" pattern into a single lookup returning `&VarInfo`.
+- `LocalInfo` - local variable info: wraps `VarInfo` plus alloca, alloc_size, is_bool,
+  static_global_name, vla_strides, vla_size. Derefs to `VarInfo`.
+- `GlobalInfo` - global variable info: wraps `VarInfo`. Derefs to `VarInfo`.
 - `SwitchFrame` - nested switch context stack (cases, default label, expression type)
 - `FunctionMeta` - known function signatures (return types, param types, variadic flags, sret info)
-- `LocalInfo` / `GlobalInfo` - variable metadata for locals and globals
 - `DeclAnalysis` - shared declaration analysis result (type properties, array/pointer/struct info)
   used by both `lower_local_decl` and `lower_global_decl` to avoid duplicating ~80 lines
   of type analysis logic. Computed by `analyze_declaration()`, consumed by
-  `LocalInfo::from_analysis()` and `GlobalInfo::from_analysis()` builders.
+  `VarInfo::from_analysis()`, then wrapped by `LocalInfo::from_analysis()` and
+  `GlobalInfo::from_analysis()` builders.
+
+### Unified Lookup Helpers
+
+- `lookup_var_info(name)` → `Option<&VarInfo>`: checks locals then globals for shared metadata
+- `resolve_field_ctype(base, field, is_ptr)` → `Option<CType>`: unified struct field CType
+  resolution that dispatches to `resolve_member_field_ctype` or `resolve_pointer_member_field_ctype`
 
 ## How Lowering Works
 

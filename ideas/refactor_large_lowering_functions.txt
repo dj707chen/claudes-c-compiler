@@ -25,6 +25,12 @@ Item 6 completed:
   resolution (now calls resolve_typedef_derived()). Fixed 4x repeated Identifier match
   in lower_call_arguments. Net reduction ~150 lines of duplicated declaration analysis.
 
+Item 7 completed:
+- VarInfo struct extracted from LocalInfo/GlobalInfo (8 shared fields unified via Deref).
+  lookup_var_info() helper eliminates 10+ duplicated locals-then-globals lookup patterns.
+  resolve_field_ctype() unifies resolve_member_field_ctype/resolve_pointer_member_field_ctype
+  dispatch. Net reduction: ~105 lines across 6 files.
+
 Remaining (lower priority, less severe):
 
 5. lower_function (lowering.rs, ~340 lines)

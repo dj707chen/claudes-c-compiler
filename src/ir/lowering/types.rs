@@ -775,12 +775,9 @@ impl Lowerer {
                 }
                 None
             }
-            Expr::MemberAccess(base_expr, field_name, _) => {
-                let ctype = self.resolve_member_field_ctype(base_expr, field_name)?;
-                if matches!(ctype, CType::Struct(_) | CType::Union(_)) { Some(ctype.size()) } else { None }
-            }
-            Expr::PointerMemberAccess(base_expr, field_name, _) => {
-                let ctype = self.resolve_pointer_member_field_ctype(base_expr, field_name)?;
+            Expr::MemberAccess(base_expr, field_name, _) | Expr::PointerMemberAccess(base_expr, field_name, _) => {
+                let is_ptr = matches!(expr, Expr::PointerMemberAccess(..));
+                let ctype = self.resolve_field_ctype(base_expr, field_name, is_ptr)?;
                 if matches!(ctype, CType::Struct(_) | CType::Union(_)) { Some(ctype.size()) } else { None }
             }
             Expr::ArraySubscript(_, _, _) | Expr::Deref(_, _)
@@ -1049,17 +1046,11 @@ impl Lowerer {
                 if self.enum_constants.contains_key(name) {
                     return IrType::I32;
                 }
-                if let Some(info) = self.locals.get(name) {
-                    if info.is_array {
+                if let Some(vi) = self.lookup_var_info(name) {
+                    if vi.is_array {
                         return IrType::Ptr;
                     }
-                    return info.ty;
-                }
-                if let Some(ginfo) = self.globals.get(name) {
-                    if ginfo.is_array {
-                        return IrType::Ptr;
-                    }
-                    return ginfo.ty;
+                    return vi.ty;
                 }
                 IrType::I64
             }
@@ -1080,47 +1071,32 @@ impl Lowerer {
                 }
                 let root_name = self.get_array_root_name(expr);
                 if let Some(name) = root_name {
-                    if let Some(info) = self.locals.get(&name) {
-                        if info.is_array {
-                            return info.ty;
-                        }
-                    }
-                    if let Some(ginfo) = self.globals.get(&name) {
-                        if ginfo.is_array {
-                            return self.ir_type_for_elem_size(*ginfo.array_dim_strides.last().unwrap_or(&8));
+                    if let Some(vi) = self.lookup_var_info(&name) {
+                        if vi.is_array {
+                            // For globals with multi-dim strides, use stride-based type
+                            if !vi.array_dim_strides.is_empty() {
+                                return self.ir_type_for_elem_size(*vi.array_dim_strides.last().unwrap_or(&8));
+                            }
+                            return vi.ty;
                         }
                     }
                 }
                 for operand in [base.as_ref(), index.as_ref()] {
                     if let Expr::Identifier(name, _) = operand {
-                        if let Some(info) = self.locals.get(name) {
-                            if let Some(pt) = info.pointee_type {
+                        if let Some(vi) = self.lookup_var_info(name) {
+                            if let Some(pt) = vi.pointee_type {
                                 return pt;
                             }
-                            if info.is_array {
-                                return info.ty;
-                            }
-                        }
-                        if let Some(ginfo) = self.globals.get(name) {
-                            if let Some(pt) = ginfo.pointee_type {
-                                return pt;
-                            }
-                            if ginfo.is_array {
-                                return ginfo.ty;
+                            if vi.is_array {
+                                return vi.ty;
                             }
                         }
                     }
                 }
                 match base.as_ref() {
-                    Expr::MemberAccess(base_expr, field_name, _) => {
-                        if let Some(ctype) = self.resolve_member_field_ctype(base_expr, field_name) {
-                            if let CType::Array(elem_ty, _) = &ctype {
-                                return IrType::from_ctype(elem_ty);
-                            }
-                        }
-                    }
-                    Expr::PointerMemberAccess(base_expr, field_name, _) => {
-                        if let Some(ctype) = self.resolve_pointer_member_field_ctype(base_expr, field_name) {
+                    Expr::MemberAccess(base_expr, field_name, _) | Expr::PointerMemberAccess(base_expr, field_name, _) => {
+                        let is_ptr = matches!(base.as_ref(), Expr::PointerMemberAccess(..));
+                        if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, is_ptr) {
                             if let CType::Array(elem_ty, _) = &ctype {
                                 return IrType::from_ctype(elem_ty);
                             }
@@ -1743,26 +1719,20 @@ impl Lowerer {
                     }
                 }
                 if let Expr::Identifier(name, _) = inner.as_ref() {
-                    if let Some(info) = self.locals.get(name) {
+                    if let Some(vi) = self.lookup_var_info(name) {
                         // GCC extension: sizeof(*func_ptr) == 1
-                        if let Some(ref ct) = info.c_type {
+                        if let Some(ref ct) = vi.c_type {
                             if matches!(ct, CType::Function(_)) {
                                 return 1;
                             }
-                            // Function pointer dereference: sizeof(*fptr) == 1
                             if let CType::Pointer(pointee) = ct {
                                 if matches!(pointee.as_ref(), CType::Function(_)) {
                                     return 1;
                                 }
                             }
                         }
-                        if info.elem_size > 0 {
-                            return info.elem_size;
-                        }
-                    }
-                    if let Some(ginfo) = self.globals.get(name) {
-                        if ginfo.elem_size > 0 {
-                            return ginfo.elem_size;
+                        if vi.elem_size > 0 {
+                            return vi.elem_size;
                         }
                     }
                     // GCC extension: sizeof(*func_name) == 1 for known functions
@@ -1792,14 +1762,9 @@ impl Lowerer {
                     }
                 }
                 if let Expr::Identifier(name, _) = base.as_ref() {
-                    if let Some(info) = self.locals.get(name) {
-                        if info.elem_size > 0 {
-                            return info.elem_size;
-                        }
-                    }
-                    if let Some(ginfo) = self.globals.get(name) {
-                        if ginfo.elem_size > 0 {
-                            return ginfo.elem_size;
+                    if let Some(vi) = self.lookup_var_info(name) {
+                        if vi.elem_size > 0 {
+                            return vi.elem_size;
                         }
                     }
                 }
@@ -1816,7 +1781,7 @@ impl Lowerer {
 
             // Member access: member field size (use CType for accurate array/struct sizes)
             Expr::MemberAccess(base_expr, field_name, _) => {
-                if let Some(ctype) = self.resolve_member_field_ctype(base_expr, field_name) {
+                if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, false) {
                     let sz = ctype.size();
                     if sz > 0 { return sz; }
                 }
@@ -1824,7 +1789,7 @@ impl Lowerer {
                 field_ty.size()
             }
             Expr::PointerMemberAccess(base_expr, field_name, _) => {
-                if let Some(ctype) = self.resolve_pointer_member_field_ctype(base_expr, field_name) {
+                if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, true) {
                     let sz = ctype.size();
                     if sz > 0 { return sz; }
                 }
@@ -2397,11 +2362,8 @@ impl Lowerer {
     pub(super) fn get_expr_ctype(&self, expr: &Expr) -> Option<CType> {
         match expr {
             Expr::Identifier(name, _) => {
-                if let Some(info) = self.locals.get(name) {
-                    return info.c_type.clone();
-                }
-                if let Some(ginfo) = self.globals.get(name) {
-                    return ginfo.c_type.clone();
+                if let Some(vi) = self.lookup_var_info(name) {
+                    return vi.c_type.clone();
                 }
                 None
             }

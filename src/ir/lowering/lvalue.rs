@@ -257,7 +257,7 @@ impl Lowerer {
             Expr::MemberAccess(base_expr, field_name, _) => {
                 // Check if the field is an array type - arrays decay to pointers,
                 // so we return the field address (not load the value).
-                let field_is_array = self.resolve_member_field_ctype(base_expr, field_name)
+                let field_is_array = self.resolve_field_ctype(base_expr, field_name, false)
                     .map(|ct| matches!(ct, CType::Array(_, _)))
                     .unwrap_or(false);
                 if field_is_array {
@@ -278,7 +278,7 @@ impl Lowerer {
             }
             Expr::PointerMemberAccess(base_expr, field_name, _) => {
                 // Check if the field is an array type - arrays decay to pointers
-                let field_is_array = self.resolve_pointer_member_field_ctype(base_expr, field_name)
+                let field_is_array = self.resolve_field_ctype(base_expr, field_name, true)
                     .map(|ct| matches!(ct, CType::Array(_, _)))
                     .unwrap_or(false);
                 if field_is_array {
@@ -330,61 +330,36 @@ impl Lowerer {
         let depth = self.count_subscript_depth(base);
 
         if let Some(name) = root_name {
-            if let Some(info) = self.locals.get(&name) {
-                if !info.array_dim_strides.is_empty() {
+            if let Some(vi) = self.lookup_var_info(&name) {
+                if !vi.array_dim_strides.is_empty() {
                     // depth 0 means base is the array name, so use strides[0]
                     // depth 1 means base is a[i], so use strides[1]
-                    if depth < info.array_dim_strides.len() {
-                        return info.array_dim_strides[depth];
+                    if depth < vi.array_dim_strides.len() {
+                        return vi.array_dim_strides[depth];
                     }
                     // depth exceeds array dimensions: the element type might be a
                     // pointer (e.g., char *arr[] at depth 1). Use c_type to resolve
                     // the correct pointee element size rather than the array stride.
-                    if let Some(ref ctype) = info.c_type {
+                    if let Some(ref ctype) = vi.c_type {
                         if let Some(sz) = Self::peel_pointer_elem_size(ctype, depth) {
                             return sz;
                         }
                     }
-                    return *info.array_dim_strides.last().unwrap_or(&info.elem_size.max(1));
+                    return *vi.array_dim_strides.last().unwrap_or(&vi.elem_size.max(1));
                 }
                 // For pointer-to-pointer types (e.g., char **argv), when depth > 0,
                 // we need to peel off pointer levels to get the correct element size.
                 // argv[i] strides by sizeof(char*) = 8, but argv[i][j] should stride
                 // by sizeof(char) = 1. Use c_type to resolve the correct pointee size.
                 if depth > 0 {
-                    if let Some(ref ctype) = info.c_type {
+                    if let Some(ref ctype) = vi.c_type {
                         if let Some(sz) = Self::peel_pointer_elem_size(ctype, depth) {
                             return sz;
                         }
                     }
                 }
-                if info.elem_size > 0 {
-                    return info.elem_size;
-                }
-            }
-            if let Some(ginfo) = self.globals.get(&name) {
-                if !ginfo.array_dim_strides.is_empty() {
-                    if depth < ginfo.array_dim_strides.len() {
-                        return ginfo.array_dim_strides[depth];
-                    }
-                    // depth exceeds array dimensions: use c_type to resolve pointee size
-                    if let Some(ref ctype) = ginfo.c_type {
-                        if let Some(sz) = Self::peel_pointer_elem_size(ctype, depth) {
-                            return sz;
-                        }
-                    }
-                    return *ginfo.array_dim_strides.last().unwrap_or(&ginfo.elem_size.max(1));
-                }
-                // For pointer-to-pointer types, peel pointer levels for correct stride.
-                if depth > 0 {
-                    if let Some(ref ctype) = ginfo.c_type {
-                        if let Some(sz) = Self::peel_pointer_elem_size(ctype, depth) {
-                            return sz;
-                        }
-                    }
-                }
-                if ginfo.elem_size > 0 {
-                    return ginfo.elem_size;
+                if vi.elem_size > 0 {
+                    return vi.elem_size;
                 }
             }
         }
@@ -398,29 +373,19 @@ impl Lowerer {
     /// For s.arr where arr is `int[10]`, returns 4 (sizeof(int)).
     /// For s.ptr where ptr is `struct S *`, returns sizeof(struct S).
     fn get_member_array_elem_size(&self, base: &Expr) -> Option<usize> {
-        match base {
-            Expr::MemberAccess(base_expr, field_name, _) => {
-                if let Some(ctype) = self.resolve_member_field_ctype(base_expr, field_name) {
-                    match &ctype {
-                        CType::Array(elem_ty, _) => return Some(elem_ty.size()),
-                        CType::Pointer(pointee_ty) => return Some(pointee_ty.size()),
-                        _ => {}
-                    }
-                }
-                None
+        let (base_expr, field_name, is_ptr) = match base {
+            Expr::MemberAccess(base_expr, field_name, _) => (base_expr, field_name, false),
+            Expr::PointerMemberAccess(base_expr, field_name, _) => (base_expr, field_name, true),
+            _ => return None,
+        };
+        if let Some(ctype) = self.resolve_field_ctype(base_expr, field_name, is_ptr) {
+            match &ctype {
+                CType::Array(elem_ty, _) => return Some(elem_ty.size()),
+                CType::Pointer(pointee_ty) => return Some(pointee_ty.size()),
+                _ => {}
             }
-            Expr::PointerMemberAccess(base_expr, field_name, _) => {
-                if let Some(ctype) = self.resolve_pointer_member_field_ctype(base_expr, field_name) {
-                    match &ctype {
-                        CType::Array(elem_ty, _) => return Some(elem_ty.size()),
-                        CType::Pointer(pointee_ty) => return Some(pointee_ty.size()),
-                        _ => {}
-                    }
-                }
-                None
-            }
-            _ => None,
         }
+        None
     }
 
     /// Get the element size for array subscript (legacy, for 1D arrays).
@@ -430,20 +395,11 @@ impl Lowerer {
             return 1;
         }
         if let Expr::Identifier(name, _) = base {
-            if let Some(info) = self.locals.get(name) {
-                if info.elem_size > 0 {
-                    return info.elem_size;
+            if let Some(vi) = self.lookup_var_info(name) {
+                if vi.elem_size > 0 {
+                    return vi.elem_size;
                 }
-                // Use pointee_type as fallback
-                if let Some(pt) = info.pointee_type {
-                    return pt.size();
-                }
-            }
-            if let Some(ginfo) = self.globals.get(name) {
-                if ginfo.elem_size > 0 {
-                    return ginfo.elem_size;
-                }
-                if let Some(pt) = ginfo.pointee_type {
+                if let Some(pt) = vi.pointee_type {
                     return pt.size();
                 }
             }
@@ -476,14 +432,9 @@ impl Lowerer {
             let depth = self.count_subscript_depth(base) + 1; // +1 for this subscript
 
             if let Some(name) = root_name {
-                if let Some(info) = self.locals.get(&name) {
-                    if info.array_dim_strides.len() > 1 {
-                        return depth < info.array_dim_strides.len();
-                    }
-                }
-                if let Some(ginfo) = self.globals.get(&name) {
-                    if ginfo.array_dim_strides.len() > 1 {
-                        return depth < ginfo.array_dim_strides.len();
+                if let Some(vi) = self.lookup_var_info(&name) {
+                    if vi.array_dim_strides.len() > 1 {
+                        return depth < vi.array_dim_strides.len();
                     }
                 }
             }
@@ -581,11 +532,8 @@ impl Lowerer {
     /// Used for normalizing reverse subscript: 3[arr] -> arr[3].
     pub(super) fn expr_is_array_name(&self, expr: &Expr) -> bool {
         if let Expr::Identifier(name, _) = expr {
-            if let Some(info) = self.locals.get(name) {
-                return info.is_array;
-            }
-            if let Some(ginfo) = self.globals.get(name) {
-                return ginfo.is_array;
+            if let Some(vi) = self.lookup_var_info(name) {
+                return vi.is_array;
             }
         }
         false
