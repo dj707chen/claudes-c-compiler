@@ -1020,9 +1020,9 @@ impl Lowerer {
                             }
                         }
                         // Complex expression returned from non-complex function:
-                        // extract real part and convert to return type
+                        // extract real part and convert to return type (C11 6.3.1.7)
                         let ret_ty = self.current_return_type;
-                        if ret_ty != IrType::Ptr && ret_ty != IrType::F64 {
+                        if ret_ty != IrType::Ptr {
                             let val2 = self.lower_expr(e);
                             let ptr = self.operand_to_value(val2);
                             let real_part = self.load_complex_real(ptr, &expr_ct);
