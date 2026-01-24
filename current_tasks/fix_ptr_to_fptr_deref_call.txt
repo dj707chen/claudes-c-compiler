@@ -1,0 +1,21 @@
+Fix pointer-to-function-pointer dereference call producing SIGSEGV
+
+Bug: Calling through a dereferenced pointer-to-function-pointer
+(e.g., `(*fpp)(a, b)` where fpp is `int (**)(int, int)`) segfaults.
+
+Root causes (3 interacting bugs):
+1. Parser combine_declarator_parts: all inner Pointers were placed BEFORE
+   FunctionPointer, making `int (**fpp)(int,int)` produce the same derived
+   list as `int *(*fp)(int)` — [Pointer, Pointer, FunctionPointer]. The extra
+   indirection Pointer needs to go AFTER FunctionPointer.
+2. is_function_pointer_deref: ptr_sigs fallback was too broad, returning true
+   for pointer-to-function-pointer variables (which need a real load).
+3. type_builder build_full_ctype: Array declarators after the function pointer
+   core were silently skipped (only Pointer/Function were handled in the loop).
+
+Fix:
+- Parser: last inner Pointer is syntax marker, extras go after FunctionPointer
+- is_function_pointer_deref: only use ptr_sigs when c_type is unavailable
+- type_builder: handle Array in the post-core processing loop
+
+Status: IN PROGRESS

@@ -16,9 +16,9 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 - Three backend targets with correct ABI handling
 
 ### Test Results (10% sample, ratio 10)
-- x86-64: ~97.2% passing (2907/2991)
-- AArch64: ~97.1% passing (2787/2869)
-- RISC-V 64: ~97.8% passing (2797/2861)
+- x86-64: ~97.3% passing (2911/2991)
+- AArch64: ~97.8% passing (2807/2869)
+- RISC-V 64: ~97.6% passing (2791/2861)
 
 ### What Works
 - `int main() { return N; }` for any integer N
