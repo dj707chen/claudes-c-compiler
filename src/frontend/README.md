@@ -1,24 +1,26 @@
 # Frontend
 
-The frontend transforms C source code into an AST suitable for semantic analysis.
-
-## Pipeline
+Transforms C source text into a typed AST through four phases:
 
 ```
-source text → preprocessor → lexer → parser → AST
-                                                ↓
-                                              sema (type checking)
+Source text → Preprocessor → Lexer → Parser → Sema → Typed AST
 ```
 
 ## Modules
 
-- **preprocessor/** - Macro expansion, `#include`, `#ifdef`/`#if` conditionals, builtin macros (`__FILE__`, `__LINE__`, etc.)
-- **lexer/** - Tokenizes preprocessed source into a stream of `Token`s with source locations.
-- **parser/** - Recursive descent parser producing a `TranslationUnit` AST. Handles declarations, statements, expressions, types.
-- **sema/** - Semantic analysis: type checking, symbol table construction, `__builtin_*` function mapping.
+- **preprocessor/** - `#include`, `#define`, `#if`/`#ifdef`, macro expansion, line splicing.
+- **lexer/** - Tokenizes preprocessed source into `Token`s with source locations.
+- **parser/** - Recursive descent parser producing a spanned AST. Split into focused sub-modules (expressions, types, statements, declarations, declarators). See `parser/README.md`.
+- **sema/** - Semantic analysis: type checking, symbol table, `__builtin_*` mapping.
 
 ## Key Design Decisions
 
-- The preprocessor runs as a text-to-text pass before lexing (rather than being integrated into the lexer). This simplifies the architecture but means we lose original source locations within macros.
-- The parser uses recursive descent (no parser generator), making error recovery and extension straightforward.
-- Sema currently produces warnings but does not reject invalid programs; the compiler is permissive to maximize test coverage during development.
+- The preprocessor runs as a text-to-text pass before lexing (not integrated into the lexer). This simplifies the architecture but means we lose original source locations within macros.
+- The parser uses recursive descent (no parser generator), making error recovery and GCC extension support straightforward.
+- Sema is permissive — it produces warnings but does not reject invalid programs. Most type inference is deferred to IR lowering (a known architectural weakness).
+
+## What's Missing
+
+- `#line`, `_Pragma`, `__has_attribute` in the preprocessor
+- Full `_Atomic(type)` parsing (currently treated as underlying type)
+- Proper error recovery in the parser (currently skips tokens on error)

@@ -4,11 +4,11 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 
 ## Status
 
-**Basic compilation pipeline functional with SSA.** ~81% of x86-64 tests passing.
+**Basic compilation pipeline functional with SSA.** ~85% of x86-64 tests passing.
 
 ### Working Features
 - Preprocessor with `#include` file resolution (system headers, -I paths, include guards, #pragma once)
-- Recursive descent parser with typedef tracking
+- Recursive descent parser with typedef tracking (modular: expressions, types, statements, declarations, declarators)
 - Type-aware IR lowering and code generation
 - **SSA construction via mem2reg** (dominator tree, dominance frontiers, phi insertion, variable renaming)
 - Phi elimination for backend codegen (parallel copy lowering)
@@ -16,7 +16,7 @@ A C compiler written from scratch in Rust, targeting x86-64, AArch64, and RISC-V
 - Three backend targets with correct ABI handling
 
 ### Test Results (10% sample, ratio 10)
-- x86-64: ~81.4% passing (2436/2991)
+- x86-64: ~85.5% passing (2557/2991)
 - AArch64: ~81.2% passing (2331/2869)
 - RISC-V 64: ~80.1% passing (2293/2861)
 

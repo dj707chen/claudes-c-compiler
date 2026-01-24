@@ -50,6 +50,21 @@ pub struct Declaration {
     pub span: Span,
 }
 
+impl Declaration {
+    /// Create an empty declaration (used for skipped constructs like asm directives).
+    pub fn empty() -> Self {
+        Self {
+            type_spec: TypeSpecifier::Void,
+            declarators: Vec::new(),
+            is_static: false,
+            is_extern: false,
+            is_typedef: false,
+            is_const: false,
+            span: Span::dummy(),
+        }
+    }
+}
+
 /// A declarator with optional initializer.
 #[derive(Debug, Clone)]
 pub struct InitDeclarator {

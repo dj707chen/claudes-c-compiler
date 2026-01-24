@@ -1,0 +1,619 @@
+// Expression parsing: precedence climbing from comma expression down to primary.
+//
+// The expression parser implements C's operator precedence through recursive
+// descent. Each function handles one precedence level and delegates to the
+// next-tighter level. This is the standard approach for hand-written parsers
+// and avoids the complexity of Pratt parsing while remaining clear.
+//
+// Call hierarchy (loosest to tightest binding):
+//   parse_expr -> parse_assignment_expr -> parse_conditional_expr
+//   -> parse_logical_or_expr -> ... -> parse_multiplicative_expr
+//   -> parse_cast_expr -> parse_unary_expr -> parse_postfix_expr
+//   -> parse_primary_expr
+
+use crate::common::source::Span;
+use crate::frontend::lexer::token::TokenKind;
+use super::ast::*;
+use super::parser::Parser;
+
+impl Parser {
+    pub(super) fn parse_expr(&mut self) -> Expr {
+        let lhs = self.parse_assignment_expr();
+        if matches!(self.peek(), TokenKind::Comma) {
+            let span = self.peek_span();
+            self.advance();
+            let rhs = self.parse_expr();
+            Expr::Comma(Box::new(lhs), Box::new(rhs), span)
+        } else {
+            lhs
+        }
+    }
+
+    pub(super) fn parse_assignment_expr(&mut self) -> Expr {
+        let lhs = self.parse_conditional_expr();
+
+        match self.peek() {
+            TokenKind::Assign => {
+                let span = self.peek_span();
+                self.advance();
+                let rhs = self.parse_assignment_expr();
+                Expr::Assign(Box::new(lhs), Box::new(rhs), span)
+            }
+            _ => {
+                if let Some(op) = self.compound_assign_op() {
+                    let span = self.peek_span();
+                    self.advance();
+                    let rhs = self.parse_assignment_expr();
+                    Expr::CompoundAssign(op, Box::new(lhs), Box::new(rhs), span)
+                } else {
+                    lhs
+                }
+            }
+        }
+    }
+
+    fn parse_conditional_expr(&mut self) -> Expr {
+        let cond = self.parse_logical_or_expr();
+        if self.consume_if(&TokenKind::Question) {
+            let span = cond.span();
+            let then_expr = self.parse_expr();
+            self.expect(&TokenKind::Colon);
+            let else_expr = self.parse_conditional_expr();
+            Expr::Conditional(Box::new(cond), Box::new(then_expr), Box::new(else_expr), span)
+        } else {
+            cond
+        }
+    }
+
+    fn parse_logical_or_expr(&mut self) -> Expr {
+        let mut lhs = self.parse_logical_and_expr();
+        while matches!(self.peek(), TokenKind::PipePipe) {
+            let span = self.peek_span();
+            self.advance();
+            let rhs = self.parse_logical_and_expr();
+            lhs = Expr::BinaryOp(BinOp::LogicalOr, Box::new(lhs), Box::new(rhs), span);
+        }
+        lhs
+    }
+
+    fn parse_logical_and_expr(&mut self) -> Expr {
+        let mut lhs = self.parse_bitwise_or_expr();
+        while matches!(self.peek(), TokenKind::AmpAmp) {
+            let span = self.peek_span();
+            self.advance();
+            let rhs = self.parse_bitwise_or_expr();
+            lhs = Expr::BinaryOp(BinOp::LogicalAnd, Box::new(lhs), Box::new(rhs), span);
+        }
+        lhs
+    }
+
+    fn parse_bitwise_or_expr(&mut self) -> Expr {
+        let mut lhs = self.parse_bitwise_xor_expr();
+        while matches!(self.peek(), TokenKind::Pipe) {
+            let span = self.peek_span();
+            self.advance();
+            let rhs = self.parse_bitwise_xor_expr();
+            lhs = Expr::BinaryOp(BinOp::BitOr, Box::new(lhs), Box::new(rhs), span);
+        }
+        lhs
+    }
+
+    fn parse_bitwise_xor_expr(&mut self) -> Expr {
+        let mut lhs = self.parse_bitwise_and_expr();
+        while matches!(self.peek(), TokenKind::Caret) {
+            let span = self.peek_span();
+            self.advance();
+            let rhs = self.parse_bitwise_and_expr();
+            lhs = Expr::BinaryOp(BinOp::BitXor, Box::new(lhs), Box::new(rhs), span);
+        }
+        lhs
+    }
+
+    fn parse_bitwise_and_expr(&mut self) -> Expr {
+        let mut lhs = self.parse_equality_expr();
+        while matches!(self.peek(), TokenKind::Amp) {
+            let span = self.peek_span();
+            self.advance();
+            let rhs = self.parse_equality_expr();
+            lhs = Expr::BinaryOp(BinOp::BitAnd, Box::new(lhs), Box::new(rhs), span);
+        }
+        lhs
+    }
+
+    fn parse_equality_expr(&mut self) -> Expr {
+        let mut lhs = self.parse_relational_expr();
+        loop {
+            match self.peek() {
+                TokenKind::EqualEqual => {
+                    let span = self.peek_span(); self.advance();
+                    let rhs = self.parse_relational_expr();
+                    lhs = Expr::BinaryOp(BinOp::Eq, Box::new(lhs), Box::new(rhs), span);
+                }
+                TokenKind::BangEqual => {
+                    let span = self.peek_span(); self.advance();
+                    let rhs = self.parse_relational_expr();
+                    lhs = Expr::BinaryOp(BinOp::Ne, Box::new(lhs), Box::new(rhs), span);
+                }
+                _ => break,
+            }
+        }
+        lhs
+    }
+
+    fn parse_relational_expr(&mut self) -> Expr {
+        let mut lhs = self.parse_shift_expr();
+        loop {
+            let (op, token) = match self.peek() {
+                TokenKind::Less => (BinOp::Lt, true),
+                TokenKind::LessEqual => (BinOp::Le, true),
+                TokenKind::Greater => (BinOp::Gt, true),
+                TokenKind::GreaterEqual => (BinOp::Ge, true),
+                _ => break,
+            };
+            if token {
+                let span = self.peek_span();
+                self.advance();
+                let rhs = self.parse_shift_expr();
+                lhs = Expr::BinaryOp(op, Box::new(lhs), Box::new(rhs), span);
+            }
+        }
+        lhs
+    }
+
+    fn parse_shift_expr(&mut self) -> Expr {
+        let mut lhs = self.parse_additive_expr();
+        loop {
+            let op = match self.peek() {
+                TokenKind::LessLess => BinOp::Shl,
+                TokenKind::GreaterGreater => BinOp::Shr,
+                _ => break,
+            };
+            let span = self.peek_span();
+            self.advance();
+            let rhs = self.parse_additive_expr();
+            lhs = Expr::BinaryOp(op, Box::new(lhs), Box::new(rhs), span);
+        }
+        lhs
+    }
+
+    fn parse_additive_expr(&mut self) -> Expr {
+        let mut lhs = self.parse_multiplicative_expr();
+        loop {
+            let op = match self.peek() {
+                TokenKind::Plus => BinOp::Add,
+                TokenKind::Minus => BinOp::Sub,
+                _ => break,
+            };
+            let span = self.peek_span();
+            self.advance();
+            let rhs = self.parse_multiplicative_expr();
+            lhs = Expr::BinaryOp(op, Box::new(lhs), Box::new(rhs), span);
+        }
+        lhs
+    }
+
+    fn parse_multiplicative_expr(&mut self) -> Expr {
+        let mut lhs = self.parse_cast_expr();
+        loop {
+            let op = match self.peek() {
+                TokenKind::Star => BinOp::Mul,
+                TokenKind::Slash => BinOp::Div,
+                TokenKind::Percent => BinOp::Mod,
+                _ => break,
+            };
+            let span = self.peek_span();
+            self.advance();
+            let rhs = self.parse_cast_expr();
+            lhs = Expr::BinaryOp(op, Box::new(lhs), Box::new(rhs), span);
+        }
+        lhs
+    }
+
+    /// Parse a cast expression: (type-name)expr, compound literal (type-name){...},
+    /// or fall through to unary expression.
+    pub(super) fn parse_cast_expr(&mut self) -> Expr {
+        if matches!(self.peek(), TokenKind::LParen) {
+            let save = self.pos;
+            let save_typedef = self.parsing_typedef;
+            self.advance();
+            if self.is_type_specifier() {
+                if let Some(type_spec) = self.parse_type_specifier() {
+                    let result_type = self.parse_abstract_declarator_suffix(type_spec);
+                    if matches!(self.peek(), TokenKind::RParen) {
+                        let span = self.peek_span();
+                        self.advance();
+                        // Check for compound literal: (type){...}
+                        if matches!(self.peek(), TokenKind::LBrace) {
+                            let init = self.parse_initializer();
+                            return Expr::CompoundLiteral(result_type, Box::new(init), span);
+                        }
+                        let expr = self.parse_cast_expr();
+                        return Expr::Cast(result_type, Box::new(expr), span);
+                    }
+                }
+            }
+            self.pos = save;
+            self.parsing_typedef = save_typedef;
+        }
+        self.parse_unary_expr()
+    }
+
+    fn parse_unary_expr(&mut self) -> Expr {
+        match self.peek().clone() {
+            TokenKind::AmpAmp => {
+                // GCC extension: &&label (address of label, for computed goto)
+                let span = self.peek_span();
+                if self.pos + 1 < self.tokens.len() {
+                    if let TokenKind::Identifier(ref name) = self.tokens[self.pos + 1].kind {
+                        let label_name = name.clone();
+                        self.advance(); // consume &&
+                        self.advance(); // consume identifier
+                        return Expr::LabelAddr(label_name, span);
+                    }
+                }
+                self.parse_postfix_expr()
+            }
+            TokenKind::RealPart => {
+                let span = self.peek_span();
+                self.advance();
+                let expr = self.parse_cast_expr();
+                Expr::UnaryOp(UnaryOp::RealPart, Box::new(expr), span)
+            }
+            TokenKind::ImagPart => {
+                let span = self.peek_span();
+                self.advance();
+                let expr = self.parse_cast_expr();
+                Expr::UnaryOp(UnaryOp::ImagPart, Box::new(expr), span)
+            }
+            TokenKind::PlusPlus => {
+                let span = self.peek_span();
+                self.advance();
+                let expr = self.parse_unary_expr();
+                Expr::UnaryOp(UnaryOp::PreInc, Box::new(expr), span)
+            }
+            TokenKind::MinusMinus => {
+                let span = self.peek_span();
+                self.advance();
+                let expr = self.parse_unary_expr();
+                Expr::UnaryOp(UnaryOp::PreDec, Box::new(expr), span)
+            }
+            TokenKind::Plus => {
+                let span = self.peek_span();
+                self.advance();
+                let expr = self.parse_cast_expr();
+                Expr::UnaryOp(UnaryOp::Plus, Box::new(expr), span)
+            }
+            TokenKind::Minus => {
+                let span = self.peek_span();
+                self.advance();
+                let expr = self.parse_cast_expr();
+                Expr::UnaryOp(UnaryOp::Neg, Box::new(expr), span)
+            }
+            TokenKind::Tilde => {
+                let span = self.peek_span();
+                self.advance();
+                let expr = self.parse_cast_expr();
+                Expr::UnaryOp(UnaryOp::BitNot, Box::new(expr), span)
+            }
+            TokenKind::Bang => {
+                let span = self.peek_span();
+                self.advance();
+                let expr = self.parse_cast_expr();
+                Expr::UnaryOp(UnaryOp::LogicalNot, Box::new(expr), span)
+            }
+            TokenKind::Amp => {
+                let span = self.peek_span();
+                self.advance();
+                let expr = self.parse_cast_expr();
+                Expr::AddressOf(Box::new(expr), span)
+            }
+            TokenKind::Star => {
+                let span = self.peek_span();
+                self.advance();
+                let expr = self.parse_cast_expr();
+                Expr::Deref(Box::new(expr), span)
+            }
+            TokenKind::Sizeof => {
+                self.parse_sizeof_expr()
+            }
+            TokenKind::Alignof => {
+                let span = self.peek_span();
+                self.advance();
+                // _Alignof(type) - always requires parenthesized type
+                self.expect(&TokenKind::LParen);
+                if let Some(ts) = self.parse_type_specifier() {
+                    let mut result_type = ts;
+                    while self.consume_if(&TokenKind::Star) {
+                        result_type = TypeSpecifier::Pointer(Box::new(result_type));
+                        self.skip_cv_qualifiers();
+                    }
+                    self.expect(&TokenKind::RParen);
+                    Expr::Alignof(result_type, span)
+                } else {
+                    // Fallback: treat as sizeof-like with expression
+                    let expr = self.parse_assignment_expr();
+                    self.expect(&TokenKind::RParen);
+                    Expr::IntLiteral(8, span)
+                }
+            }
+            _ => self.parse_postfix_expr(),
+        }
+    }
+
+    /// Parse sizeof expression. Handles both sizeof(type-name) and sizeof expr.
+    fn parse_sizeof_expr(&mut self) -> Expr {
+        let span = self.peek_span();
+        self.advance(); // consume 'sizeof'
+        if matches!(self.peek(), TokenKind::LParen) {
+            let save = self.pos;
+            let save_typedef = self.parsing_typedef;
+            self.advance();
+            if self.is_type_specifier() {
+                if let Some(ts) = self.parse_type_specifier() {
+                    let result_type = self.parse_abstract_declarator_suffix(ts);
+                    if matches!(self.peek(), TokenKind::RParen) {
+                        self.expect(&TokenKind::RParen);
+                        return Expr::Sizeof(Box::new(SizeofArg::Type(result_type)), span);
+                    }
+                }
+            }
+            self.pos = save;
+            self.parsing_typedef = save_typedef;
+        }
+        let expr = self.parse_unary_expr();
+        Expr::Sizeof(Box::new(SizeofArg::Expr(expr)), span)
+    }
+
+    fn parse_postfix_expr(&mut self) -> Expr {
+        let mut expr = self.parse_primary_expr();
+
+        loop {
+            match self.peek() {
+                TokenKind::LParen => {
+                    // Function call
+                    let span = self.peek_span();
+                    self.advance();
+                    let mut args = Vec::new();
+                    if !matches!(self.peek(), TokenKind::RParen) {
+                        args.push(self.parse_assignment_expr());
+                        while self.consume_if(&TokenKind::Comma) {
+                            args.push(self.parse_assignment_expr());
+                        }
+                    }
+                    self.expect(&TokenKind::RParen);
+                    expr = Expr::FunctionCall(Box::new(expr), args, span);
+                }
+                TokenKind::LBracket => {
+                    let span = self.peek_span();
+                    self.advance();
+                    let index = self.parse_expr();
+                    self.expect(&TokenKind::RBracket);
+                    expr = Expr::ArraySubscript(Box::new(expr), Box::new(index), span);
+                }
+                TokenKind::Dot => {
+                    let span = self.peek_span();
+                    self.advance();
+                    let field = if let TokenKind::Identifier(name) = self.peek().clone() {
+                        self.advance();
+                        name
+                    } else {
+                        String::new()
+                    };
+                    expr = Expr::MemberAccess(Box::new(expr), field, span);
+                }
+                TokenKind::Arrow => {
+                    let span = self.peek_span();
+                    self.advance();
+                    let field = if let TokenKind::Identifier(name) = self.peek().clone() {
+                        self.advance();
+                        name
+                    } else {
+                        String::new()
+                    };
+                    expr = Expr::PointerMemberAccess(Box::new(expr), field, span);
+                }
+                TokenKind::PlusPlus => {
+                    let span = self.peek_span();
+                    self.advance();
+                    expr = Expr::PostfixOp(PostfixOp::PostInc, Box::new(expr), span);
+                }
+                TokenKind::MinusMinus => {
+                    let span = self.peek_span();
+                    self.advance();
+                    expr = Expr::PostfixOp(PostfixOp::PostDec, Box::new(expr), span);
+                }
+                _ => break,
+            }
+        }
+
+        expr
+    }
+
+    fn parse_primary_expr(&mut self) -> Expr {
+        match self.peek().clone() {
+            TokenKind::IntLiteral(val) => {
+                let span = self.peek_span();
+                self.advance();
+                Expr::IntLiteral(val, span)
+            }
+            TokenKind::UIntLiteral(val) => {
+                let span = self.peek_span();
+                self.advance();
+                Expr::UIntLiteral(val, span)
+            }
+            TokenKind::LongLiteral(val) => {
+                let span = self.peek_span();
+                self.advance();
+                Expr::LongLiteral(val, span)
+            }
+            TokenKind::ULongLiteral(val) => {
+                let span = self.peek_span();
+                self.advance();
+                Expr::ULongLiteral(val, span)
+            }
+            TokenKind::FloatLiteral(val) => {
+                let span = self.peek_span();
+                self.advance();
+                Expr::FloatLiteral(val, span)
+            }
+            TokenKind::FloatLiteralF32(val) => {
+                let span = self.peek_span();
+                self.advance();
+                Expr::FloatLiteralF32(val, span)
+            }
+            TokenKind::FloatLiteralLongDouble(val) => {
+                let span = self.peek_span();
+                self.advance();
+                Expr::FloatLiteralLongDouble(val, span)
+            }
+            TokenKind::ImaginaryLiteral(val) => {
+                let span = self.peek_span();
+                self.advance();
+                Expr::ImaginaryLiteral(val, span)
+            }
+            TokenKind::ImaginaryLiteralF32(val) => {
+                let span = self.peek_span();
+                self.advance();
+                Expr::ImaginaryLiteralF32(val, span)
+            }
+            TokenKind::ImaginaryLiteralLongDouble(val) => {
+                let span = self.peek_span();
+                self.advance();
+                Expr::ImaginaryLiteralLongDouble(val, span)
+            }
+            TokenKind::StringLiteral(ref s) => {
+                let mut result = s.clone();
+                let span = self.peek_span();
+                self.advance();
+                // Concatenate adjacent string literals
+                while let TokenKind::StringLiteral(ref s2) = self.peek() {
+                    result.push_str(s2);
+                    self.advance();
+                }
+                Expr::StringLiteral(result, span)
+            }
+            TokenKind::CharLiteral(c) => {
+                let span = self.peek_span();
+                self.advance();
+                Expr::CharLiteral(c, span)
+            }
+            TokenKind::Identifier(ref name) => {
+                let name = name.clone();
+                let span = self.peek_span();
+                self.advance();
+                Expr::Identifier(name, span)
+            }
+            TokenKind::LParen => {
+                self.advance();
+                // Check for GCC statement expression: ({ stmt; stmt; expr; })
+                if matches!(self.peek(), TokenKind::LBrace) {
+                    let span = self.peek_span();
+                    let compound = self.parse_compound_stmt();
+                    self.expect(&TokenKind::RParen);
+                    Expr::StmtExpr(compound, span)
+                } else {
+                    let expr = self.parse_expr();
+                    self.expect(&TokenKind::RParen);
+                    expr
+                }
+            }
+            TokenKind::Generic => {
+                self.parse_generic_selection()
+            }
+            TokenKind::Asm => {
+                // GCC asm expression
+                let span = self.peek_span();
+                self.advance();
+                self.consume_if(&TokenKind::Volatile);
+                if matches!(self.peek(), TokenKind::LParen) {
+                    self.skip_balanced_parens();
+                }
+                Expr::IntLiteral(0, span)
+            }
+            TokenKind::BuiltinVaArg => {
+                let span = self.peek_span();
+                self.advance();
+                self.expect(&TokenKind::LParen);
+                let ap_expr = self.parse_assignment_expr();
+                self.expect(&TokenKind::Comma);
+                let type_spec = self.parse_va_arg_type();
+                self.expect(&TokenKind::RParen);
+                Expr::VaArg(Box::new(ap_expr), type_spec, span)
+            }
+            TokenKind::BuiltinTypesCompatibleP => {
+                // __builtin_types_compatible_p(type1, type2) - always returns 0 (conservative)
+                let span = self.peek_span();
+                self.advance();
+                self.expect(&TokenKind::LParen);
+                self.parse_va_arg_type();
+                self.expect(&TokenKind::Comma);
+                self.parse_va_arg_type();
+                self.expect(&TokenKind::RParen);
+                Expr::IntLiteral(0, span)
+            }
+            TokenKind::Typeof => {
+                let span = self.peek_span();
+                self.advance();
+                if matches!(self.peek(), TokenKind::LParen) {
+                    self.skip_balanced_parens();
+                }
+                Expr::IntLiteral(0, span)
+            }
+            TokenKind::Builtin => {
+                let span = self.peek_span();
+                self.advance();
+                Expr::Identifier("__builtin_va_list".to_string(), span)
+            }
+            TokenKind::Extension => {
+                self.advance();
+                self.parse_cast_expr()
+            }
+            _ => {
+                let span = self.peek_span();
+                eprintln!("parser error: unexpected token {:?} in expression", self.peek());
+                self.advance();
+                Expr::IntLiteral(0, span)
+            }
+        }
+    }
+
+    /// Parse _Generic(controlling_expr, type: expr, ..., default: expr)
+    fn parse_generic_selection(&mut self) -> Expr {
+        let span = self.peek_span();
+        self.advance(); // consume _Generic
+        self.expect(&TokenKind::LParen);
+        let controlling = self.parse_assignment_expr();
+        self.expect(&TokenKind::Comma);
+        let mut associations = Vec::new();
+        loop {
+            if matches!(self.peek(), TokenKind::RParen) {
+                break;
+            }
+            let type_spec = if matches!(self.peek(), TokenKind::Default) {
+                self.advance();
+                None
+            } else {
+                if let Some(mut ts) = self.parse_type_specifier() {
+                    while matches!(self.peek(), TokenKind::Star) {
+                        self.advance();
+                        while matches!(self.peek(), TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict) {
+                            self.advance();
+                        }
+                        ts = TypeSpecifier::Pointer(Box::new(ts));
+                    }
+                    Some(ts)
+                } else {
+                    None
+                }
+            };
+            self.expect(&TokenKind::Colon);
+            let expr = self.parse_assignment_expr();
+            associations.push(GenericAssociation { type_spec, expr });
+            if !self.consume_if(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RParen);
+        Expr::GenericSelection(Box::new(controlling), associations, span)
+    }
+}
