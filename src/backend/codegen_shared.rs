@@ -127,6 +127,36 @@ impl CodegenState {
     }
 }
 
+/// How a value's effective address is accessed. This captures the 3-way decision
+/// (alloca with over-alignment / alloca direct / non-alloca indirect) that repeats
+/// across emit_store, emit_load, emit_gep, and emit_memcpy.
+#[derive(Debug, Clone, Copy)]
+pub enum SlotAddr {
+    /// Alloca with alignment > 16: runtime-aligned address must be computed.
+    OverAligned(StackSlot, u32),
+    /// Normal alloca: slot IS the data, access directly.
+    Direct(StackSlot),
+    /// Non-alloca: slot holds a pointer that must be loaded first.
+    Indirect(StackSlot),
+}
+
+impl CodegenState {
+    /// Classify how to access a value's effective address.
+    /// Returns `None` if the value has no assigned stack slot.
+    pub fn resolve_slot_addr(&self, val_id: u32) -> Option<SlotAddr> {
+        let slot = self.get_slot(val_id)?;
+        if self.is_alloca(val_id) {
+            if self.alloca_over_align(val_id).is_some() {
+                Some(SlotAddr::OverAligned(slot, val_id))
+            } else {
+                Some(SlotAddr::Direct(slot))
+            }
+        } else {
+            Some(SlotAddr::Indirect(slot))
+        }
+    }
+}
+
 /// Trait that each architecture implements to provide its specific code generation.
 ///
 /// The shared framework calls these methods during instruction dispatch.
@@ -167,78 +197,81 @@ pub trait ArchCodegen {
     fn emit_alloca_aligned_addr_to_acc(&mut self, slot: StackSlot, val_id: u32);
 
     /// Emit a store instruction: store val to the address in ptr.
-    /// Default implementation uses i128 pair ops and slot primitives.
+    /// Default implementation uses `SlotAddr` to dispatch the 3-way
+    /// alloca/over-aligned/indirect pattern once for both i128 and typed stores.
     fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
+        let addr = self.state_ref().resolve_slot_addr(ptr.0);
         if is_i128_type(ty) {
             self.emit_load_acc_pair(val);
-            if let Some(slot) = self.state_ref().get_slot(ptr.0) {
-                if self.state_ref().is_alloca(ptr.0) {
-                    if self.state_ref().alloca_over_align(ptr.0).is_some() {
+            if let Some(addr) = addr {
+                match addr {
+                    SlotAddr::OverAligned(slot, id) => {
                         self.emit_save_acc_pair();
-                        self.emit_alloca_aligned_addr(slot, ptr.0);
+                        self.emit_alloca_aligned_addr(slot, id);
                         self.emit_store_pair_indirect();
-                    } else {
-                        self.emit_store_pair_to_slot(slot);
                     }
-                } else {
-                    self.emit_save_acc_pair();
-                    self.emit_load_ptr_from_slot(slot);
-                    self.emit_store_pair_indirect();
+                    SlotAddr::Direct(slot) => self.emit_store_pair_to_slot(slot),
+                    SlotAddr::Indirect(slot) => {
+                        self.emit_save_acc_pair();
+                        self.emit_load_ptr_from_slot(slot);
+                        self.emit_store_pair_indirect();
+                    }
                 }
             }
             return;
         }
         self.emit_load_operand(val);
-        if let Some(slot) = self.state_ref().get_slot(ptr.0) {
+        if let Some(addr) = addr {
             let store_instr = self.store_instr_for_type(ty);
-            if self.state_ref().is_alloca(ptr.0) {
-                if self.state_ref().alloca_over_align(ptr.0).is_some() {
+            match addr {
+                SlotAddr::OverAligned(slot, id) => {
                     self.emit_save_acc();
-                    self.emit_alloca_aligned_addr(slot, ptr.0);
+                    self.emit_alloca_aligned_addr(slot, id);
                     self.emit_typed_store_indirect(store_instr, ty);
-                } else {
-                    self.emit_typed_store_to_slot(store_instr, ty, slot);
                 }
-            } else {
-                self.emit_save_acc();
-                self.emit_load_ptr_from_slot(slot);
-                self.emit_typed_store_indirect(store_instr, ty);
+                SlotAddr::Direct(slot) => self.emit_typed_store_to_slot(store_instr, ty, slot),
+                SlotAddr::Indirect(slot) => {
+                    self.emit_save_acc();
+                    self.emit_load_ptr_from_slot(slot);
+                    self.emit_typed_store_indirect(store_instr, ty);
+                }
             }
         }
     }
 
     /// Emit a load instruction: load from the address in ptr to dest.
-    /// Default implementation uses i128 pair ops and slot primitives.
+    /// Default implementation uses `SlotAddr` to dispatch the 3-way pattern.
     fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) {
+        let addr = self.state_ref().resolve_slot_addr(ptr.0);
         if is_i128_type(ty) {
-            if let Some(slot) = self.state_ref().get_slot(ptr.0) {
-                if self.state_ref().is_alloca(ptr.0) {
-                    if self.state_ref().alloca_over_align(ptr.0).is_some() {
-                        self.emit_alloca_aligned_addr(slot, ptr.0);
+            if let Some(addr) = addr {
+                match addr {
+                    SlotAddr::OverAligned(slot, id) => {
+                        self.emit_alloca_aligned_addr(slot, id);
                         self.emit_load_pair_indirect();
-                    } else {
-                        self.emit_load_pair_from_slot(slot);
                     }
-                } else {
-                    self.emit_load_ptr_from_slot(slot);
-                    self.emit_load_pair_indirect();
+                    SlotAddr::Direct(slot) => self.emit_load_pair_from_slot(slot),
+                    SlotAddr::Indirect(slot) => {
+                        self.emit_load_ptr_from_slot(slot);
+                        self.emit_load_pair_indirect();
+                    }
                 }
                 self.emit_store_acc_pair(dest);
             }
             return;
         }
-        if let Some(slot) = self.state_ref().get_slot(ptr.0) {
+        if let Some(addr) = addr {
             let load_instr = self.load_instr_for_type(ty);
-            if self.state_ref().is_alloca(ptr.0) {
-                if self.state_ref().alloca_over_align(ptr.0).is_some() {
-                    self.emit_alloca_aligned_addr(slot, ptr.0);
+            match addr {
+                SlotAddr::OverAligned(slot, id) => {
+                    self.emit_alloca_aligned_addr(slot, id);
                     self.emit_typed_load_indirect(load_instr);
-                } else {
-                    self.emit_typed_load_from_slot(load_instr, slot);
                 }
-            } else {
-                self.emit_load_ptr_from_slot(slot);
-                self.emit_typed_load_indirect(load_instr);
+                SlotAddr::Direct(slot) => self.emit_typed_load_from_slot(load_instr, slot),
+                SlotAddr::Indirect(slot) => {
+                    self.emit_load_ptr_from_slot(slot);
+                    self.emit_typed_load_indirect(load_instr);
+                }
             }
             self.emit_store_result(dest);
         }
@@ -333,14 +366,14 @@ pub trait ArchCodegen {
     /// Emit a get-element-pointer (base + offset).
     /// Default: load base address to secondary reg, load offset to acc, add, store.
     fn emit_gep(&mut self, dest: &Value, base: &Value, offset: &Operand) {
-        if let Some(slot) = self.state_ref().get_slot(base.0) {
-            let is_alloca = self.state_ref().is_alloca(base.0);
-            if is_alloca && self.state_ref().alloca_over_align(base.0).is_some() {
-                // Over-aligned: compute aligned addr to acc, save to secondary
-                self.emit_alloca_aligned_addr_to_acc(slot, base.0);
-                self.emit_acc_to_secondary();
-            } else {
-                self.emit_slot_addr_to_secondary(slot, is_alloca);
+        if let Some(addr) = self.state_ref().resolve_slot_addr(base.0) {
+            match addr {
+                SlotAddr::OverAligned(slot, id) => {
+                    self.emit_alloca_aligned_addr_to_acc(slot, id);
+                    self.emit_acc_to_secondary();
+                }
+                SlotAddr::Direct(slot) => self.emit_slot_addr_to_secondary(slot, true),
+                SlotAddr::Indirect(slot) => self.emit_slot_addr_to_secondary(slot, false),
             }
         }
         self.emit_load_operand(offset);
@@ -396,24 +429,26 @@ pub trait ArchCodegen {
     }
 
     /// Emit a memory copy: copy `size` bytes from src address to dest address.
-    /// Default: loads dest/src addresses via slot primitives, then calls emit_memcpy_impl.
+    /// Default: loads dest/src addresses via `SlotAddr` dispatch, then calls emit_memcpy_impl.
     fn emit_memcpy(&mut self, dest: &Value, src: &Value, size: usize) {
-        if let Some(dst_slot) = self.state_ref().get_slot(dest.0) {
-            let is_alloca = self.state_ref().is_alloca(dest.0);
-            if is_alloca && self.state_ref().alloca_over_align(dest.0).is_some() {
-                self.emit_alloca_aligned_addr(dst_slot, dest.0);
-                self.emit_memcpy_store_dest_from_acc();
-            } else {
-                self.emit_memcpy_load_dest_addr(dst_slot, is_alloca);
+        if let Some(addr) = self.state_ref().resolve_slot_addr(dest.0) {
+            match addr {
+                SlotAddr::OverAligned(slot, id) => {
+                    self.emit_alloca_aligned_addr(slot, id);
+                    self.emit_memcpy_store_dest_from_acc();
+                }
+                SlotAddr::Direct(slot) => self.emit_memcpy_load_dest_addr(slot, true),
+                SlotAddr::Indirect(slot) => self.emit_memcpy_load_dest_addr(slot, false),
             }
         }
-        if let Some(src_slot) = self.state_ref().get_slot(src.0) {
-            let is_alloca = self.state_ref().is_alloca(src.0);
-            if is_alloca && self.state_ref().alloca_over_align(src.0).is_some() {
-                self.emit_alloca_aligned_addr(src_slot, src.0);
-                self.emit_memcpy_store_src_from_acc();
-            } else {
-                self.emit_memcpy_load_src_addr(src_slot, is_alloca);
+        if let Some(addr) = self.state_ref().resolve_slot_addr(src.0) {
+            match addr {
+                SlotAddr::OverAligned(slot, id) => {
+                    self.emit_alloca_aligned_addr(slot, id);
+                    self.emit_memcpy_store_src_from_acc();
+                }
+                SlotAddr::Direct(slot) => self.emit_memcpy_load_src_addr(slot, true),
+                SlotAddr::Indirect(slot) => self.emit_memcpy_load_src_addr(slot, false),
             }
         }
         self.emit_memcpy_impl(size);
@@ -722,11 +757,9 @@ pub trait ArchCodegen {
         self.emit_load_operand(size);
         self.emit_round_up_acc_to_16();
         self.emit_sub_sp_by_acc();
+        self.emit_mov_sp_to_acc();
         if align > 16 {
-            self.emit_mov_sp_to_acc();
             self.emit_align_acc(align);
-        } else {
-            self.emit_mov_sp_to_acc();
         }
         self.emit_store_result(dest);
     }
@@ -1544,6 +1577,20 @@ impl AsmOperand {
     pub fn new(kind: AsmOperandKind, name: Option<String>) -> Self {
         Self { kind, reg: String::new(), name, mem_addr: String::new(), mem_offset: 0, imm_value: None, operand_type: IrType::I64 }
     }
+
+    /// Copy register assignment and addressing metadata from another operand.
+    /// Used for tied operands and "+" read-write propagation.
+    pub fn copy_metadata_from(&mut self, source: &AsmOperand) {
+        self.reg = source.reg.clone();
+        self.mem_addr = source.mem_addr.clone();
+        self.mem_offset = source.mem_offset;
+        // Propagate memory/address kind so the operand is treated correctly in substitution
+        if matches!(source.kind, AsmOperandKind::Memory) {
+            self.kind = AsmOperandKind::Memory;
+        } else if matches!(source.kind, AsmOperandKind::Address) {
+            self.kind = AsmOperandKind::Address;
+        }
+    }
 }
 
 /// Trait that backends implement to provide architecture-specific inline asm behavior.
@@ -1670,32 +1717,26 @@ pub fn emit_inline_asm_common(
         }
     }
 
-    // Resolve tied operands: copy register and metadata from the target operand
+    // Resolve tied operands: copy register and metadata from the target operand.
+    // Handles both AsmOperandKind::Tied (explicit) and input_tied_to (x86-style) in one pass.
     for i in 0..total_operands {
-        if let AsmOperandKind::Tied(tied_to) = operands[i].kind.clone() {
-            if tied_to < operands.len() {
-                operands[i].reg = operands[tied_to].reg.clone();
-                operands[i].mem_addr = operands[tied_to].mem_addr.clone();
-                operands[i].mem_offset = operands[tied_to].mem_offset;
-                if matches!(operands[tied_to].kind, AsmOperandKind::Memory) {
-                    operands[i].kind = AsmOperandKind::Memory;
-                } else if matches!(operands[tied_to].kind, AsmOperandKind::Address) {
-                    operands[i].kind = AsmOperandKind::Address;
-                }
+        let tied_target = if let AsmOperandKind::Tied(tied_to) = operands[i].kind {
+            Some(tied_to)
+        } else if i >= outputs.len() {
+            // Check x86-style tied (via input_tied_to) for inputs without a register
+            let input_idx = i - outputs.len();
+            if operands[i].reg.is_empty() {
+                input_tied_to[input_idx]
+            } else {
+                None
             }
-        }
-    }
-    // Also check via input_tied_to for x86-style tied operands (not classified as Tied kind)
-    for (i, tied_to) in input_tied_to.iter().enumerate() {
-        if let Some(tied_to) = tied_to {
-            let op_idx = outputs.len() + i;
-            if *tied_to < operands.len() && operands[op_idx].reg.is_empty() {
-                operands[op_idx].reg = operands[*tied_to].reg.clone();
-                operands[op_idx].mem_addr = operands[*tied_to].mem_addr.clone();
-                operands[op_idx].mem_offset = operands[*tied_to].mem_offset;
-                if matches!(operands[*tied_to].kind, AsmOperandKind::Memory) {
-                    operands[op_idx].kind = AsmOperandKind::Memory;
-                }
+        } else {
+            None
+        };
+        if let Some(target) = tied_target {
+            if target < operands.len() {
+                let source = operands[target].clone();
+                operands[i].copy_metadata_from(&source);
             }
         }
     }
@@ -1719,16 +1760,16 @@ pub fn emit_inline_asm_common(
     // Handle "+" read-write constraints: synthetic inputs share the output's register.
     // The IR lowering adds synthetic inputs at the BEGINNING of the inputs list
     // (one per "+" output, in order).
+    let num_plus = outputs.iter().filter(|(c,_,_)| c.contains('+')).count();
     let mut plus_idx = 0;
     for (i, (constraint, _, _)) in outputs.iter().enumerate() {
         if constraint.contains('+') {
             let plus_input_idx = outputs.len() + plus_idx;
             if plus_input_idx < total_operands {
-                operands[plus_input_idx].reg = operands[i].reg.clone();
-                operands[plus_input_idx].kind = operands[i].kind.clone();
-                operands[plus_input_idx].mem_addr = operands[i].mem_addr.clone();
-                operands[plus_input_idx].mem_offset = operands[i].mem_offset;
-                operands[plus_input_idx].operand_type = operands[i].operand_type;
+                let source = operands[i].clone();
+                operands[plus_input_idx].copy_metadata_from(&source);
+                operands[plus_input_idx].kind = source.kind;
+                operands[plus_input_idx].operand_type = source.operand_type;
             }
             plus_idx += 1;
         }
@@ -1736,7 +1777,6 @@ pub fn emit_inline_asm_common(
 
     // Build GCC operand number → internal index mapping.
     // GCC numbers: outputs first, then EXPLICIT inputs (synthetic "+" inputs are hidden).
-    let num_plus = outputs.iter().filter(|(c,_,_)| c.contains('+')).count();
     let num_gcc_operands = outputs.len() + (inputs.len() - num_plus);
     let mut gcc_to_internal: Vec<usize> = Vec::with_capacity(num_gcc_operands);
     for i in 0..outputs.len() {
@@ -1747,15 +1787,12 @@ pub fn emit_inline_asm_common(
     }
 
     // Resolve memory operand addresses for non-synthetic input operands
-    {
-        let num_plus = outputs.iter().filter(|(c,_,_)| c.contains('+')).count();
-        for (i, (_, val, _)) in inputs.iter().enumerate() {
-            // Skip synthetic "+" inputs (they already inherited from outputs)
-            if i < num_plus { continue; }
-            let op_idx = outputs.len() + i;
-            if matches!(operands[op_idx].kind, AsmOperandKind::Memory) {
-                emitter.resolve_memory_operand(&mut operands[op_idx], val);
-            }
+    for (i, (_, val, _)) in inputs.iter().enumerate() {
+        // Skip synthetic "+" inputs (they already inherited from outputs)
+        if i < num_plus { continue; }
+        let op_idx = outputs.len() + i;
+        if matches!(operands[op_idx].kind, AsmOperandKind::Memory) {
+            emitter.resolve_memory_operand(&mut operands[op_idx], val);
         }
     }
 

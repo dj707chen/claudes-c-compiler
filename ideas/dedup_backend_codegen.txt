@@ -40,6 +40,13 @@ Completed items:
   (emit_float_neg, emit_int_clz, emit_int_bswap, etc.).
 - emit_memcpy: Default loads addresses via emit_memcpy_load_dest/src_addr, then calls
   emit_memcpy_impl for the arch-specific copy loop.
+- SlotAddr enum + resolve_slot_addr(): Shared 3-way alloca address resolution
+  (OverAligned/Direct/Indirect) extracted from emit_store, emit_load, emit_gep,
+  emit_memcpy defaults. Eliminates duplicated if/else chains.
+- AsmOperand::copy_metadata_from(): Shared operand metadata copying for tied
+  operands and "+" read-write propagation. Consolidates 3 inline copy blocks.
+- Inline asm tied-operand resolution: Merged two separate loops (Tied kind +
+  input_tied_to vector) into a single pass.
 
 - emit_return: Default implementation dispatches i128/f128/f32/f64/int returns using
   arch-specific primitives (emit_return_i128_to_regs, emit_return_f128_to_reg, etc.).
