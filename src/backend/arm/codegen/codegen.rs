@@ -760,11 +760,13 @@ impl ArchCodegen for ArmCodegen {
             }
         }
 
-        // Classify each param: int reg, float reg, i128 pair, or stack-passed
+        // Classify each param: int reg, float reg, i128 pair, struct by value, or stack-passed
         let mut int_reg_idx = 0usize;
         let mut float_reg_idx = 0usize;
         // Classes: 'i' = int reg, 'f' = float reg, 'p' = i128 GP pair,
-        // 's' = stack (8 bytes), 'S' = stack F128 (16 bytes, 16-byte aligned)
+        // 's' = stack (8 bytes), 'S' = stack F128 (16 bytes, 16-byte aligned),
+        // 'V' = small struct by value in GP regs, 'M' = large struct on stack,
+        // 'v' = small struct overflow to stack
         let mut param_class: Vec<char> = Vec::new();
         let mut param_int_reg: Vec<usize> = Vec::new();
         let mut param_float_reg: Vec<usize> = Vec::new();
@@ -775,7 +777,36 @@ impl ArchCodegen for ArmCodegen {
             let is_float = param.ty.is_float();
             let is_i128 = is_i128_type(param.ty);
             let is_long_double = param.ty.is_long_double();
-            if is_i128 {
+            let struct_size = param.struct_size;
+
+            if let Some(size) = struct_size {
+                if size <= 16 {
+                    // AAPCS64: Small struct by value in 1-2 GP registers
+                    let regs_needed = if size <= 8 { 1 } else { 2 };
+                    if int_reg_idx + regs_needed <= 8 {
+                        param_class.push('V');
+                        param_int_reg.push(int_reg_idx);
+                        param_float_reg.push(0);
+                        stack_offsets.push(0);
+                        int_reg_idx += regs_needed;
+                    } else {
+                        // Overflow to stack
+                        param_class.push('v');
+                        param_int_reg.push(0);
+                        param_float_reg.push(0);
+                        stack_offsets.push(stack_offset);
+                        stack_offset += ((size + 7) & !7) as i64;
+                        int_reg_idx = 8;
+                    }
+                } else {
+                    // Large struct: passed on stack (MEMORY class)
+                    param_class.push('M');
+                    param_int_reg.push(0);
+                    param_float_reg.push(0);
+                    stack_offsets.push(stack_offset);
+                    stack_offset += ((size + 7) & !7) as i64;
+                }
+            } else if is_i128 {
                 // AAPCS64: 128-bit integers in even-aligned GP register pair
                 if int_reg_idx % 2 != 0 { int_reg_idx += 1; }
                 if int_reg_idx + 1 < 8 {
@@ -824,7 +855,25 @@ impl ArchCodegen for ArmCodegen {
         }
 
         // Phase 1: Store all INTEGER register params first (before x0 gets clobbered by float moves).
+        // This includes struct-by-value params ('V') which arrive in GP registers.
         for (i, param) in func.params.iter().enumerate() {
+            if param_class[i] == 'V' {
+                // Small struct by value: data arrives in 1-2 GP registers.
+                // Store the register data directly into the alloca.
+                if param.name.is_empty() { continue; }
+                if let Some((dest, _ty)) = find_param_alloca(func, i) {
+                    if let Some(slot) = self.state.get_slot(dest.0) {
+                        let size = param.struct_size.unwrap_or(8);
+                        let lo_reg = ARM_ARG_REGS[param_int_reg[i]];
+                        self.emit_store_to_sp(lo_reg, slot.0, "str");
+                        if size > 8 {
+                            let hi_reg = ARM_ARG_REGS[param_int_reg[i] + 1];
+                            self.emit_store_to_sp(hi_reg, slot.0 + 8, "str");
+                        }
+                    }
+                }
+                continue;
+            }
             if param_class[i] == 'p' {
                 // 128-bit integer param: arrives in even-aligned GP register pair
                 if param.name.is_empty() { continue; }
@@ -917,14 +966,26 @@ impl ArchCodegen for ArmCodegen {
         }
 
         // Phase 3: Store stack-passed params (above callee's frame).
-        // 's' = regular stack params (8 bytes), 'S' = F128 stack params (16 bytes)
+        // 's' = regular stack params (8 bytes), 'S' = F128 stack params (16 bytes),
+        // 'v' = small struct overflow to stack, 'M' = large struct on stack
         for (i, param) in func.params.iter().enumerate() {
-            if param_class[i] != 's' && param_class[i] != 'S' { continue; }
+            if !matches!(param_class[i], 's' | 'S' | 'v' | 'M') { continue; }
             if param.name.is_empty() { continue; }
             if let Some((dest, ty)) = find_param_alloca(func, i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
                     let caller_offset = frame_size + stack_offsets[i];
-                    if param_class[i] == 'S' {
+                    if param_class[i] == 'v' || param_class[i] == 'M' {
+                        // Struct by value on stack: copy raw struct data from caller's
+                        // stack into the callee's alloca.
+                        let size = param.struct_size.unwrap_or(8);
+                        let n_dwords = (size + 7) / 8;
+                        for qi in 0..n_dwords {
+                            let src_off = caller_offset + (qi as i64 * 8);
+                            let dst_off = slot.0 + (qi as i64 * 8);
+                            self.emit_load_from_sp("x0", src_off, "ldr");
+                            self.emit_store_to_sp("x0", dst_off, "str");
+                        }
+                    } else if param_class[i] == 'S' {
                         // F128 stack param: load 128-bit value and convert to f64
                         // Load the quad-precision value from the caller's stack into q0
                         self.emit_load_from_sp("x0", caller_offset, "ldr");
@@ -1414,13 +1475,17 @@ impl ArchCodegen for ArmCodegen {
         // and va_arg uses __gr_offs/__vr_offs to locate args in the correct save area.
         // F128 (long double) uses Q registers (128-bit) and consumes one FP register slot.
         // Arg classes: 'f' = float reg, 'i' = int reg, 's' = stack, 'q' = F128 in Q reg,
-        // 'S' = stack quad (overflow), 'p' = i128 in GP register pair, 'P' = i128 stack
+        // 'S' = stack quad (overflow), 'p' = i128 in GP register pair, 'P' = i128 stack,
+        // 'V' = small struct by value in GP regs (<=16 bytes), 'M' = large struct on stack (>16 bytes),
+        // 'v' = small struct overflow to stack
         let mut arg_classes: Vec<char> = Vec::new();
+        let mut arg_struct_sizes: Vec<usize> = Vec::new(); // struct size for 'V'/'M'/'v' args
         let mut fi = 0usize;
         let mut ii = 0usize;
         let _ = is_variadic; // AAPCS64: variadic status doesn't affect register assignment
         let _ = num_fixed_args; // AAPCS64: all args use same classification regardless
         for (i, _arg) in args.iter().enumerate() {
+            let struct_size = struct_arg_sizes.get(i).copied().flatten();
             let arg_ty = if i < arg_types.len() { Some(arg_types[i]) } else { None };
             let is_long_double = arg_ty == Some(IrType::F128);
             let is_i128 = arg_ty.map(|t| is_i128_type(t)).unwrap_or(false);
@@ -1429,7 +1494,26 @@ impl ArchCodegen for ArmCodegen {
             } else {
                 matches!(args[i], Operand::Const(IrConst::F32(_) | IrConst::F64(_)))
             };
-            if is_i128 {
+            if let Some(size) = struct_size {
+                if size <= 16 {
+                    // AAPCS64: Small struct passed by value in 1-2 GP registers
+                    let regs_needed = if size <= 8 { 1 } else { 2 };
+                    if ii + regs_needed <= 8 {
+                        arg_classes.push('V'); // struct by value in GP regs
+                        arg_struct_sizes.push(size);
+                        ii += regs_needed;
+                    } else {
+                        // Overflow to stack
+                        arg_classes.push('v'); // small struct on stack
+                        arg_struct_sizes.push(size);
+                        ii = 8;
+                    }
+                } else {
+                    // AAPCS64: Large struct (>16 bytes) passed on the stack (MEMORY class)
+                    arg_classes.push('M');
+                    arg_struct_sizes.push(size);
+                }
+            } else if is_i128 {
                 // AAPCS64: 128-bit integers go in even-aligned GP register pair
                 if ii % 2 != 0 { ii += 1; } // align to even register
                 if ii + 1 < 8 {
@@ -1439,6 +1523,7 @@ impl ArchCodegen for ArmCodegen {
                     arg_classes.push('P'); // stack (16 bytes)
                     ii = 8;
                 }
+                arg_struct_sizes.push(0);
             } else if is_long_double {
                 if fi < 8 {
                     arg_classes.push('q');
@@ -1446,30 +1531,48 @@ impl ArchCodegen for ArmCodegen {
                 } else {
                     arg_classes.push('S');
                 }
+                arg_struct_sizes.push(0);
             } else if is_float && fi < 8 {
                 arg_classes.push('f');
                 fi += 1;
+                arg_struct_sizes.push(0);
             } else if !is_float && ii < 8 {
                 arg_classes.push('i');
                 ii += 1;
+                arg_struct_sizes.push(0);
             } else {
                 arg_classes.push('s');
+                arg_struct_sizes.push(0);
             }
         }
 
-        // Count stack arguments - 'S'/'P' need 16 bytes, 's' args need 8 bytes
+        // Count stack arguments - 'S'/'P' need 16 bytes, 's' args need 8 bytes,
+        // 'M' = large struct (raw data on stack), 'v' = small struct overflow to stack
         let stack_arg_indices: Vec<usize> = args.iter().enumerate()
-            .filter(|(i, _)| arg_classes[*i] == 's' || arg_classes[*i] == 'S' || arg_classes[*i] == 'P')
+            .filter(|(i, _)| matches!(arg_classes[*i], 's' | 'S' | 'P' | 'M' | 'v'))
             .map(|(i, _)| i)
             .collect();
         let mut stack_arg_space: usize = 0;
         for &idx in &stack_arg_indices {
-            if arg_classes[idx] == 'S' || arg_classes[idx] == 'P' {
-                // Align to 16 bytes for quad/i128
-                stack_arg_space = (stack_arg_space + 15) & !15;
-                stack_arg_space += 16;
-            } else {
-                stack_arg_space += 8;
+            match arg_classes[idx] {
+                'S' | 'P' => {
+                    // Align to 16 bytes for quad/i128
+                    stack_arg_space = (stack_arg_space + 15) & !15;
+                    stack_arg_space += 16;
+                }
+                'M' => {
+                    // Large struct: raw data on stack, 8-byte aligned
+                    let size = arg_struct_sizes[idx];
+                    stack_arg_space += (size + 7) & !7;
+                }
+                'v' => {
+                    // Small struct overflow to stack
+                    let size = arg_struct_sizes[idx];
+                    stack_arg_space += (size + 7) & !7;
+                }
+                _ => {
+                    stack_arg_space += 8;
+                }
             }
         }
         stack_arg_space = (stack_arg_space + 15) & !15; // Final 16-byte alignment
@@ -1487,11 +1590,46 @@ impl ArchCodegen for ArmCodegen {
             // Now we need to load operands with adjusted SP offsets
             let mut stack_offset = 0i64;
             for &arg_idx in &stack_arg_indices {
-                let is_stack_quad = arg_classes[arg_idx] == 'S';
-                let is_stack_i128 = arg_classes[arg_idx] == 'P';
+                let cls = arg_classes[arg_idx];
+                let is_stack_quad = cls == 'S';
+                let is_stack_i128 = cls == 'P';
+                let is_struct_stack = cls == 'M' || cls == 'v';
                 if is_stack_quad || is_stack_i128 {
                     // Align stack_offset to 16 bytes for quad-precision or i128
                     stack_offset = (stack_offset + 15) & !15;
+                }
+                if is_struct_stack {
+                    // Struct by value on stack: copy raw struct data from memory.
+                    // The operand is the address (alloca pointer) of the struct.
+                    let size = arg_struct_sizes[arg_idx];
+                    let n_dwords = (size + 7) / 8;
+                    // Load struct address into x0
+                    match &args[arg_idx] {
+                        Operand::Value(v) => {
+                            if let Some(slot) = self.state.get_slot(v.0) {
+                                let adjusted = slot.0 + stack_arg_space as i64 + fptr_spill;
+                                if self.state.is_alloca(v.0) {
+                                    self.emit_add_sp_offset("x0", adjusted);
+                                } else {
+                                    self.emit_load_from_sp("x0", adjusted, "ldr");
+                                }
+                            } else {
+                                self.state.emit("    mov x0, #0");
+                            }
+                        }
+                        Operand::Const(_) => {
+                            self.operand_to_x0(&args[arg_idx]);
+                        }
+                    }
+                    // x0 now holds the struct address; copy data to stack
+                    for qi in 0..n_dwords {
+                        let src_off = (qi * 8) as i64;
+                        let dst_off = stack_offset + src_off;
+                        self.state.emit(&format!("    ldr x1, [x0, #{}]", src_off));
+                        self.emit_store_to_sp("x1", dst_off, "str");
+                    }
+                    stack_offset += (n_dwords as i64) * 8;
+                    continue;
                 }
                 if is_stack_i128 {
                     // 128-bit integer stack arg
@@ -1746,7 +1884,7 @@ impl ArchCodegen for ArmCodegen {
         }
 
         // Phase 3: Move GP args from temp regs to actual arg registers (x0-x7).
-        // Track which GP registers are assigned for 'i' and 'p' classes.
+        // Track which GP registers are assigned for 'i', 'p', and 'V' classes.
         let mut int_reg_idx = 0usize;
         gp_tmp_idx = 0;
         for (i, _arg) in args.iter().enumerate() {
@@ -1754,6 +1892,13 @@ impl ArchCodegen for ArmCodegen {
                 // i128 pair: skip 2 registers (handled below)
                 if int_reg_idx % 2 != 0 { int_reg_idx += 1; }
                 int_reg_idx += 2;
+                continue;
+            }
+            if arg_classes[i] == 'V' {
+                // Struct by value: skip 1-2 registers (handled in Phase 3c)
+                let size = arg_struct_sizes[i];
+                let regs_needed = if size <= 8 { 1 } else { 2 };
+                int_reg_idx += regs_needed;
                 continue;
             }
             if arg_classes[i] != 'i' { continue; }
@@ -1831,6 +1976,75 @@ impl ArchCodegen for ArmCodegen {
                     pair_reg_idx += 2;
                 } else if arg_classes[i] == 'i' {
                     pair_reg_idx += 1;
+                } else if arg_classes[i] == 'V' {
+                    let size = arg_struct_sizes[i];
+                    pair_reg_idx += if size <= 8 { 1 } else { 2 };
+                }
+            }
+        }
+
+        // Phase 3c: Load struct-by-value register args directly into their target registers.
+        // The operand is a pointer (alloca address) to the struct data.
+        // We load 1-2 dwords from that address into consecutive GP registers.
+        {
+            let mut struct_reg_idx = 0usize;
+            for (i, _arg) in args.iter().enumerate() {
+                match arg_classes[i] {
+                    'i' => { struct_reg_idx += 1; }
+                    'p' => {
+                        if struct_reg_idx % 2 != 0 { struct_reg_idx += 1; }
+                        struct_reg_idx += 2;
+                    }
+                    'V' => {
+                        let size = arg_struct_sizes[i];
+                        let regs_needed = if size <= 8 { 1 } else { 2 };
+                        // Load struct address into x17 (scratch), then load data into arg regs
+                        if total_sp_adjust > 0 {
+                            match &args[i] {
+                                Operand::Value(v) => {
+                                    if let Some(slot) = self.state.get_slot(v.0) {
+                                        let adjusted = slot.0 + total_sp_adjust;
+                                        if self.state.is_alloca(v.0) {
+                                            self.emit_add_sp_offset("x17", adjusted);
+                                        } else {
+                                            self.emit_load_from_sp("x17", adjusted, "ldr");
+                                        }
+                                    } else {
+                                        self.state.emit("    mov x17, #0");
+                                    }
+                                }
+                                Operand::Const(_) => {
+                                    self.operand_to_x0(&args[i]);
+                                    self.state.emit("    mov x17, x0");
+                                }
+                            }
+                        } else {
+                            match &args[i] {
+                                Operand::Value(v) => {
+                                    if let Some(slot) = self.state.get_slot(v.0) {
+                                        if self.state.is_alloca(v.0) {
+                                            self.emit_add_sp_offset("x17", slot.0);
+                                        } else {
+                                            self.emit_load_from_sp("x17", slot.0, "ldr");
+                                        }
+                                    } else {
+                                        self.state.emit("    mov x17, #0");
+                                    }
+                                }
+                                Operand::Const(_) => {
+                                    self.operand_to_x0(&args[i]);
+                                    self.state.emit("    mov x17, x0");
+                                }
+                            }
+                        }
+                        // x17 now holds the struct address; load data into arg regs
+                        self.state.emit(&format!("    ldr {}, [x17]", ARM_ARG_REGS[struct_reg_idx]));
+                        if regs_needed > 1 {
+                            self.state.emit(&format!("    ldr {}, [x17, #8]", ARM_ARG_REGS[struct_reg_idx + 1]));
+                        }
+                        struct_reg_idx += regs_needed;
+                    }
+                    _ => {}
                 }
             }
         }

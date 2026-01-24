@@ -805,6 +805,83 @@ impl ArchCodegen for RiscvCodegen {
             let is_long_double = param.ty.is_long_double();
             let is_i128_param = is_i128_type(param.ty);
             let is_float = param.ty.is_float() && !is_long_double;
+            let struct_size = param.struct_size;
+
+            // Handle struct-by-value params first (before general classification)
+            if let Some(size) = struct_size {
+                let is_small_struct = size <= 16;
+                let regs_needed = if size <= 8 { 1 } else { 2 };
+                let struct_is_stack_passed = if is_small_struct {
+                    int_reg_idx + regs_needed > 8
+                } else {
+                    true // Large structs always on stack
+                };
+
+                if param.name.is_empty() {
+                    if struct_is_stack_passed {
+                        stack_param_offset += ((size + 7) & !7) as i64;
+                        if is_small_struct { int_reg_idx = 8; }
+                    } else {
+                        int_reg_idx += regs_needed;
+                    }
+                    continue;
+                }
+                if let Some((dest, _ty)) = find_param_alloca(func, _i) {
+                    if let Some(slot) = self.state.get_slot(dest.0) {
+                        if is_small_struct && !struct_is_stack_passed {
+                            // Small struct by value: data arrives in 1-2 GP registers.
+                            if has_f128_reg_params {
+                                // Load from GP save area
+                                let lo_off = f128_save_offset + (int_reg_idx as i64) * 8;
+                                self.state.emit(&format!("    ld t0, {}(sp)", lo_off));
+                                self.emit_store_to_s0("t0", slot.0, "sd");
+                                if size > 8 {
+                                    let hi_off = f128_save_offset + ((int_reg_idx + 1) as i64) * 8;
+                                    self.state.emit(&format!("    ld t0, {}(sp)", hi_off));
+                                    self.emit_store_to_s0("t0", slot.0 + 8, "sd");
+                                }
+                            } else if func.is_variadic {
+                                // Load from register save area at s0+idx*8
+                                let lo_off = (int_reg_idx as i64) * 8;
+                                self.emit_load_from_s0("t0", lo_off, "ld");
+                                self.emit_store_to_s0("t0", slot.0, "sd");
+                                if size > 8 {
+                                    let hi_off = ((int_reg_idx + 1) as i64) * 8;
+                                    self.emit_load_from_s0("t0", hi_off, "ld");
+                                    self.emit_store_to_s0("t0", slot.0 + 8, "sd");
+                                }
+                            } else {
+                                // Direct from registers
+                                self.emit_store_to_s0(RISCV_ARG_REGS[int_reg_idx], slot.0, "sd");
+                                if size > 8 {
+                                    self.emit_store_to_s0(RISCV_ARG_REGS[int_reg_idx + 1], slot.0 + 8, "sd");
+                                }
+                            }
+                            int_reg_idx += regs_needed;
+                        } else {
+                            // Struct on stack (large or overflowed): copy from caller's stack
+                            let n_dwords = (size + 7) / 8;
+                            for qi in 0..n_dwords {
+                                let src_off = stack_param_offset + (qi as i64 * 8);
+                                let dst_off = slot.0 + (qi as i64 * 8);
+                                self.emit_load_from_s0("t0", src_off, "ld");
+                                self.emit_store_to_s0("t0", dst_off, "sd");
+                            }
+                            stack_param_offset += ((size + 7) & !7) as i64;
+                            if is_small_struct { int_reg_idx = 8; }
+                        }
+                    }
+                } else {
+                    // No alloca found - just advance counters
+                    if struct_is_stack_passed {
+                        stack_param_offset += ((size + 7) & !7) as i64;
+                        if is_small_struct { int_reg_idx = 8; }
+                    } else {
+                        int_reg_idx += regs_needed;
+                    }
+                }
+                continue;
+            }
 
             // For variadic functions: ALL args (including floats) go through GP registers.
             // For non-variadic: FP args go to fa0-fa7 first, then spill to GP regs.
@@ -1439,14 +1516,18 @@ impl ArchCodegen for RiscvCodegen {
 
         // Phase 1: Classify all args into register assignments or stack overflow.
         // 'I' = GP register, 'F' = FP register, 'Q' = F128 GP register pair,
-        // 'W' = i128 GP register pair, 'S' = stack, 'T' = F128 stack, 'X' = i128 stack
+        // 'W' = i128 GP register pair, 'S' = stack, 'T' = F128 stack, 'X' = i128 stack,
+        // 'V' = small struct by value in GP regs (<=16 bytes),
+        // 'v' = small struct overflow to stack, 'M' = large struct on stack (>16 bytes)
         let mut arg_classes: Vec<char> = Vec::new();
-        let mut arg_int_indices: Vec<usize> = Vec::new(); // GP reg index for 'I' or base index for 'Q'/'W'
+        let mut arg_int_indices: Vec<usize> = Vec::new(); // GP reg index for 'I' or base index for 'Q'/'W'/'V'
         let mut arg_fp_indices: Vec<usize> = Vec::new();  // FP reg index for 'F'
+        let mut arg_struct_sizes: Vec<usize> = Vec::new(); // struct size for 'V'/'M'/'v' args
         let mut int_idx = 0usize;
         let mut float_idx = 0usize;
 
         for (i, _arg) in args.iter().enumerate() {
+            let struct_size = struct_arg_sizes.get(i).copied().flatten();
             let is_long_double = if i < arg_types.len() {
                 arg_types[i].is_long_double()
             } else {
@@ -1463,7 +1544,32 @@ impl ArchCodegen for RiscvCodegen {
                 matches!(args[i], Operand::Const(IrConst::F32(_) | IrConst::F64(_)))
             };
 
-            if is_i128_arg {
+            if let Some(size) = struct_size {
+                if size <= 16 {
+                    // RISC-V LP64D: Small struct passed by value in 1-2 GP registers
+                    let regs_needed = if size <= 8 { 1 } else { 2 };
+                    if int_idx + regs_needed <= 8 {
+                        arg_classes.push('V'); // struct by value in GP regs
+                        arg_int_indices.push(int_idx);
+                        arg_fp_indices.push(0);
+                        arg_struct_sizes.push(size);
+                        int_idx += regs_needed;
+                    } else {
+                        // Overflow to stack
+                        arg_classes.push('v'); // small struct on stack
+                        arg_int_indices.push(0);
+                        arg_fp_indices.push(0);
+                        arg_struct_sizes.push(size);
+                        int_idx = 8;
+                    }
+                } else {
+                    // Large struct (>16 bytes): passed on stack (MEMORY class)
+                    arg_classes.push('M');
+                    arg_int_indices.push(0);
+                    arg_fp_indices.push(0);
+                    arg_struct_sizes.push(size);
+                }
+            } else if is_i128_arg {
                 // 128-bit integer: needs aligned register pair
                 if int_idx % 2 != 0 { int_idx += 1; }
                 if int_idx + 1 < 8 {
@@ -1477,6 +1583,7 @@ impl ArchCodegen for RiscvCodegen {
                     arg_fp_indices.push(0);
                     int_idx = 8;
                 }
+                arg_struct_sizes.push(0);
             } else if is_long_double {
                 // Align int_idx to even for register pair
                 if int_idx % 2 != 0 {
@@ -1493,20 +1600,24 @@ impl ArchCodegen for RiscvCodegen {
                     arg_fp_indices.push(0);
                     int_idx = 8;
                 }
+                arg_struct_sizes.push(0);
             } else if is_float_arg && !is_variadic && float_idx < 8 {
                 arg_classes.push('F');
                 arg_int_indices.push(0);
                 arg_fp_indices.push(float_idx);
                 float_idx += 1;
+                arg_struct_sizes.push(0);
             } else if int_idx < 8 {
                 arg_classes.push('I');
                 arg_int_indices.push(int_idx);
                 arg_fp_indices.push(0);
                 int_idx += 1;
+                arg_struct_sizes.push(0);
             } else {
                 arg_classes.push('S');
                 arg_int_indices.push(0);
                 arg_fp_indices.push(0);
+                arg_struct_sizes.push(0);
             }
         }
 
@@ -1543,26 +1654,66 @@ impl ArchCodegen for RiscvCodegen {
         }
 
         // Phase 3: Handle stack overflow args.
-        // 'S' = normal stack, 'T' = F128 stack, 'X' = i128 stack
+        // 'S' = normal stack, 'T' = F128 stack, 'X' = i128 stack,
+        // 'M' = large struct on stack, 'v' = small struct overflow to stack
         let stack_args: Vec<(usize, char)> = args.iter().enumerate()
-            .filter(|(i, _)| arg_classes[*i] == 'S' || arg_classes[*i] == 'T' || arg_classes[*i] == 'X')
+            .filter(|(i, _)| matches!(arg_classes[*i], 'S' | 'T' | 'X' | 'M' | 'v'))
             .map(|(i, _)| (i, arg_classes[i]))
             .collect();
 
         let mut stack_arg_space: usize = 0;
         if !stack_args.is_empty() {
-            for &(_, cls) in &stack_args {
-                if cls == 'T' || cls == 'X' {
-                    stack_arg_space = (stack_arg_space + 15) & !15;
-                    stack_arg_space += 16;
-                } else {
-                    stack_arg_space += 8;
+            for &(arg_i, cls) in &stack_args {
+                match cls {
+                    'T' | 'X' => {
+                        stack_arg_space = (stack_arg_space + 15) & !15;
+                        stack_arg_space += 16;
+                    }
+                    'M' | 'v' => {
+                        let size = arg_struct_sizes[arg_i];
+                        stack_arg_space += (size + 7) & !7;
+                    }
+                    _ => {
+                        stack_arg_space += 8;
+                    }
                 }
             }
             stack_arg_space = (stack_arg_space + 15) & !15;
             self.emit_addi_sp(-(stack_arg_space as i64));
             let mut offset: usize = 0;
             for &(arg_i, cls) in &stack_args {
+                if cls == 'M' || cls == 'v' {
+                    // Struct by value on stack: copy raw struct data from memory.
+                    // The operand is the address (alloca pointer) of the struct.
+                    let size = arg_struct_sizes[arg_i];
+                    let n_dwords = (size + 7) / 8;
+                    // Load struct address into t0
+                    match &args[arg_i] {
+                        Operand::Value(v) => {
+                            if let Some(slot) = self.state.get_slot(v.0) {
+                                if self.state.is_alloca(v.0) {
+                                    self.emit_addi_s0("t0", slot.0);
+                                } else {
+                                    self.emit_load_from_s0("t0", slot.0, "ld");
+                                }
+                            } else {
+                                self.state.emit("    li t0, 0");
+                            }
+                        }
+                        Operand::Const(_) => {
+                            self.operand_to_t0(&args[arg_i]);
+                        }
+                    }
+                    // t0 now holds the struct address; copy data to stack
+                    for qi in 0..n_dwords {
+                        let src_off = (qi * 8) as i64;
+                        let dst_off = offset as i64 + src_off;
+                        self.state.emit(&format!("    ld t1, {}(t0)", src_off));
+                        self.emit_store_to_sp("t1", dst_off, "sd");
+                    }
+                    offset += n_dwords * 8;
+                    continue;
+                }
                 if cls == 'X' {
                     // 128-bit integer stack arg
                     offset = (offset + 15) & !15;
@@ -1720,6 +1871,38 @@ impl ArchCodegen for RiscvCodegen {
                         }
                     }
                 }
+            }
+        }
+
+        // Phase 8: Load struct-by-value register args directly into their target registers.
+        // The operand is a pointer (alloca address) to the struct data.
+        // Load 1-2 dwords from that address into consecutive GP registers.
+        for (i, _arg) in args.iter().enumerate() {
+            if arg_classes[i] != 'V' { continue; }
+            let base_reg = arg_int_indices[i];
+            let size = arg_struct_sizes[i];
+            let regs_needed = if size <= 8 { 1 } else { 2 };
+            // Load struct address into t0
+            match &args[i] {
+                Operand::Value(v) => {
+                    if let Some(slot) = self.state.get_slot(v.0) {
+                        if self.state.is_alloca(v.0) {
+                            self.emit_addi_s0("t0", slot.0);
+                        } else {
+                            self.emit_load_from_s0("t0", slot.0, "ld");
+                        }
+                    } else {
+                        self.state.emit("    li t0, 0");
+                    }
+                }
+                Operand::Const(_) => {
+                    self.operand_to_t0(&args[i]);
+                }
+            }
+            // t0 now holds the struct address; load data into arg regs
+            self.state.emit(&format!("    ld {}, 0(t0)", RISCV_ARG_REGS[base_reg]));
+            if regs_needed > 1 {
+                self.state.emit(&format!("    ld {}, 8(t0)", RISCV_ARG_REGS[base_reg + 1]));
             }
         }
 

@@ -3,9 +3,9 @@ Struct/union feature improvements needed:
 1. Struct copy/assignment (s1 = s2): Need to emit memcpy-style code
    for struct-to-struct assignment. Currently only field-by-field access works.
 
-2. Struct passing to functions: The ABI requires structs larger than 16 bytes
-   to be passed by pointer (hidden first argument). Small structs need to be
-   passed in registers per the SysV AMD64 ABI classification rules.
+2. Struct passing to functions: DONE for all three backends (x86, ARM, RISC-V).
+   Small structs (<=16 bytes) passed by value in GP registers.
+   Large structs (>16 bytes) passed on the stack (MEMORY class).
 
 3. Struct return values: Functions returning structs need the hidden first
    parameter (sret) ABI handling.
