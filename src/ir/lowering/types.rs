@@ -295,24 +295,26 @@ impl Lowerer {
             Expr::AddressOf(inner, _) => {
                 match inner.as_ref() {
                     Expr::Identifier(name, _) => {
+                        // Check static local names first (local statics shadow globals)
+                        if let Some(mangled) = self.static_local_names.get(name) {
+                            return Some(GlobalInit::GlobalAddr(mangled.clone()));
+                        }
                         // Address of a global variable or function
                         if self.globals.contains_key(name) || self.known_functions.contains(name) {
                             return Some(GlobalInit::GlobalAddr(name.clone()));
-                        }
-                        // Check if this is a static local variable (stored under mangled name)
-                        if let Some(mangled) = self.static_local_names.get(name) {
-                            return Some(GlobalInit::GlobalAddr(mangled.clone()));
                         }
                         None
                     }
                     // &arr[index] -> GlobalAddrOffset("arr", index * elem_size)
                     Expr::ArraySubscript(base, index, _) => {
                         if let Expr::Identifier(name, _) = base.as_ref() {
-                            // Resolve name: check globals directly, then static local aliases
-                            let resolved = if self.globals.contains_key(name.as_str()) {
+                            // Resolve name: check static locals first (they shadow globals)
+                            let resolved = if let Some(mangled) = self.static_local_names.get(name.as_str()) {
+                                Some(mangled.clone())
+                            } else if self.globals.contains_key(name.as_str()) {
                                 Some(name.clone())
                             } else {
-                                self.static_local_names.get(name.as_str()).cloned()
+                                None
                             };
                             if let Some(global_name) = resolved {
                                 if let Some(ginfo) = self.globals.get(&global_name) {
@@ -335,11 +337,13 @@ impl Lowerer {
                     // &s.field -> GlobalAddrOffset("s", field_offset)
                     Expr::MemberAccess(base, field, _) => {
                         if let Expr::Identifier(name, _) = base.as_ref() {
-                            // Resolve name: check globals directly, then static local aliases
-                            let resolved = if self.globals.contains_key(name.as_str()) {
+                            // Resolve name: check static locals first (they shadow globals)
+                            let resolved = if let Some(mangled) = self.static_local_names.get(name.as_str()) {
+                                Some(mangled.clone())
+                            } else if self.globals.contains_key(name.as_str()) {
                                 Some(name.clone())
                             } else {
-                                self.static_local_names.get(name.as_str()).cloned()
+                                None
                             };
                             if let Some(global_name) = resolved {
                                 if let Some(ginfo) = self.globals.get(&global_name) {
@@ -366,18 +370,18 @@ impl Lowerer {
                 if self.known_functions.contains(name) {
                     return Some(GlobalInit::GlobalAddr(name.clone()));
                 }
-                // Array name decays to pointer: int *p = arr;
-                if let Some(ginfo) = self.globals.get(name) {
-                    if ginfo.is_array {
-                        return Some(GlobalInit::GlobalAddr(name.clone()));
-                    }
-                }
-                // Check static local array names
+                // Check static local array names first (they shadow globals)
                 if let Some(mangled) = self.static_local_names.get(name) {
                     if let Some(ginfo) = self.globals.get(mangled) {
                         if ginfo.is_array {
                             return Some(GlobalInit::GlobalAddr(mangled.clone()));
                         }
+                    }
+                }
+                // Array name decays to pointer: int *p = arr;
+                if let Some(ginfo) = self.globals.get(name) {
+                    if ginfo.is_array {
+                        return Some(GlobalInit::GlobalAddr(name.clone()));
                     }
                 }
                 None
