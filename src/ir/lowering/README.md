@@ -35,6 +35,10 @@ The `Lowerer` struct groups its state into logical sub-structs:
 - `SwitchFrame` - nested switch context stack (cases, default label, expression type)
 - `FunctionMeta` - known function signatures (return types, param types, variadic flags, sret info)
 - `LocalInfo` / `GlobalInfo` - variable metadata for locals and globals
+- `DeclAnalysis` - shared declaration analysis result (type properties, array/pointer/struct info)
+  used by both `lower_local_decl` and `lower_global_decl` to avoid duplicating ~80 lines
+  of type analysis logic. Computed by `analyze_declaration()`, consumed by
+  `LocalInfo::from_analysis()` and `GlobalInfo::from_analysis()` builders.
 
 ## How Lowering Works
 

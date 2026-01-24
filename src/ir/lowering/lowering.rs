@@ -106,6 +106,46 @@ pub(super) struct GlobalInfo {
     pub c_type: Option<CType>,
 }
 
+/// Pre-computed declaration analysis shared between `lower_local_decl` and
+/// `lower_global_decl`. Extracts the common type analysis (base type, array info,
+/// pointer info, struct layout, etc.) that both paths need, eliminating the
+/// ~80 lines of duplicated computation.
+#[derive(Debug)]
+pub(super) struct DeclAnalysis {
+    /// The base IR type from the type specifier (before pointer/array derivation).
+    pub base_ty: IrType,
+    /// The final variable IR type (Ptr for pointers/arrays-of-pointers, else base_ty).
+    pub var_ty: IrType,
+    /// Total allocation size in bytes.
+    pub alloc_size: usize,
+    /// Element size for arrays (stride for indexing).
+    pub elem_size: usize,
+    /// Whether this declaration is an array.
+    pub is_array: bool,
+    /// Whether this declaration is a pointer.
+    pub is_pointer: bool,
+    /// Per-dimension strides for multi-dimensional arrays.
+    pub array_dim_strides: Vec<usize>,
+    /// Whether this is an array of pointers (int *arr[N]).
+    pub is_array_of_pointers: bool,
+    /// Whether this is an array of function pointers.
+    pub is_array_of_func_ptrs: bool,
+    /// Struct/union layout (for struct variables or pointer-to-struct).
+    pub struct_layout: Option<StructLayout>,
+    /// Whether this is a direct struct variable (not pointer-to or array-of).
+    pub is_struct: bool,
+    /// Actual allocation size (uses struct layout size for non-array structs).
+    pub actual_alloc_size: usize,
+    /// Pointee type for pointer/array types.
+    pub pointee_type: Option<IrType>,
+    /// Full C type for multi-level pointer resolution.
+    pub c_type: Option<CType>,
+    /// Whether this is a _Bool variable (not pointer or array of _Bool).
+    pub is_bool: bool,
+    /// The element IR type for arrays (accounts for typedef'd arrays).
+    pub elem_ir_ty: IrType,
+}
+
 /// Information about a VLA dimension in a function parameter type.
 #[derive(Debug)]
 struct VlaDimInfo {
@@ -1089,25 +1129,8 @@ impl Lowerer {
             // (the definition will come from another translation unit)
             if decl.is_extern && declarator.init.is_none() {
                 if !self.globals.contains_key(&declarator.name) {
-                    let base_ty = self.type_spec_to_ir(&decl.type_spec);
-                    let (_, elem_size, is_array, is_pointer, array_dim_strides) = self.compute_decl_info(&decl.type_spec, &declarator.derived);
-                    let is_array_of_func_ptrs = is_array && declarator.derived.iter().any(|d|
-                        matches!(d, DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _)));
-                    let var_ty = if is_pointer || is_array_of_func_ptrs { IrType::Ptr } else { base_ty };
-                    let struct_layout = self.get_struct_layout_for_type(&decl.type_spec);
-                    let is_struct = struct_layout.is_some() && !is_pointer && !is_array;
-                    let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
-                    let c_type = Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
-                    self.globals.insert(declarator.name.clone(), GlobalInfo {
-                        ty: var_ty,
-                        elem_size,
-                        is_array,
-                        pointee_type,
-                        struct_layout,
-                        is_struct,
-                        array_dim_strides,
-                        c_type,
-                    });
+                    let da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+                    self.globals.insert(declarator.name.clone(), GlobalInfo::from_analysis(&da));
                 }
                 continue;
             }
@@ -1131,132 +1154,60 @@ impl Lowerer {
                 }
             }
 
-            let mut base_ty = self.type_spec_to_ir(&decl.type_spec);
-            let (mut alloc_size, elem_size, is_array, is_pointer, mut array_dim_strides) = self.compute_decl_info(&decl.type_spec, &declarator.derived);
-            // For typedef'd array types (e.g., typedef int a[]; a x = {...}),
-            // type_spec_to_ir returns Ptr (array decays to pointer), but we need
-            // the element type for correct data emission.
-            if is_array && base_ty == IrType::Ptr && !is_pointer {
-                if let TypeSpecifier::Array(ref elem, _) = self.resolve_type_spec(&decl.type_spec) {
-                    base_ty = self.type_spec_to_ir(elem);
-                }
-            }
-            // For array-of-pointers or array-of-function-pointers, element type is Ptr
-            let is_array_of_pointers = is_array && {
-                let ptr_pos = declarator.derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
-                let arr_pos = declarator.derived.iter().position(|d| matches!(d, DerivedDeclarator::Array(_)));
-                matches!((ptr_pos, arr_pos), (Some(pp), Some(ap)) if pp < ap)
-            };
-            let is_array_of_func_ptrs = is_array && declarator.derived.iter().any(|d|
-                matches!(d, DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _)));
-            let var_ty = if is_pointer || is_array_of_pointers || is_array_of_func_ptrs { IrType::Ptr } else { base_ty };
+            let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
 
-            // For unsized arrays (int a[] = {...} or typedef int a[]; a x = {1,2,3}),
-            // compute actual size from initializer
-            let is_unsized_array = is_array && (
-                declarator.derived.iter().any(|d| {
-                    matches!(d, DerivedDeclarator::Array(None))
-                })
-                || matches!(self.resolve_type_spec(&decl.type_spec), TypeSpecifier::Array(_, None))
-            );
-            if is_unsized_array {
-                if let Some(ref init) = declarator.init {
-                    match init {
-                        Initializer::Expr(expr) => {
-                            // Fix alloc size for unsized char arrays initialized with string literals
-                            if base_ty == IrType::I8 || base_ty == IrType::U8 {
-                                if let Expr::StringLiteral(s, _) = expr {
-                                    alloc_size = s.as_bytes().len() + 1;
-                                }
-                            }
-                        }
-                        Initializer::List(items) => {
-                            let actual_count = self.compute_init_list_array_size_for_char_array(items, base_ty);
-                            if elem_size > 0 {
-                                alloc_size = actual_count * elem_size;
-                                if array_dim_strides.len() == 1 {
-                                    array_dim_strides = vec![elem_size];
-                                }
-                            }
-                        }
-                    }
-                }
+            // For global arrays-of-pointers, clear struct_layout so the array is treated
+            // as a pointer array, not a struct array.
+            if da.is_array_of_pointers || da.is_array_of_func_ptrs {
+                da.struct_layout = None;
+                da.is_struct = false;
             }
 
-            // Determine struct layout for global struct/pointer-to-struct variables.
-            // For arrays of pointers (e.g., struct foo *arr[]), the struct layout describes
-            // the pointee, not the array element (which is a pointer). Clear it so the array
-            // is treated as a pointer array, not a struct array.
-            let struct_layout = if is_array_of_pointers || is_array_of_func_ptrs {
-                None
-            } else {
-                self.get_struct_layout_for_type(&decl.type_spec)
-            };
-            let is_struct = struct_layout.is_some() && !is_pointer && !is_array;
+            // For unsized arrays, compute actual size from initializer
+            self.fixup_unsized_array(&mut da, &decl.type_spec, &declarator.derived, &declarator.init);
 
-            let actual_alloc_size = if let Some(ref layout) = struct_layout {
-                if is_array {
-                    alloc_size
-                } else {
-                    layout.size
-                }
-            } else if !is_array && !is_pointer {
-                // For scalar globals, use the actual C type size (handles long double = 16 bytes)
+            // For scalar globals, use the actual C type size (handles long double = 16 bytes)
+            if !da.is_array && !da.is_pointer && da.struct_layout.is_none() {
                 let c_size = self.sizeof_type(&decl.type_spec);
-                c_size.max(var_ty.size())
-            } else {
-                alloc_size
-            };
+                da.actual_alloc_size = c_size.max(da.var_ty.size());
+            }
 
             // Extern declarations without initializers: track but don't emit storage
             let is_extern_decl = decl.is_extern && declarator.init.is_none();
 
             // Determine initializer
             let init = if let Some(ref initializer) = declarator.init {
-                self.lower_global_init(initializer, &decl.type_spec, base_ty, is_array, elem_size, actual_alloc_size, &struct_layout, &array_dim_strides)
+                self.lower_global_init(initializer, &decl.type_spec, da.base_ty, da.is_array, da.elem_size, da.actual_alloc_size, &da.struct_layout, &da.array_dim_strides)
             } else {
                 GlobalInit::Zero
             };
 
             // Track this global variable
-            let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
-            let c_type = Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
-            self.globals.insert(declarator.name.clone(), GlobalInfo {
-                ty: var_ty,
-                elem_size,
-                is_array,
-                pointee_type,
-                struct_layout,
-                is_struct,
-                array_dim_strides,
-                c_type,
-            });
+            self.globals.insert(declarator.name.clone(), GlobalInfo::from_analysis(&da));
 
             // Use C type alignment for long double (16) instead of IrType::F64 alignment (8)
             let align = {
                 let c_align = self.alignof_type(&decl.type_spec);
-                if c_align > 0 { c_align.max(var_ty.align()) } else { var_ty.align() }
+                if c_align > 0 { c_align.max(da.var_ty.align()) } else { da.var_ty.align() }
             };
 
             let is_static = decl.is_static;
 
             // For struct initializers emitted as byte arrays, set element type to I8
             // so the backend emits .byte directives for each element.
-            // This applies to both single structs and arrays of structs.
-            // Detect by checking if the Array init contains I8 constants (byte-serialized struct).
             let global_ty = if matches!(&init, GlobalInit::Array(vals) if !vals.is_empty() && matches!(vals[0], IrConst::I8(_))) {
                 IrType::I8
-            } else if is_struct && matches!(init, GlobalInit::Array(_)) {
+            } else if da.is_struct && matches!(init, GlobalInit::Array(_)) {
                 IrType::I8
             } else {
-                var_ty
+                da.var_ty
             };
 
             // For structs with FAMs, the init byte array may be larger than layout.size.
             // Use the actual init data size if it exceeds the computed alloc size.
             let final_size = match &init {
-                GlobalInit::Array(vals) if is_struct && vals.len() > actual_alloc_size => vals.len(),
-                _ => actual_alloc_size,
+                GlobalInit::Array(vals) if da.is_struct && vals.len() > da.actual_alloc_size => vals.len(),
+                _ => da.actual_alloc_size,
             };
 
             self.module.globals.push(IrGlobal {
@@ -1781,6 +1732,204 @@ impl Lowerer {
     /// Zero-initialize an entire alloca. Delegates to zero_init_region with offset 0.
     pub(super) fn zero_init_alloca(&mut self, alloca: Value, total_size: usize) {
         self.zero_init_region(alloca, 0, total_size);
+    }
+
+    /// Perform shared declaration analysis for both local and global variable declarations.
+    ///
+    /// Computes all type-related properties (base type, array info, pointer info, struct layout,
+    /// pointee type, etc.) that both `lower_local_decl` and `lower_global_decl` need.
+    /// This eliminates the ~80 lines of duplicated type analysis that previously existed
+    /// in both functions.
+    ///
+    /// Does NOT handle unsized array fixup from initializers (caller must do that since
+    /// the initializer processing differs between local and global declarations).
+    pub(super) fn analyze_declaration(&self, type_spec: &TypeSpecifier, derived: &[DerivedDeclarator]) -> DeclAnalysis {
+        let mut base_ty = self.type_spec_to_ir(type_spec);
+        let (alloc_size, elem_size, is_array, is_pointer, array_dim_strides) =
+            self.compute_decl_info(type_spec, derived);
+
+        // For typedef'd array types (e.g., typedef int a[]; a x = {...}),
+        // type_spec_to_ir returns Ptr (array decays to pointer), but we need
+        // the element type for correct storage/initialization.
+        if is_array && base_ty == IrType::Ptr && !is_pointer {
+            if let TypeSpecifier::Array(ref elem, _) = self.resolve_type_spec(type_spec) {
+                base_ty = self.type_spec_to_ir(elem);
+            }
+        }
+
+        // For array-of-pointers (int *arr[N]) or array-of-function-pointers,
+        // the element type is Ptr, not the base type.
+        let is_array_of_pointers = is_array && {
+            let ptr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
+            let arr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Array(_)));
+            matches!((ptr_pos, arr_pos), (Some(pp), Some(ap)) if pp < ap)
+        };
+        let is_array_of_func_ptrs = is_array && derived.iter().any(|d|
+            matches!(d, DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _)));
+        let var_ty = if is_pointer || is_array_of_pointers || is_array_of_func_ptrs {
+            IrType::Ptr
+        } else {
+            base_ty
+        };
+
+        // Compute element IR type for arrays (accounts for typedef'd arrays)
+        let elem_ir_ty = if is_array && base_ty == IrType::Ptr && !is_array_of_pointers {
+            let resolved = self.resolve_type_spec(type_spec);
+            if let TypeSpecifier::Array(ref elem_ts, _) = resolved {
+                self.type_spec_to_ir(elem_ts)
+            } else {
+                base_ty
+            }
+        } else {
+            base_ty
+        };
+
+        // _Bool type: only for direct scalar variables, not pointers or arrays
+        let has_derived_ptr = derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
+        let is_bool = matches!(self.resolve_type_spec(type_spec), TypeSpecifier::Bool)
+            && !has_derived_ptr && !is_array;
+
+        // Struct/union layout. For pointer-to-struct, we still store the layout
+        // so p->field works.
+        let struct_layout = self.get_struct_layout_for_type(type_spec)
+            .or_else(|| {
+                // For typedef'd pointer-to-struct, peel off Pointer to get layout
+                let resolved = self.resolve_type_spec(type_spec);
+                if let TypeSpecifier::Pointer(inner) = resolved {
+                    self.get_struct_layout_for_type(inner)
+                } else {
+                    None
+                }
+            });
+        let is_struct = struct_layout.is_some() && !is_pointer && !is_array;
+
+        // Actual allocation size: use struct layout size for non-array structs
+        let actual_alloc_size = if let Some(ref layout) = struct_layout {
+            if is_array { alloc_size } else { layout.size }
+        } else {
+            alloc_size
+        };
+
+        let pointee_type = self.compute_pointee_type(type_spec, derived);
+        let c_type = Some(self.build_full_ctype(type_spec, derived));
+
+        DeclAnalysis {
+            base_ty,
+            var_ty,
+            alloc_size,
+            elem_size,
+            is_array,
+            is_pointer,
+            array_dim_strides,
+            is_array_of_pointers,
+            is_array_of_func_ptrs,
+            struct_layout,
+            is_struct,
+            actual_alloc_size,
+            pointee_type,
+            c_type,
+            is_bool,
+            elem_ir_ty,
+        }
+    }
+
+    /// Fix up allocation size and strides for unsized arrays (int a[] = {...}).
+    /// Mutates the DeclAnalysis in place based on the initializer.
+    pub(super) fn fixup_unsized_array(
+        &self,
+        da: &mut DeclAnalysis,
+        type_spec: &TypeSpecifier,
+        derived: &[DerivedDeclarator],
+        init: &Option<Initializer>,
+    ) {
+        let is_unsized = da.is_array && (
+            derived.iter().any(|d| matches!(d, DerivedDeclarator::Array(None)))
+            || matches!(self.resolve_type_spec(type_spec), TypeSpecifier::Array(_, None))
+        );
+        if !is_unsized {
+            return;
+        }
+        if let Some(ref initializer) = init {
+            match initializer {
+                Initializer::Expr(expr) => {
+                    // Fix alloc size for unsized char arrays initialized with string literals
+                    if da.base_ty == IrType::I8 || da.base_ty == IrType::U8 {
+                        if let Expr::StringLiteral(s, _) = expr {
+                            da.alloc_size = s.as_bytes().len() + 1;
+                            da.actual_alloc_size = da.alloc_size;
+                        }
+                    }
+                }
+                Initializer::List(items) => {
+                    let actual_count = self.compute_init_list_array_size_for_char_array(items, da.base_ty);
+                    if da.elem_size > 0 {
+                        da.alloc_size = actual_count * da.elem_size;
+                        da.actual_alloc_size = da.alloc_size;
+                        if da.array_dim_strides.len() == 1 {
+                            da.array_dim_strides = vec![da.elem_size];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl GlobalInfo {
+    /// Construct a GlobalInfo from a DeclAnalysis, avoiding repeated field construction.
+    pub(super) fn from_analysis(da: &DeclAnalysis) -> Self {
+        GlobalInfo {
+            ty: da.var_ty,
+            elem_size: da.elem_size,
+            is_array: da.is_array,
+            pointee_type: da.pointee_type,
+            struct_layout: da.struct_layout.clone(),
+            is_struct: da.is_struct,
+            array_dim_strides: da.array_dim_strides.clone(),
+            c_type: da.c_type.clone(),
+        }
+    }
+}
+
+impl LocalInfo {
+    /// Construct a LocalInfo for a regular (non-static) local variable from DeclAnalysis.
+    pub(super) fn from_analysis(da: &DeclAnalysis, alloca: Value) -> Self {
+        LocalInfo {
+            alloca,
+            elem_size: da.elem_size,
+            is_array: da.is_array,
+            ty: da.var_ty,
+            pointee_type: da.pointee_type,
+            struct_layout: da.struct_layout.clone(),
+            is_struct: da.is_struct,
+            alloc_size: da.actual_alloc_size,
+            array_dim_strides: da.array_dim_strides.clone(),
+            c_type: da.c_type.clone(),
+            is_bool: da.is_bool,
+            static_global_name: None,
+            vla_strides: vec![],
+            vla_size: None,
+        }
+    }
+
+    /// Construct a LocalInfo for a static local variable from DeclAnalysis.
+    pub(super) fn for_static(da: &DeclAnalysis, static_name: String) -> Self {
+        LocalInfo {
+            alloca: Value(0), // placeholder; not used for static locals
+            elem_size: da.elem_size,
+            is_array: da.is_array,
+            ty: da.var_ty,
+            pointee_type: da.pointee_type,
+            struct_layout: da.struct_layout.clone(),
+            is_struct: da.is_struct,
+            alloc_size: da.actual_alloc_size,
+            array_dim_strides: da.array_dim_strides.clone(),
+            c_type: da.c_type.clone(),
+            is_bool: da.is_bool,
+            static_global_name: Some(static_name),
+            vla_strides: vec![],
+            vla_size: None,
+        }
     }
 }
 

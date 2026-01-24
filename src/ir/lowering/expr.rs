@@ -1989,33 +1989,22 @@ impl Lowerer {
     /// Lower function call arguments, applying implicit casts for parameter types
     /// and default argument promotions for variadic args.
     fn lower_call_arguments(&mut self, func: &Expr, args: &[Expr]) -> (Vec<Operand>, Vec<IrType>) {
-        let param_types: Option<Vec<IrType>> = if let Expr::Identifier(name, _) = func {
+        // Extract function name once and look up all metadata together
+        // (previously 4 separate if-let Identifier matches)
+        let func_name = if let Expr::Identifier(name, _) = func { Some(name.as_str()) } else { None };
+        let param_types: Option<Vec<IrType>> = func_name.and_then(|name|
             self.func_meta.param_types.get(name).cloned()
                 .or_else(|| self.func_meta.ptr_param_types.get(name).cloned())
-        } else {
-            None
-        };
-
-        // Get parameter CTypes for complex argument conversion
-        let param_ctypes: Option<Vec<CType>> = if let Expr::Identifier(name, _) = func {
+        );
+        let param_ctypes: Option<Vec<CType>> = func_name.and_then(|name|
             self.func_meta.param_ctypes.get(name).cloned()
-        } else {
-            None
-        };
-
-        // Get _Bool parameter flags for normalization
-        let param_bool_flags: Option<Vec<bool>> = if let Expr::Identifier(name, _) = func {
+        );
+        let param_bool_flags: Option<Vec<bool>> = func_name.and_then(|name|
             self.func_meta.param_bool_flags.get(name).cloned()
-        } else {
-            None
-        };
-
-        // Pre-determine variadic status for argument promotion decisions
-        let pre_call_variadic = if let Expr::Identifier(name, _) = func {
+        );
+        let pre_call_variadic = func_name.map_or(false, |name|
             self.is_function_variadic(name)
-        } else {
-            false
-        };
+        );
 
         let mut arg_types = Vec::with_capacity(args.len());
         let arg_vals: Vec<Operand> = args.iter().enumerate().map(|(i, a)| {

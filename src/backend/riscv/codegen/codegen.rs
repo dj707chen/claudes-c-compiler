@@ -1272,44 +1272,49 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    mv t2, t0"); // t2 = val
 
         let aq_rl = Self::amo_ordering(ordering);
-        let suffix = Self::amo_width_suffix(ty);
 
-        match op {
-            AtomicRmwOp::Add => {
-                self.state.emit(&format!("    amoadd.{}{} t0, t2, (t1)", suffix, aq_rl));
-            }
-            AtomicRmwOp::Sub => {
-                // No amosub; negate and use amoadd
-                self.state.emit("    neg t2, t2");
-                self.state.emit(&format!("    amoadd.{}{} t0, t2, (t1)", suffix, aq_rl));
-            }
-            AtomicRmwOp::And => {
-                self.state.emit(&format!("    amoand.{}{} t0, t2, (t1)", suffix, aq_rl));
-            }
-            AtomicRmwOp::Or => {
-                self.state.emit(&format!("    amoor.{}{} t0, t2, (t1)", suffix, aq_rl));
-            }
-            AtomicRmwOp::Xor => {
-                self.state.emit(&format!("    amoxor.{}{} t0, t2, (t1)", suffix, aq_rl));
-            }
-            AtomicRmwOp::Xchg => {
-                self.state.emit(&format!("    amoswap.{}{} t0, t2, (t1)", suffix, aq_rl));
-            }
-            AtomicRmwOp::Nand => {
-                // No amonand; use lr/sc loop
-                let label_id = self.state.next_label_id();
-                let loop_label = format!(".Latomic_{}", label_id);
-                self.state.emit(&format!("{}:", loop_label));
-                self.state.emit(&format!("    lr.{}{} t0, (t1)", suffix, aq_rl));
-                self.state.emit("    and t3, t0, t2");
-                self.state.emit("    not t3, t3");
-                self.state.emit(&format!("    sc.{}{} t4, t3, (t1)", suffix, aq_rl));
-                self.state.emit(&format!("    bnez t4, {}", loop_label));
-            }
-            AtomicRmwOp::TestAndSet => {
-                // test_and_set: set byte to 1, return old
-                self.state.emit("    li t2, 1");
-                self.state.emit(&format!("    amoswap.{}{} t0, t2, (t1)", suffix, aq_rl));
+        if Self::is_subword_type(ty) {
+            // RISC-V has no byte/halfword atomic instructions.
+            // Use word-aligned LR.W/SC.W with bit masking.
+            self.emit_subword_atomic_rmw(op, ty, aq_rl);
+        } else {
+            let suffix = Self::amo_width_suffix(ty);
+            match op {
+                AtomicRmwOp::Add => {
+                    self.state.emit(&format!("    amoadd.{}{} t0, t2, (t1)", suffix, aq_rl));
+                }
+                AtomicRmwOp::Sub => {
+                    // No amosub; negate and use amoadd
+                    self.state.emit("    neg t2, t2");
+                    self.state.emit(&format!("    amoadd.{}{} t0, t2, (t1)", suffix, aq_rl));
+                }
+                AtomicRmwOp::And => {
+                    self.state.emit(&format!("    amoand.{}{} t0, t2, (t1)", suffix, aq_rl));
+                }
+                AtomicRmwOp::Or => {
+                    self.state.emit(&format!("    amoor.{}{} t0, t2, (t1)", suffix, aq_rl));
+                }
+                AtomicRmwOp::Xor => {
+                    self.state.emit(&format!("    amoxor.{}{} t0, t2, (t1)", suffix, aq_rl));
+                }
+                AtomicRmwOp::Xchg => {
+                    self.state.emit(&format!("    amoswap.{}{} t0, t2, (t1)", suffix, aq_rl));
+                }
+                AtomicRmwOp::Nand => {
+                    // No amonand; use lr/sc loop
+                    let loop_label = self.state.fresh_label("atomic_nand");
+                    self.state.emit(&format!("{}:", loop_label));
+                    self.state.emit(&format!("    lr.{}{} t0, (t1)", suffix, aq_rl));
+                    self.state.emit("    and t3, t0, t2");
+                    self.state.emit("    not t3, t3");
+                    self.state.emit(&format!("    sc.{}{} t4, t3, (t1)", suffix, aq_rl));
+                    self.state.emit(&format!("    bnez t4, {}", loop_label));
+                }
+                AtomicRmwOp::TestAndSet => {
+                    // test_and_set: set byte to 1, return old
+                    self.state.emit("    li t2, 1");
+                    self.state.emit(&format!("    amoswap.{}{} t0, t2, (t1)", suffix, aq_rl));
+                }
             }
         }
         // Sign-extend result for sub-word types
@@ -1327,39 +1332,56 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    mv t2, t0");
 
         let aq_rl = Self::amo_ordering(ordering);
-        let suffix = Self::amo_width_suffix(ty);
 
-        let label_id = self.state.next_label_id();
-        let loop_label = format!(".Lcas_loop_{}", label_id);
-        let fail_label = format!(".Lcas_fail_{}", label_id);
-        let done_label = format!(".Lcas_done_{}", label_id);
+        if Self::is_subword_type(ty) {
+            self.emit_subword_atomic_cmpxchg(ty, aq_rl, returns_bool);
+        } else {
+            let suffix = Self::amo_width_suffix(ty);
 
-        self.state.emit(&format!("{}:", loop_label));
-        self.state.emit(&format!("    lr.{}{} t0, (t1)", suffix, aq_rl));
-        // Mask for sub-word comparison
-        Self::mask_for_cmp(&mut self.state, ty);
-        self.state.emit(&format!("    bne t0, t2, {}", fail_label));
-        self.state.emit(&format!("    sc.{}{} t4, t3, (t1)", suffix, aq_rl));
-        self.state.emit(&format!("    bnez t4, {}", loop_label));
-        if returns_bool {
-            self.state.emit("    li t0, 1");
+            let loop_label = self.state.fresh_label("cas_loop");
+            let fail_label = self.state.fresh_label("cas_fail");
+            let done_label = self.state.fresh_label("cas_done");
+
+            self.state.emit(&format!("{}:", loop_label));
+            self.state.emit(&format!("    lr.{}{} t0, (t1)", suffix, aq_rl));
+            self.state.emit(&format!("    bne t0, t2, {}", fail_label));
+            self.state.emit(&format!("    sc.{}{} t4, t3, (t1)", suffix, aq_rl));
+            self.state.emit(&format!("    bnez t4, {}", loop_label));
+            if returns_bool {
+                self.state.emit("    li t0, 1");
+            }
+            self.state.emit(&format!("    j {}", done_label));
+            self.state.emit(&format!("{}:", fail_label));
+            if returns_bool {
+                self.state.emit("    li t0, 0");
+            }
+            // t0 has old value if !returns_bool
+            self.state.emit(&format!("{}:", done_label));
         }
-        self.state.emit(&format!("    j {}", done_label));
-        self.state.emit(&format!("{}:", fail_label));
-        if returns_bool {
-            self.state.emit("    li t0, 0");
-        }
-        // t0 has old value if !returns_bool
-        self.state.emit(&format!("{}:", done_label));
         self.store_t0_to(dest);
     }
 
     fn emit_atomic_load(&mut self, dest: &Value, ptr: &Operand, ty: IrType, _ordering: AtomicOrdering) {
         self.operand_to_t0(ptr);
-        // Use lr for atomic load (conservative but correct)
-        let suffix = Self::amo_width_suffix(ty);
-        self.state.emit(&format!("    lr.{}.aq t0, (t0)", suffix));
-        Self::sign_extend_riscv(&mut self.state, ty);
+        if Self::is_subword_type(ty) {
+            // For sub-word atomic loads, use regular load + fence.
+            // On RISC-V, aligned byte/halfword loads are naturally atomic for
+            // single-copy atomicity. Use fence for ordering.
+            self.state.emit("    fence rw, rw");
+            match ty {
+                IrType::I8 => self.state.emit("    lb t0, 0(t0)"),
+                IrType::U8 => self.state.emit("    lbu t0, 0(t0)"),
+                IrType::I16 => self.state.emit("    lh t0, 0(t0)"),
+                IrType::U16 => self.state.emit("    lhu t0, 0(t0)"),
+                _ => unreachable!(),
+            }
+            self.state.emit("    fence rw, rw");
+        } else {
+            // Use lr for word/doubleword atomic load
+            let suffix = Self::amo_width_suffix(ty);
+            self.state.emit(&format!("    lr.{}.aq t0, (t0)", suffix));
+            Self::sign_extend_riscv(&mut self.state, ty);
+        }
         self.store_t0_to(dest);
     }
 
@@ -1367,10 +1389,22 @@ impl ArchCodegen for RiscvCodegen {
         self.operand_to_t0(val);
         self.state.emit("    mv t1, t0"); // t1 = val
         self.operand_to_t0(ptr);
-        // Use amoswap with zero dest for atomic store
-        let aq_rl = Self::amo_ordering(ordering);
-        let suffix = Self::amo_width_suffix(ty);
-        self.state.emit(&format!("    amoswap.{}{} zero, t1, (t0)", suffix, aq_rl));
+        if Self::is_subword_type(ty) {
+            // For sub-word atomic stores, use fence + regular store + fence.
+            // Aligned byte/halfword stores are naturally atomic on RISC-V.
+            self.state.emit("    fence rw, rw");
+            match ty {
+                IrType::I8 | IrType::U8 => self.state.emit("    sb t1, 0(t0)"),
+                IrType::I16 | IrType::U16 => self.state.emit("    sh t1, 0(t0)"),
+                _ => unreachable!(),
+            }
+            self.state.emit("    fence rw, rw");
+        } else {
+            // Use amoswap with zero dest for atomic store
+            let aq_rl = Self::amo_ordering(ordering);
+            let suffix = Self::amo_width_suffix(ty);
+            self.state.emit(&format!("    amoswap.{}{} zero, t1, (t0)", suffix, aq_rl));
+        }
     }
 
     fn emit_fence(&mut self, _ordering: AtomicOrdering) {
@@ -1852,7 +1886,6 @@ impl RiscvCodegen {
     }
 
     /// Get the AMO ordering suffix.
-    /// Get the AMO ordering suffix.
     fn amo_ordering(ordering: AtomicOrdering) -> &'static str {
         match ordering {
             AtomicOrdering::Relaxed => "",
@@ -1863,10 +1896,11 @@ impl RiscvCodegen {
         }
     }
 
-    /// Get the AMO width suffix.
+    /// Get the AMO width suffix for word/doubleword operations.
+    /// Sub-word types (I8/U8/I16/U16) should use the sub-word atomic helpers instead.
     fn amo_width_suffix(ty: IrType) -> &'static str {
         match ty {
-            IrType::I32 | IrType::U32 | IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 => "w",
+            IrType::I32 | IrType::U32 => "w",
             _ => "d",
         }
     }
@@ -1896,19 +1930,234 @@ impl RiscvCodegen {
         }
     }
 
-    /// Mask values for sub-word CAS comparison.
-    fn mask_for_cmp(state: &mut CodegenState, ty: IrType) {
+    /// Check if a type requires sub-word atomic handling on RISC-V.
+    /// RISC-V only has word (32-bit) and doubleword (64-bit) atomic instructions.
+    fn is_subword_type(ty: IrType) -> bool {
+        matches!(ty, IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16)
+    }
+
+    /// Get the bit width of a sub-word type.
+    fn subword_bits(ty: IrType) -> u32 {
         match ty {
-            IrType::I8 | IrType::U8 => {
-                state.emit("    andi t0, t0, 0xff");
-            }
-            IrType::I16 | IrType::U16 => {
-                // Mask to 16 bits
-                state.emit("    slli t0, t0, 48");
-                state.emit("    srli t0, t0, 48");
-            }
-            _ => {}
+            IrType::I8 | IrType::U8 => 8,
+            IrType::I16 | IrType::U16 => 16,
+            _ => unreachable!(),
         }
+    }
+
+    /// Emit sub-word atomic RMW using word-aligned LR.W/SC.W with bit masking.
+    ///
+    /// On entry: t1 = original ptr, t2 = value to apply
+    /// On exit: t0 = old sub-word value (not sign-extended yet)
+    ///
+    /// Strategy: Align the address to a word boundary, compute shift and mask,
+    /// then use LR.W/SC.W loop operating on the containing word while only
+    /// modifying the sub-word field.
+    ///
+    /// Register usage (all caller-saved):
+    ///   a2 = word-aligned address
+    ///   a3 = bit shift amount
+    ///   a4 = shifted mask for sub-word field
+    ///   a5 = inverted mask (~mask)
+    ///   t0 = loaded word (old value)
+    ///   t2 = shifted value operand
+    ///   t3 = temporary, t4 = new word to store, t5 = SC result flag
+    fn emit_subword_atomic_rmw(&mut self, op: AtomicRmwOp, ty: IrType, aq_rl: &str) {
+        let bits = Self::subword_bits(ty);
+        let loop_label = self.state.fresh_label("sw_rmw_loop");
+        let done_label = self.state.fresh_label("sw_rmw_done");
+
+        // a2 = word-aligned address (ptr & ~3)
+        self.state.emit("    andi a2, t1, -4");
+        // a3 = byte offset within word: (ptr & 3)
+        self.state.emit("    andi a3, t1, 3");
+        // a3 = bit shift = byte_offset * 8
+        self.state.emit("    slli a3, a3, 3");
+        // a4 = mask for the sub-word field (e.g., 0xFF or 0xFFFF shifted into position)
+        if bits == 8 {
+            self.state.emit("    li a4, 0xff");
+        } else {
+            // 16-bit: can't use andi with 0xffff, load it
+            self.state.emit("    lui a4, 16");     // a4 = 0x10000
+            self.state.emit("    addiw a4, a4, -1"); // a4 = 0xFFFF
+        }
+        self.state.emit("    sllw a4, a4, a3"); // a4 = mask << shift
+        // a5 = ~mask (inverted mask for clearing the field)
+        self.state.emit("    not a5, a4");
+        // Shift the value into position: t2 = (val & field_mask) << shift
+        if bits == 8 {
+            self.state.emit("    andi t2, t2, 0xff");
+        } else {
+            self.state.emit("    slli t2, t2, 48");
+            self.state.emit("    srli t2, t2, 48");
+        }
+        self.state.emit("    sllw t2, t2, a3"); // t2 = val << shift
+
+        // LR/SC loop
+        self.state.emit(&format!("{}:", loop_label));
+        self.state.emit(&format!("    lr.w{} t0, (a2)", aq_rl));
+
+        match op {
+            AtomicRmwOp::Xchg | AtomicRmwOp::TestAndSet => {
+                // new_word = (old_word & ~mask) | (new_val & mask)
+                if matches!(op, AtomicRmwOp::TestAndSet) {
+                    // Override: set the byte to 1
+                    self.state.emit("    li t3, 1");
+                    self.state.emit("    sllw t3, t3, a3");
+                } else {
+                    self.state.emit("    mv t3, t2");
+                }
+                self.state.emit("    and t4, t0, a5"); // clear old field
+                self.state.emit("    or t4, t4, t3");  // insert new value
+            }
+            AtomicRmwOp::Add => {
+                // Extract old sub-word, add val, insert result
+                self.state.emit("    and t3, t0, a4"); // t3 = old field (shifted)
+                self.state.emit("    add t3, t3, t2"); // t3 = old + val (shifted)
+                self.state.emit("    and t3, t3, a4"); // mask to field width
+                self.state.emit("    and t4, t0, a5"); // clear old field
+                self.state.emit("    or t4, t4, t3");  // insert new value
+            }
+            AtomicRmwOp::Sub => {
+                // Extract old sub-word, subtract val, insert result
+                self.state.emit("    and t3, t0, a4"); // t3 = old field (shifted)
+                self.state.emit("    sub t3, t3, t2"); // t3 = old - val (shifted)
+                self.state.emit("    and t3, t3, a4"); // mask to field width
+                self.state.emit("    and t4, t0, a5"); // clear old field
+                self.state.emit("    or t4, t4, t3");  // insert new value
+            }
+            AtomicRmwOp::And => {
+                // new_field = old_field & val_field
+                // For AND: bits outside the field should remain unchanged.
+                // new_word = old_word & (val_shifted | ~mask)
+                self.state.emit("    or t3, t2, a5");  // val_shifted | ~mask
+                self.state.emit("    and t4, t0, t3"); // old & (val | ~mask)
+            }
+            AtomicRmwOp::Or => {
+                // new_word = old_word | (val_shifted & mask)
+                self.state.emit("    and t3, t2, a4"); // val & mask (already masked, but safe)
+                self.state.emit("    or t4, t0, t3");
+            }
+            AtomicRmwOp::Xor => {
+                // new_word = old_word ^ (val_shifted & mask)
+                self.state.emit("    and t3, t2, a4");
+                self.state.emit("    xor t4, t0, t3");
+            }
+            AtomicRmwOp::Nand => {
+                // new_field = ~(old_field & val_field)
+                self.state.emit("    and t3, t0, a4"); // old field
+                self.state.emit("    and t3, t3, t2"); // old & val (shifted)
+                self.state.emit("    not t3, t3");     // ~(old & val) - full word invert
+                self.state.emit("    and t3, t3, a4"); // mask to field
+                self.state.emit("    and t4, t0, a5"); // clear old field
+                self.state.emit("    or t4, t4, t3");  // insert new value
+            }
+        }
+
+        // SC: rd (t5) must differ from rs2 (t4) per RISC-V spec
+        self.state.emit(&format!("    sc.w{} t5, t4, (a2)", aq_rl));
+        self.state.emit(&format!("    bnez t5, {}", loop_label));
+        self.state.emit(&format!("{}:", done_label));
+        // Extract the old sub-word value: t0 = (old_word >> shift) & field_mask
+        self.state.emit("    srlw t0, t0, a3");
+        if bits == 8 {
+            self.state.emit("    andi t0, t0, 0xff");
+        } else {
+            self.state.emit("    slli t0, t0, 48");
+            self.state.emit("    srli t0, t0, 48");
+        }
+    }
+
+    /// Emit sub-word atomic CAS using word-aligned LR.W/SC.W with bit masking.
+    ///
+    /// On entry: t1 = ptr, t2 = expected, t3 = desired
+    /// On exit: t0 = old sub-word value (for !returns_bool) or success flag
+    ///
+    /// Register usage (all caller-saved):
+    ///   a2 = word-aligned address
+    ///   a3 = bit shift amount
+    ///   a4 = shifted mask
+    ///   a5 = inverted mask (~mask)
+    ///   t0 = loaded word
+    ///   t2 = shifted expected, t3 = shifted desired
+    ///   t4 = new word to store, t5 = SC result flag
+    fn emit_subword_atomic_cmpxchg(&mut self, ty: IrType, aq_rl: &str, returns_bool: bool) {
+        let bits = Self::subword_bits(ty);
+        let loop_label = self.state.fresh_label("sw_cas_loop");
+        let fail_label = self.state.fresh_label("sw_cas_fail");
+        let done_label = self.state.fresh_label("sw_cas_done");
+
+        // a2 = word-aligned address
+        self.state.emit("    andi a2, t1, -4");
+        // a3 = bit shift
+        self.state.emit("    andi a3, t1, 3");
+        self.state.emit("    slli a3, a3, 3");
+        // a4 = mask
+        if bits == 8 {
+            self.state.emit("    li a4, 0xff");
+        } else {
+            self.state.emit("    lui a4, 16");
+            self.state.emit("    addiw a4, a4, -1");
+        }
+        self.state.emit("    sllw a4, a4, a3");
+        // a5 = ~mask
+        self.state.emit("    not a5, a4");
+        // Mask and shift expected and desired
+        if bits == 8 {
+            self.state.emit("    andi t2, t2, 0xff");
+        } else {
+            self.state.emit("    slli t2, t2, 48");
+            self.state.emit("    srli t2, t2, 48");
+        }
+        self.state.emit("    sllw t2, t2, a3"); // t2 = expected << shift
+        if bits == 8 {
+            self.state.emit("    andi t3, t3, 0xff");
+        } else {
+            self.state.emit("    slli t3, t3, 48");
+            self.state.emit("    srli t3, t3, 48");
+        }
+        self.state.emit("    sllw t3, t3, a3"); // t3 = desired << shift
+
+        // LR/SC loop
+        self.state.emit(&format!("{}:", loop_label));
+        self.state.emit(&format!("    lr.w{} t0, (a2)", aq_rl));
+        // Compare only the sub-word field
+        self.state.emit("    and t4, t0, a4"); // t4 = current field
+        self.state.emit(&format!("    bne t4, t2, {}", fail_label));
+        // Build new word: (old & ~mask) | desired_shifted
+        self.state.emit("    and t4, t0, a5");
+        self.state.emit("    or t4, t4, t3");
+        // SC: rd (t5) must differ from rs2 (t4) per RISC-V spec
+        self.state.emit(&format!("    sc.w{} t5, t4, (a2)", aq_rl));
+        self.state.emit(&format!("    bnez t5, {}", loop_label));
+        // Success
+        if returns_bool {
+            self.state.emit("    li t0, 1");
+        } else {
+            // Extract old sub-word value
+            self.state.emit("    srlw t0, t0, a3");
+            if bits == 8 {
+                self.state.emit("    andi t0, t0, 0xff");
+            } else {
+                self.state.emit("    slli t0, t0, 48");
+                self.state.emit("    srli t0, t0, 48");
+            }
+        }
+        self.state.emit(&format!("    j {}", done_label));
+        self.state.emit(&format!("{}:", fail_label));
+        if returns_bool {
+            self.state.emit("    li t0, 0");
+        } else {
+            // Extract old sub-word value from loaded word
+            self.state.emit("    srlw t0, t0, a3");
+            if bits == 8 {
+                self.state.emit("    andi t0, t0, 0xff");
+            } else {
+                self.state.emit("    slli t0, t0, 48");
+                self.state.emit("    srli t0, t0, 48");
+            }
+        }
+        self.state.emit(&format!("{}:", done_label));
     }
 
     /// Software CLZ (count leading zeros). Input in t0, result in t0.

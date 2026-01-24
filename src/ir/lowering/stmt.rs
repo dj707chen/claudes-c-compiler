@@ -1,7 +1,7 @@
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, CType, StructLayout};
-use super::lowering::{Lowerer, LocalInfo, GlobalInfo, SwitchFrame};
+use super::lowering::{Lowerer, LocalInfo, GlobalInfo, DeclAnalysis, SwitchFrame, resolve_typedef_derived};
 
 impl Lowerer {
     pub(super) fn lower_compound_stmt(&mut self, compound: &CompoundStmt) {
@@ -53,37 +53,13 @@ impl Lowerer {
         // First, register any struct/union definition from the type specifier
         self.register_struct_type(&decl.type_spec);
 
-        // If this is a typedef, register the mapping and skip variable emission
+        // If this is a typedef, register the mapping and skip variable emission.
+        // Uses resolve_typedef_derived() to avoid duplicating the derived-declarator
+        // walk logic (Pointer wrapping, Array dim collection in reverse order).
         if decl.is_typedef {
             for declarator in &decl.declarators {
                 if !declarator.name.is_empty() {
-                    let mut resolved_type = decl.type_spec.clone();
-                    // Apply derived declarators, collecting consecutive Array dims
-                    // and applying in reverse for correct multi-dim ordering.
-                    let mut i = 0;
-                    while i < declarator.derived.len() {
-                        match &declarator.derived[i] {
-                            DerivedDeclarator::Pointer => {
-                                resolved_type = TypeSpecifier::Pointer(Box::new(resolved_type));
-                                i += 1;
-                            }
-                            DerivedDeclarator::Array(_) => {
-                                let mut array_sizes: Vec<Option<Box<Expr>>> = Vec::new();
-                                while i < declarator.derived.len() {
-                                    if let DerivedDeclarator::Array(size) = &declarator.derived[i] {
-                                        array_sizes.push(size.clone());
-                                        i += 1;
-                                    } else {
-                                        break;
-                                    }
-                                }
-                                for size in array_sizes.into_iter().rev() {
-                                    resolved_type = TypeSpecifier::Array(Box::new(resolved_type), size);
-                                }
-                            }
-                            _ => { i += 1; }
-                        }
-                    }
+                    let resolved_type = resolve_typedef_derived(&decl.type_spec, &declarator.derived);
                     self.typedefs.insert(declarator.name.clone(), resolved_type);
                 }
             }
@@ -109,21 +85,8 @@ impl Lowerer {
                     // Fall through to the function declaration handler below
                 } else {
                     if !self.globals.contains_key(&declarator.name) {
-                        let ty = self.type_spec_to_ir(&decl.type_spec);
-                        let is_pointer = declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
-                        let var_ty = if is_pointer { IrType::Ptr } else { ty };
-                        let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
-                        let c_type = Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
-                        self.globals.insert(declarator.name.clone(), GlobalInfo {
-                            ty: var_ty,
-                            elem_size: 0,
-                            is_array: false,
-                            pointee_type,
-                            struct_layout: None,
-                            is_struct: false,
-                            array_dim_strides: vec![],
-                            c_type,
-                        });
+                        let ext_da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+                        self.globals.insert(declarator.name.clone(), GlobalInfo::from_analysis(&ext_da));
                     }
                     continue;
                 }
@@ -200,105 +163,18 @@ impl Lowerer {
                 }
             }
 
-            let mut base_ty = self.type_spec_to_ir(&decl.type_spec);
-            let (mut alloc_size, elem_size, is_array, is_pointer, mut array_dim_strides) = self.compute_decl_info(&decl.type_spec, &declarator.derived);
-            // For typedef'd array types (e.g., typedef int a[]; a x = {...}),
-            // type_spec_to_ir returns Ptr (array decays to pointer), but we need
-            // the element type for correct storage/initialization.
-            if is_array && base_ty == IrType::Ptr && !is_pointer {
-                if let TypeSpecifier::Array(ref elem, _) = self.resolve_type_spec(&decl.type_spec) {
-                    base_ty = self.type_spec_to_ir(elem);
-                }
-            }
-            // _Bool type check: only for direct scalar variables, not pointers or arrays
-            let has_derived_ptr = declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
-            let is_bool_type = matches!(self.resolve_type_spec(&decl.type_spec), TypeSpecifier::Bool)
-                && !has_derived_ptr && !is_array;
-            // For array-of-pointers (int *arr[N]) or array-of-function-pointers
-            // (int (*ops[N])(int,int)), the element type is Ptr, not the base type.
-            let is_array_of_pointers = is_array && {
-                let ptr_pos = declarator.derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
-                let arr_pos = declarator.derived.iter().position(|d| matches!(d, DerivedDeclarator::Array(_)));
-                matches!((ptr_pos, arr_pos), (Some(pp), Some(ap)) if pp < ap)
-            };
-            let is_array_of_func_ptrs = is_array && declarator.derived.iter().any(|d|
-                matches!(d, DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _)));
-            let var_ty = if is_pointer || is_array_of_pointers || is_array_of_func_ptrs { IrType::Ptr } else { base_ty };
+            // Shared declaration analysis: computes base_ty, var_ty, array/pointer info,
+            // struct layout, pointee type, etc. in one place (also used by lower_global_decl).
+            let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+            self.fixup_unsized_array(&mut da, &decl.type_spec, &declarator.derived, &declarator.init);
 
-            // For typedef'd arrays (e.g., typedef int type1[2]; type1 a = {0, 0}),
-            // base_ty is IrType::Ptr (array decays to pointer), but the element store
-            // type should be derived from the actual array element type.
-            let elem_ir_ty = if is_array && base_ty == IrType::Ptr && !is_array_of_pointers {
-                // The type spec resolved to an Array type; get the element type
-                let resolved = self.resolve_type_spec(&decl.type_spec);
-                if let TypeSpecifier::Array(ref elem_ts, _) = resolved {
-                    self.type_spec_to_ir(elem_ts)
-                } else {
-                    base_ty
-                }
-            } else {
-                base_ty
-            };
-
-            // For unsized arrays (int a[] = {...} or typedef int a[]; a x = {1,2,3}),
-            // compute actual size from initializer
-            let is_unsized_array = is_array && (
-                declarator.derived.iter().any(|d| {
-                    matches!(d, DerivedDeclarator::Array(None))
-                })
-                || matches!(self.resolve_type_spec(&decl.type_spec), TypeSpecifier::Array(_, None))
-            );
-            if is_unsized_array {
-                if let Some(ref init) = declarator.init {
-                    match init {
-                        Initializer::Expr(expr) => {
-                            // Fix alloc size for unsized char arrays initialized with string literals.
-                            // For `char s[] = "hello"`, allocate strlen+1 bytes instead of default 256.
-                            if base_ty == IrType::I8 || base_ty == IrType::U8 {
-                                if let Expr::StringLiteral(s, _) = expr {
-                                    alloc_size = s.as_bytes().len() + 1; // +1 for null terminator
-                                }
-                            }
-                        }
-                        Initializer::List(items) => {
-                            let actual_count = self.compute_init_list_array_size_for_char_array(items, base_ty);
-                            if elem_size > 0 {
-                                alloc_size = actual_count * elem_size;
-                                // Update strides for 1D unsized array
-                                if array_dim_strides.len() == 1 {
-                                    array_dim_strides = vec![elem_size];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Determine if this is a struct/union variable or pointer-to-struct.
-            // For pointer-to-struct, we still store the layout so p->field works.
-            let struct_layout = self.get_struct_layout_for_type(&decl.type_spec)
-                .or_else(|| {
-                    // For typedef'd pointer-to-struct (e.g., typedef struct Foo *FooPtr),
-                    // the resolved type is Pointer(inner). Peel off Pointer to get
-                    // the struct layout for -> member access.
-                    let resolved = self.resolve_type_spec(&decl.type_spec);
-                    if let TypeSpecifier::Pointer(inner) = resolved {
-                        self.get_struct_layout_for_type(inner)
-                    } else {
-                        None
-                    }
-                });
-            let is_struct = struct_layout.is_some() && !is_pointer && !is_array;
-
-            // Detect complex type variables
+            // Detect complex type variables and arrays of complex elements
             let resolved_ts = self.resolve_type_spec(&decl.type_spec);
-            let is_complex = !is_pointer && !is_array && matches!(
+            let is_complex = !da.is_pointer && !da.is_array && matches!(
                 resolved_ts,
                 TypeSpecifier::ComplexFloat | TypeSpecifier::ComplexDouble | TypeSpecifier::ComplexLongDouble
             );
-
-            // Detect arrays of complex elements
-            let complex_elem_ctype: Option<CType> = if is_array && !is_pointer {
+            let complex_elem_ctype: Option<CType> = if da.is_array && !da.is_pointer {
                 match &resolved_ts {
                     TypeSpecifier::ComplexFloat => Some(CType::ComplexFloat),
                     TypeSpecifier::ComplexDouble => Some(CType::ComplexDouble),
@@ -309,102 +185,14 @@ impl Lowerer {
                 None
             };
 
-            // For struct variables, use the struct's actual size;
-            // but for arrays of structs, use the full array allocation size.
-            let actual_alloc_size = if let Some(ref layout) = struct_layout {
-                if is_array {
-                    alloc_size
-                } else {
-                    layout.size
-                }
-            } else {
-                alloc_size
-            };
-
             // Handle static local variables: emit as globals with mangled names
             if decl.is_static {
-                let static_id = self.next_static_local;
-                let static_name = format!("{}.{}.{}", self.current_function_name, declarator.name, static_id);
-
-                // Register the bare name -> mangled name mapping before processing the initializer
-                // so that &x in another static's initializer can resolve to the mangled name.
-                self.static_local_names.insert(declarator.name.clone(), static_name.clone());
-
-                // Determine initializer (evaluated at compile time for static locals)
-                let init = if let Some(ref initializer) = declarator.init {
-                    self.lower_global_init(initializer, &decl.type_spec, base_ty, is_array, elem_size, actual_alloc_size, &struct_layout, &array_dim_strides)
-                } else {
-                    GlobalInit::Zero
-                };
-
-                let align = var_ty.align();
-
-                // For struct initializers emitted as byte arrays, set element type to I8
-                // so the backend emits .byte directives for each element.
-                let global_ty = if matches!(&init, GlobalInit::Array(vals) if !vals.is_empty() && matches!(vals[0], IrConst::I8(_))) {
-                    IrType::I8
-                } else if is_struct && matches!(&init, GlobalInit::Array(_)) {
-                    IrType::I8
-                } else {
-                    var_ty
-                };
-
-                // Add as a global variable (with static linkage = not exported)
-                self.module.globals.push(IrGlobal {
-                    name: static_name.clone(),
-                    ty: global_ty,
-                    size: actual_alloc_size,
-                    align,
-                    init,
-                    is_static: true,
-                    is_extern: false,
-                });
-
-                // Track as a global for access via GlobalAddr
-                let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
-                let c_type = Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
-                self.globals.insert(static_name.clone(), GlobalInfo {
-                    ty: var_ty,
-                    elem_size,
-                    is_array,
-                    pointee_type,
-                    struct_layout: struct_layout.clone(),
-                    is_struct,
-                    array_dim_strides: array_dim_strides.clone(),
-                    c_type: c_type.clone(),
-                });
-
-                // Store type info in locals so type lookups work, but do NOT emit
-                // a GlobalAddr here. The declaration may be in an unreachable block
-                // (skipped by goto/switch). Instead, set static_global_name so that
-                // each use site emits a fresh GlobalAddr in its own basic block.
-                let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
-                let is_bool = matches!(self.resolve_type_spec(&decl.type_spec), TypeSpecifier::Bool) && !is_pointer && !is_array;
-                self.locals.insert(declarator.name.clone(), LocalInfo {
-                    alloca: Value(0), // placeholder; not used for static locals
-                    elem_size,
-                    is_array,
-                    ty: var_ty,
-                    pointee_type,
-                    struct_layout,
-                    is_struct,
-                    alloc_size: actual_alloc_size,
-                    array_dim_strides: array_dim_strides.clone(),
-                    c_type,
-                    is_bool,
-                    static_global_name: Some(static_name),
-                    vla_strides: vec![],
-                    vla_size: None,
-                });
-
-                self.next_static_local += 1;
-                // Static locals are initialized once at program start (via .data/.bss),
-                // not at every function call, so skip the runtime initialization below
+                self.lower_local_static_decl(&decl, &declarator, &da);
                 continue;
             }
 
             // Compute VLA runtime size if any array dimension is non-constant
-            let vla_size = if is_array {
+            let vla_size = if da.is_array {
                 self.compute_vla_runtime_size(&decl.type_spec, &declarator.derived)
             } else {
                 None
@@ -413,28 +201,12 @@ impl Lowerer {
             let alloca = self.fresh_value();
             self.emit(Instruction::Alloca {
                 dest: alloca,
-                ty: if is_array || is_struct || is_complex { IrType::Ptr } else { var_ty },
-                size: actual_alloc_size,
+                ty: if da.is_array || da.is_struct || is_complex { IrType::Ptr } else { da.var_ty },
+                size: da.actual_alloc_size,
             });
-            let pointee_type = self.compute_pointee_type(&decl.type_spec, &declarator.derived);
-            let c_type = Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
-            let is_bool = matches!(self.resolve_type_spec(&decl.type_spec), TypeSpecifier::Bool) && !is_pointer && !is_array;
-            self.locals.insert(declarator.name.clone(), LocalInfo {
-                alloca,
-                elem_size,
-                is_array,
-                ty: var_ty,
-                pointee_type,
-                struct_layout,
-                is_struct,
-                alloc_size: actual_alloc_size,
-                array_dim_strides: array_dim_strides.clone(),
-                c_type,
-                is_bool,
-                static_global_name: None,
-                vla_strides: vec![],
-                vla_size,
-            });
+            let mut local_info = LocalInfo::from_analysis(&da, alloca);
+            local_info.vla_size = vla_size;
+            self.locals.insert(declarator.name.clone(), local_info);
 
             // Track function pointer return and param types for correct calling convention
             for d in &declarator.derived {
@@ -452,21 +224,21 @@ impl Lowerer {
             if let Some(ref init) = declarator.init {
                 match init {
                     Initializer::Expr(expr) => {
-                        if is_array && (base_ty == IrType::I8 || base_ty == IrType::U8) {
+                        if da.is_array && (da.base_ty == IrType::I8 || da.base_ty == IrType::U8) {
                             // Char array from string literal: char s[] = "hello"
                             if let Expr::StringLiteral(s, _) = expr {
                                 self.emit_string_to_alloca(alloca, s, 0);
                             } else {
                                 // Non-string expression initializer for char array (e.g., pointer assignment)
                                 let val = self.lower_expr(expr);
-                                self.emit(Instruction::Store { val, ptr: alloca, ty: var_ty });
+                                self.emit(Instruction::Store { val, ptr: alloca, ty: da.var_ty });
                             }
-                        } else if is_struct {
+                        } else if da.is_struct {
                             // Struct copy-initialization: struct Point b = a;
                             // For expressions producing packed struct data (small struct
                             // function call returns, ternaries over them, etc.), the value
                             // IS the struct data, not an address. Store directly.
-                            if self.expr_produces_packed_struct_data(expr) && actual_alloc_size <= 8 {
+                            if self.expr_produces_packed_struct_data(expr) && da.actual_alloc_size <= 8 {
                                 let val = self.lower_expr(expr);
                                 self.emit(Instruction::Store { val, ptr: alloca, ty: IrType::I64 });
                             } else {
@@ -474,7 +246,7 @@ impl Lowerer {
                                 self.emit(Instruction::Memcpy {
                                     dest: alloca,
                                     src: src_addr,
-                                    size: actual_alloc_size,
+                                    size: da.actual_alloc_size,
                                 });
                             }
                         } else if is_complex {
@@ -503,12 +275,12 @@ impl Lowerer {
                             self.emit(Instruction::Memcpy {
                                 dest: alloca,
                                 src,
-                                size: actual_alloc_size,
+                                size: da.actual_alloc_size,
                             });
                         } else {
                             // Track const-qualified integer variable values for compile-time
                             // array size evaluation (e.g., const int len = 5000; int arr[len];)
-                            if decl.is_const && !is_pointer && !is_array && !is_struct {
+                            if decl.is_const && !da.is_pointer && !da.is_array && !da.is_struct {
                                 if let Some(const_val) = self.eval_const_expr(expr) {
                                     if let Some(ival) = self.const_to_i64(&const_val) {
                                         self.const_local_values.insert(declarator.name.clone(), ival);
@@ -523,21 +295,21 @@ impl Lowerer {
                                 let ptr = self.operand_to_value(complex_val);
                                 let real_part = self.load_complex_real(ptr, &rhs_ctype);
                                 let from_ty = Self::complex_component_ir_type(&rhs_ctype);
-                                self.emit_implicit_cast(real_part, from_ty, var_ty)
+                                self.emit_implicit_cast(real_part, from_ty, da.var_ty)
                             } else {
                                 let val = self.lower_expr(expr);
                                 // Insert implicit cast for type mismatches
                                 // (e.g., float f = 'a', int x = 3.14, char c = 99.0)
                                 let expr_ty = self.get_expr_type(expr);
-                                self.emit_implicit_cast(val, expr_ty, var_ty)
+                                self.emit_implicit_cast(val, expr_ty, da.var_ty)
                             };
                             // _Bool variables clamp any value to 0 or 1
-                            let val = if is_bool { self.emit_bool_normalize(val) } else { val };
-                            self.emit(Instruction::Store { val, ptr: alloca, ty: var_ty });
+                            let val = if da.is_bool { self.emit_bool_normalize(val) } else { val };
+                            self.emit(Instruction::Store { val, ptr: alloca, ty: da.var_ty });
                         }
                     }
                     Initializer::List(items) => {
-                        if is_complex {
+                        if is_complex { // complex_elem_ctype check already set above
                             // Complex initializer list: _Complex double z = {real, imag}
                             let resolved_ts = self.resolve_type_spec(&decl.type_spec);
                             let complex_ctype = self.type_spec_to_ctype(&resolved_ts);
@@ -582,7 +354,7 @@ impl Lowerer {
                                 };
                                 self.emit(Instruction::Store { val: zero, ptr: imag_ptr, ty: comp_ty });
                             }
-                        } else if is_struct {
+                        } else if da.is_struct {
                             // Initialize struct fields from initializer list
                             // Supports designated initializers and nested struct init
                             if let Some(layout) = self.locals.get(&declarator.name).and_then(|l| l.struct_layout.clone()) {
@@ -593,20 +365,20 @@ impl Lowerer {
                                 }
                                 self.emit_struct_init(items, alloca, &layout, 0);
                             }
-                        } else if is_array && elem_size > 0 {
+                        } else if da.is_array && da.elem_size > 0 {
                             // Check if this is an array of structs
                             let elem_struct_layout = self.locals.get(&declarator.name)
                                 .and_then(|l| l.struct_layout.clone());
-                            if array_dim_strides.len() > 1 {
+                            if da.array_dim_strides.len() > 1 {
                                 // Multi-dimensional array init: zero first, then fill
-                                self.zero_init_alloca(alloca, alloc_size);
+                                self.zero_init_alloca(alloca, da.alloc_size);
                                 // For pointer arrays (elem_size=8 but elem_ir_ty=I8),
                                 // use I64 as the element type for stores.
-                                let md_elem_ty = if is_array_of_pointers || is_array_of_func_ptrs { IrType::I64 } else { elem_ir_ty };
-                                self.lower_array_init_list(items, alloca, md_elem_ty, &array_dim_strides);
+                                let md_elem_ty = if da.is_array_of_pointers || da.is_array_of_func_ptrs { IrType::I64 } else { da.elem_ir_ty };
+                                self.lower_array_init_list(items, alloca, md_elem_ty, &da.array_dim_strides);
                             } else if let Some(ref s_layout) = elem_struct_layout {
                                 // Array of structs: init each element using struct layout
-                                self.zero_init_alloca(alloca, alloc_size);
+                                self.zero_init_alloca(alloca, da.alloc_size);
                                 let mut current_idx = 0usize;
                                 for item in items.iter() {
                                     if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
@@ -614,7 +386,7 @@ impl Lowerer {
                                             current_idx = idx_val;
                                         }
                                     }
-                                    let base_byte_offset = current_idx * elem_size;
+                                    let base_byte_offset = current_idx * da.elem_size;
                                     let elem_base = self.fresh_value();
                                     self.emit(Instruction::GetElementPtr {
                                         dest: elem_base,
@@ -665,7 +437,7 @@ impl Lowerer {
                             } else if let Some(ref cplx_ctype) = complex_elem_ctype {
                                 // Array of complex elements: each element is a {real, imag} pair
                                 // Use Memcpy for each element from the expression result
-                                self.zero_init_alloca(alloca, alloc_size);
+                                self.zero_init_alloca(alloca, da.alloc_size);
                                 let mut current_idx = 0usize;
                                 for item in items.iter() {
                                     if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
@@ -701,13 +473,13 @@ impl Lowerer {
                                         self.emit(Instruction::GetElementPtr {
                                             dest: elem_addr,
                                             base: alloca,
-                                            offset: Operand::Const(IrConst::I64((current_idx * elem_size) as i64)),
+                                            offset: Operand::Const(IrConst::I64((current_idx * da.elem_size) as i64)),
                                             ty: IrType::I8,
                                         });
                                         self.emit(Instruction::Memcpy {
                                             dest: elem_addr,
                                             src,
-                                            size: elem_size,
+                                            size: da.elem_size,
                                         });
                                     }
                                     current_idx += 1;
@@ -715,11 +487,11 @@ impl Lowerer {
                             } else {
                                 // 1D array: supports designated initializers [idx] = val
                                 // Also zero-fill first if partially initialized.
-                                let num_elems = alloc_size / elem_size.max(1);
+                                let num_elems = da.alloc_size / da.elem_size.max(1);
                                 let has_designators = items.iter().any(|item| !item.designators.is_empty());
                                 if has_designators || items.len() < num_elems {
                                     // Partial initialization or designators: zero the entire array first
-                                    self.zero_init_alloca(alloca, alloc_size);
+                                    self.zero_init_alloca(alloca, da.alloc_size);
                                 }
 
                                 // Detect arrays of complex types. Complex elements are stored as
@@ -732,7 +504,7 @@ impl Lowerer {
 
                                 // For arrays of pointers, the element type is Ptr (8 bytes),
                                 // not the base type spec (which would be e.g. I32 for int *arr[N]).
-                                let elem_store_ty = if is_array_of_pointers || is_array_of_func_ptrs { IrType::I64 } else { elem_ir_ty };
+                                let elem_store_ty = if da.is_array_of_pointers || da.is_array_of_func_ptrs { IrType::I64 } else { da.elem_ir_ty };
 
                                 let mut current_idx = 0usize;
                                 for item in items.iter() {
@@ -753,9 +525,9 @@ impl Lowerer {
                                         }
                                     };
                                     if let Some(e) = init_expr {
-                                        if !is_array_of_pointers && (elem_ir_ty == IrType::I8 || elem_ir_ty == IrType::U8) {
+                                        if !da.is_array_of_pointers && (da.elem_ir_ty == IrType::I8 || da.elem_ir_ty == IrType::U8) {
                                             if let Expr::StringLiteral(s, _) = e {
-                                                self.emit_string_to_alloca(alloca, s, current_idx * elem_size);
+                                                self.emit_string_to_alloca(alloca, s, current_idx * da.elem_size);
                                                 current_idx += 1;
                                                 continue;
                                             }
@@ -770,19 +542,19 @@ impl Lowerer {
                                             self.emit(Instruction::GetElementPtr {
                                                 dest,
                                                 base: alloca,
-                                                offset: Operand::Const(IrConst::I64((current_idx * elem_size) as i64)),
+                                                offset: Operand::Const(IrConst::I64((current_idx * da.elem_size) as i64)),
                                                 ty: IrType::I8,
                                             });
                                             self.emit(Instruction::Memcpy {
                                                 dest,
                                                 src,
-                                                size: elem_size,
+                                                size: da.elem_size,
                                             });
                                         } else {
                                             let val = self.lower_expr(e);
                                             let expr_ty = self.get_expr_type(e);
                                             let val = self.emit_implicit_cast(val, expr_ty, elem_store_ty);
-                                            self.emit_array_element_store(alloca, val, current_idx * elem_size, elem_store_ty);
+                                            self.emit_array_element_store(alloca, val, current_idx * da.elem_size, elem_store_ty);
                                         }
                                     }
                                     current_idx += 1;
@@ -795,9 +567,9 @@ impl Lowerer {
                                 if let Initializer::Expr(expr) = &first.init {
                                     let val = self.lower_expr(expr);
                                     let expr_ty = self.get_expr_type(expr);
-                                    let val = self.emit_implicit_cast(val, expr_ty, var_ty);
-                                    let val = if is_bool { self.emit_bool_normalize(val) } else { val };
-                                    self.emit(Instruction::Store { val, ptr: alloca, ty: var_ty });
+                                    let val = self.emit_implicit_cast(val, expr_ty, da.var_ty);
+                                    let val = if da.is_bool { self.emit_bool_normalize(val) } else { val };
+                                    self.emit(Instruction::Store { val, ptr: alloca, ty: da.var_ty });
                                 }
                             }
                         }
@@ -805,6 +577,57 @@ impl Lowerer {
                 }
             }
         }
+    }
+
+    /// Handle static local variable declarations: emit as globals with mangled names.
+    /// Static locals are initialized once at program start (via .data/.bss),
+    /// not at every function call.
+    fn lower_local_static_decl(&mut self, decl: &Declaration, declarator: &InitDeclarator, da: &DeclAnalysis) {
+        let static_id = self.next_static_local;
+        let static_name = format!("{}.{}.{}", self.current_function_name, declarator.name, static_id);
+
+        // Register the bare name -> mangled name mapping before processing the initializer
+        // so that &x in another static's initializer can resolve to the mangled name.
+        self.static_local_names.insert(declarator.name.clone(), static_name.clone());
+
+        // Determine initializer (evaluated at compile time for static locals)
+        let init = if let Some(ref initializer) = declarator.init {
+            self.lower_global_init(
+                initializer, &decl.type_spec, da.base_ty, da.is_array,
+                da.elem_size, da.actual_alloc_size, &da.struct_layout, &da.array_dim_strides,
+            )
+        } else {
+            GlobalInit::Zero
+        };
+
+        let align = da.var_ty.align();
+
+        // For struct initializers emitted as byte arrays, set element type to I8
+        let global_ty = if matches!(&init, GlobalInit::Array(vals) if !vals.is_empty() && matches!(vals[0], IrConst::I8(_))) {
+            IrType::I8
+        } else if da.is_struct && matches!(&init, GlobalInit::Array(_)) {
+            IrType::I8
+        } else {
+            da.var_ty
+        };
+
+        self.module.globals.push(IrGlobal {
+            name: static_name.clone(),
+            ty: global_ty,
+            size: da.actual_alloc_size,
+            align,
+            init,
+            is_static: true,
+            is_extern: false,
+        });
+
+        // Track as a global for access via GlobalAddr
+        self.globals.insert(static_name.clone(), GlobalInfo::from_analysis(da));
+
+        // Store type info in locals (with static_global_name set so each use site
+        // emits a fresh GlobalAddr in its own basic block, avoiding unreachable-block issues).
+        self.locals.insert(declarator.name.clone(), LocalInfo::for_static(da, static_name));
+        self.next_static_local += 1;
     }
 
     /// Initialize a local struct from an initializer list.

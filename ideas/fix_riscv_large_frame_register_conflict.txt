@@ -1,0 +1,26 @@
+HIGH PRIORITY: Fix RISC-V register conflict with large stack frames
+
+When a RISC-V function's stack frame exceeds 2048 bytes (12-bit immediate limit),
+the codegen uses t5 as a temporary for computing large stack offsets:
+    li t5, -2056
+    add t5, s0, t5
+    sd t0, 0(t5)
+
+However, t5 is also used as a call argument temp register (via mv t5, t0) when
+preparing arguments for function calls with >4 arguments. This causes values
+loaded into t5 for call arguments to be immediately overwritten by the next
+large-offset stack access.
+
+Example failure: in a function with many locals and a printf("%d %d %d", a, b, c),
+the third argument (loaded into t5) gets corrupted when the next instruction uses
+t5 to compute a large stack offset.
+
+Fix approach: Use a dedicated register for large stack offset computation that
+does NOT conflict with call argument temps. Options:
+1. Use t6 exclusively for large-offset stack access (currently unused)
+2. Use s1 (save/restore in prologue/epilogue) as the large-offset scratch
+3. Rewrite the large-offset path to use sp-relative addressing with pre-computed
+   offsets to avoid needing a scratch register
+
+Impact: Affects any RISC-V function with >256 bytes of local variables that also
+makes function calls with 4+ arguments.

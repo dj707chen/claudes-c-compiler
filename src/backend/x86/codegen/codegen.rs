@@ -693,12 +693,12 @@ impl ArchCodegen for X86Codegen {
                 IrUnaryOp::Neg => self.state.emit("    negq %rax"),
                 IrUnaryOp::Not => self.state.emit("    notq %rax"),
                 IrUnaryOp::Clz => {
+                    // Use lzcnt which correctly returns 32/64 for zero input.
+                    // (bsr is undefined for zero input)
                     if ty == IrType::I32 || ty == IrType::U32 {
-                        self.state.emit("    bsrl %eax, %eax");
-                        self.state.emit("    xorl $31, %eax");
+                        self.state.emit("    lzcntl %eax, %eax");
                     } else {
-                        self.state.emit("    bsrq %rax, %rax");
-                        self.state.emit("    xorq $63, %rax");
+                        self.state.emit("    lzcntq %rax, %rax");
                     }
                 }
                 IrUnaryOp::Ctz => {

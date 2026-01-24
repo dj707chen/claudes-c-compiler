@@ -17,6 +17,14 @@ Additional dedup completed in expr.rs:
 - mask_float_sign_for_truthiness() deduplicates sign-bit masking in lower_condition_expr
   and LogicalNot
 
+Item 6 completed:
+- lower_local_decl: Extracted shared DeclAnalysis struct and analyze_declaration() method
+  that computes all type analysis in one place (used by both lower_local_decl and
+  lower_global_decl). Added LocalInfo::from_analysis() and GlobalInfo::from_analysis()
+  builders. Extracted lower_local_static_decl() helper. Fixed duplicated typedef
+  resolution (now calls resolve_typedef_derived()). Fixed 4x repeated Identifier match
+  in lower_call_arguments. Net reduction ~150 lines of duplicated declaration analysis.
+
 Remaining (lower priority, less severe):
 
 5. lower_function (lowering.rs, ~340 lines)

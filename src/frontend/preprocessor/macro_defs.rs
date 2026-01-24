@@ -98,11 +98,24 @@ impl MacroTable {
                 // NOT when it's a struct member access operator (e.g., expr.M(x)).
                 let is_ppnumber_suffix = if start > 0 {
                     let prev = chars[start - 1];
-                    prev.is_ascii_digit() ||
-                    // dot-then-identifier is pp-number only if there's a digit before the dot
-                    (prev == '.' && start >= 2 && chars[start - 2].is_ascii_digit()) ||
-                    // Also handle hex float exponent (0x1p+2) where 'p' precedes sign/digit
-                    ((prev == '+' || prev == '-') && start >= 2 && (chars[start - 2] == 'e' || chars[start - 2] == 'E' || chars[start - 2] == 'p' || chars[start - 2] == 'P'))
+                    if prev.is_ascii_digit() {
+                        true
+                    } else if prev == '.' && start >= 2 && chars[start - 2].is_ascii_digit() {
+                        // dot-then-identifier is pp-number only if there's a digit before the dot
+                        // (e.g., 1.0f), NOT for struct member access (e.g., expr.field)
+                        true
+                    } else if (prev == '+' || prev == '-') && start >= 2 {
+                        // Handle hex float exponent (0x1p+2, 1.5e-3) where 'e'/'p' precedes sign.
+                        // But ONLY when the e/E/p/P is preceded by a digit or dot, confirming
+                        // this is actually a numeric literal and not an identifier like "size-C"
+                        // where the 'e' at the end of "size" would falsely match.
+                        let exp_char = chars[start - 2];
+                        (exp_char == 'e' || exp_char == 'E' || exp_char == 'p' || exp_char == 'P')
+                            && start >= 3
+                            && (chars[start - 3].is_ascii_digit() || chars[start - 3] == '.')
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 };
