@@ -20,6 +20,8 @@ pub struct ArmCodegen {
     va_named_fp_count: usize,
     /// Number of named GP params that are passed on the stack (beyond 8 register args).
     va_named_stack_gp_count: usize,
+    /// Scratch register index for inline asm allocation
+    asm_scratch_idx: usize,
 }
 
 impl ArmCodegen {
@@ -33,6 +35,7 @@ impl ArmCodegen {
             va_named_gp_count: 0,
             va_named_fp_count: 0,
             va_named_stack_gp_count: 0,
+            asm_scratch_idx: 0,
         }
     }
 
@@ -252,6 +255,252 @@ impl ArmCodegen {
         }
     }
 
+    // --- 128-bit integer helpers ---
+    // Convention: 128-bit values use x0 (low 64 bits) and x1 (high 64 bits).
+    // Stack slots for 128-bit values are 16 bytes: slot(sp) = low, slot+8(sp) = high.
+
+    /// Load a 128-bit operand into x0 (low) : x1 (high).
+    fn operand_to_x0_x1(&mut self, op: &Operand) {
+        match op {
+            Operand::Const(c) => {
+                match c {
+                    IrConst::I128(v) => {
+                        let low = *v as u64;
+                        let high = (*v >> 64) as u64;
+                        self.emit_load_imm64("x0", low as i64);
+                        self.emit_load_imm64("x1", high as i64);
+                    }
+                    IrConst::Zero => {
+                        self.state.emit("    mov x0, #0");
+                        self.state.emit("    mov x1, #0");
+                    }
+                    _ => {
+                        // Other consts: load into x0, zero-extend high half
+                        self.operand_to_x0(op);
+                        self.state.emit("    mov x1, #0");
+                    }
+                }
+            }
+            Operand::Value(v) => {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    if self.state.is_alloca(v.0) {
+                        // Alloca: address, not a 128-bit value itself
+                        self.emit_add_sp_offset("x0", slot.0);
+                        self.state.emit("    mov x1, #0");
+                    } else {
+                        // 128-bit value in 16-byte stack slot
+                        self.emit_load_from_sp("x0", slot.0, "ldr");
+                        self.emit_load_from_sp("x1", slot.0 + 8, "ldr");
+                    }
+                } else {
+                    self.state.emit("    mov x0, #0");
+                    self.state.emit("    mov x1, #0");
+                }
+            }
+        }
+    }
+
+    /// Store x0 (low) : x1 (high) to a 128-bit value's stack slot.
+    fn store_x0_x1_to(&mut self, dest: &Value) {
+        if let Some(slot) = self.state.get_slot(dest.0) {
+            self.emit_store_to_sp("x0", slot.0, "str");
+            self.emit_store_to_sp("x1", slot.0 + 8, "str");
+        }
+    }
+
+    /// Prepare a 128-bit binary operation: load lhs into x2:x3, rhs into x4:x5.
+    /// (Uses x0:x1 as temporaries during loading.)
+    fn prep_i128_binop(&mut self, lhs: &Operand, rhs: &Operand) {
+        self.operand_to_x0_x1(lhs);
+        self.state.emit("    mov x2, x0");
+        self.state.emit("    mov x3, x1");
+        self.operand_to_x0_x1(rhs);
+        self.state.emit("    mov x4, x0");
+        self.state.emit("    mov x5, x1");
+    }
+
+    /// Emit a 128-bit integer binary operation.
+    fn emit_i128_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand) {
+        match op {
+            IrBinOp::Add => {
+                self.prep_i128_binop(lhs, rhs);
+                self.state.emit("    adds x0, x2, x4");
+                self.state.emit("    adc x1, x3, x5");
+            }
+            IrBinOp::Sub => {
+                self.prep_i128_binop(lhs, rhs);
+                self.state.emit("    subs x0, x2, x4");
+                self.state.emit("    sbc x1, x3, x5");
+            }
+            IrBinOp::Mul => {
+                // 128-bit multiply: result_lo = a_lo * b_lo (full widening)
+                // result_hi = a_hi * b_lo + a_lo * b_hi + umulh(a_lo, b_lo)
+                self.prep_i128_binop(lhs, rhs);
+                // x2:x3 = lhs (lo:hi), x4:x5 = rhs (lo:hi)
+                self.state.emit("    mul x0, x2, x4");       // x0 = lo(a_lo * b_lo)
+                self.state.emit("    umulh x1, x2, x4");     // x1 = hi(a_lo * b_lo)
+                self.state.emit("    madd x1, x3, x4, x1");  // x1 += a_hi * b_lo
+                self.state.emit("    madd x1, x2, x5, x1");  // x1 += a_lo * b_hi
+            }
+            IrBinOp::And => {
+                self.prep_i128_binop(lhs, rhs);
+                self.state.emit("    and x0, x2, x4");
+                self.state.emit("    and x1, x3, x5");
+            }
+            IrBinOp::Or => {
+                self.prep_i128_binop(lhs, rhs);
+                self.state.emit("    orr x0, x2, x4");
+                self.state.emit("    orr x1, x3, x5");
+            }
+            IrBinOp::Xor => {
+                self.prep_i128_binop(lhs, rhs);
+                self.state.emit("    eor x0, x2, x4");
+                self.state.emit("    eor x1, x3, x5");
+            }
+            IrBinOp::Shl => {
+                // 128-bit left shift by amount in x4 (low 64 bits of rhs)
+                self.prep_i128_binop(lhs, rhs);
+                // x2:x3 = value, x4 = shift amount
+                let lbl = self.state.fresh_label("shl128");
+                let done = self.state.fresh_label("shl128_done");
+                self.state.emit("    and x4, x4, #127");        // mask to 0-127
+                self.state.emit(&format!("    cbz x4, {}", done)); // shift 0 = noop
+                self.state.emit("    cmp x4, #64");
+                self.state.emit(&format!("    b.ge {}", lbl));
+                // shift < 64: hi = (hi << n) | (lo >> (64-n)), lo = lo << n
+                self.state.emit("    lsl x1, x3, x4");
+                self.state.emit("    mov x5, #64");
+                self.state.emit("    sub x5, x5, x4");
+                self.state.emit("    lsr x6, x2, x5");
+                self.state.emit("    orr x1, x1, x6");
+                self.state.emit("    lsl x0, x2, x4");
+                self.state.emit(&format!("    b {}", done));
+                // shift >= 64: hi = lo << (n-64), lo = 0
+                self.state.emit(&format!("{}:", lbl));
+                self.state.emit("    sub x4, x4, #64");
+                self.state.emit("    lsl x1, x2, x4");
+                self.state.emit("    mov x0, #0");
+                self.state.emit(&format!("{}:", done));
+            }
+            IrBinOp::LShr => {
+                // 128-bit logical right shift
+                self.prep_i128_binop(lhs, rhs);
+                let lbl = self.state.fresh_label("lshr128");
+                let done = self.state.fresh_label("lshr128_done");
+                self.state.emit("    and x4, x4, #127");
+                self.state.emit(&format!("    cbz x4, {}", done));
+                self.state.emit("    cmp x4, #64");
+                self.state.emit(&format!("    b.ge {}", lbl));
+                // shift < 64: lo = (lo >> n) | (hi << (64-n)), hi = hi >> n
+                self.state.emit("    lsr x0, x2, x4");
+                self.state.emit("    mov x5, #64");
+                self.state.emit("    sub x5, x5, x4");
+                self.state.emit("    lsl x6, x3, x5");
+                self.state.emit("    orr x0, x0, x6");
+                self.state.emit("    lsr x1, x3, x4");
+                self.state.emit(&format!("    b {}", done));
+                // shift >= 64: lo = hi >> (n-64), hi = 0
+                self.state.emit(&format!("{}:", lbl));
+                self.state.emit("    sub x4, x4, #64");
+                self.state.emit("    lsr x0, x3, x4");
+                self.state.emit("    mov x1, #0");
+                self.state.emit(&format!("{}:", done));
+            }
+            IrBinOp::AShr => {
+                // 128-bit arithmetic right shift
+                self.prep_i128_binop(lhs, rhs);
+                let lbl = self.state.fresh_label("ashr128");
+                let done = self.state.fresh_label("ashr128_done");
+                self.state.emit("    and x4, x4, #127");
+                self.state.emit(&format!("    cbz x4, {}", done));
+                self.state.emit("    cmp x4, #64");
+                self.state.emit(&format!("    b.ge {}", lbl));
+                // shift < 64: lo = (lo >> n) | (hi << (64-n)), hi = hi >>a n
+                self.state.emit("    lsr x0, x2, x4");
+                self.state.emit("    mov x5, #64");
+                self.state.emit("    sub x5, x5, x4");
+                self.state.emit("    lsl x6, x3, x5");
+                self.state.emit("    orr x0, x0, x6");
+                self.state.emit("    asr x1, x3, x4");
+                self.state.emit(&format!("    b {}", done));
+                // shift >= 64: lo = hi >>a (n-64), hi = hi >>a 63
+                self.state.emit(&format!("{}:", lbl));
+                self.state.emit("    sub x4, x4, #64");
+                self.state.emit("    asr x0, x3, x4");
+                self.state.emit("    asr x1, x3, #63");
+                self.state.emit(&format!("{}:", done));
+            }
+            IrBinOp::SDiv | IrBinOp::UDiv | IrBinOp::SRem | IrBinOp::URem => {
+                // Call compiler-rt helper functions for 128-bit division
+                let func_name = match op {
+                    IrBinOp::SDiv => "__divti3",
+                    IrBinOp::UDiv => "__udivti3",
+                    IrBinOp::SRem => "__modti3",
+                    IrBinOp::URem => "__umodti3",
+                    _ => unreachable!(),
+                };
+                // AAPCS64: first 128-bit arg in x0:x1, second in x2:x3
+                self.operand_to_x0_x1(lhs);
+                self.state.emit("    mov x2, x0");
+                self.state.emit("    mov x3, x1");
+                self.operand_to_x0_x1(rhs);
+                self.state.emit("    mov x4, x0");
+                self.state.emit("    mov x5, x1");
+                // Move to correct argument registers: lhs in x0:x1, rhs in x2:x3
+                self.state.emit("    mov x0, x2");
+                self.state.emit("    mov x1, x3");
+                self.state.emit("    mov x2, x4");
+                self.state.emit("    mov x3, x5");
+                self.state.emit(&format!("    bl {}", func_name));
+                // Result in x0:x1
+            }
+        }
+        self.store_x0_x1_to(dest);
+    }
+
+    /// Emit a 128-bit comparison.
+    fn emit_i128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand) {
+        self.prep_i128_binop(lhs, rhs);
+        // x2:x3 = lhs, x4:x5 = rhs
+        match op {
+            IrCmpOp::Eq => {
+                // XOR both halves and OR the differences
+                self.state.emit("    eor x0, x2, x4");
+                self.state.emit("    eor x1, x3, x5");
+                self.state.emit("    orr x0, x0, x1");
+                self.state.emit("    cmp x0, #0");
+                self.state.emit("    cset x0, eq");
+            }
+            IrCmpOp::Ne => {
+                self.state.emit("    eor x0, x2, x4");
+                self.state.emit("    eor x1, x3, x5");
+                self.state.emit("    orr x0, x0, x1");
+                self.state.emit("    cmp x0, #0");
+                self.state.emit("    cset x0, ne");
+            }
+            _ => {
+                // Ordered comparisons: compare high halves first, fall through to low if equal
+                let done = self.state.fresh_label("cmp128_done");
+                // Compare high halves
+                self.state.emit("    cmp x3, x5");
+                let (hi_cond, lo_cond) = match op {
+                    IrCmpOp::Slt | IrCmpOp::Sle => ("lt", if op == IrCmpOp::Slt { "lo" } else { "ls" }),
+                    IrCmpOp::Sgt | IrCmpOp::Sge => ("gt", if op == IrCmpOp::Sgt { "hi" } else { "hs" }),
+                    IrCmpOp::Ult | IrCmpOp::Ule => ("lo", if op == IrCmpOp::Ult { "lo" } else { "ls" }),
+                    IrCmpOp::Ugt | IrCmpOp::Uge => ("hi", if op == IrCmpOp::Ugt { "hi" } else { "hs" }),
+                    _ => unreachable!(),
+                };
+                self.state.emit(&format!("    cset x0, {}", hi_cond));
+                self.state.emit(&format!("    b.ne {}", done));
+                // High halves equal: compare low halves (always unsigned)
+                self.state.emit("    cmp x2, x4");
+                self.state.emit(&format!("    cset x0, {}", lo_cond));
+                self.state.emit(&format!("{}:", done));
+            }
+        }
+        self.store_x0_to(dest);
+    }
+
     fn str_for_type(ty: IrType) -> &'static str {
         match ty {
             IrType::I8 | IrType::U8 => "strb",
@@ -397,10 +646,10 @@ impl ArchCodegen for ArmCodegen {
             }
         }
 
-        // Classify each param: int reg, float reg, or stack-passed
+        // Classify each param: int reg, float reg, i128 pair, or stack-passed
         let mut int_reg_idx = 0usize;
         let mut float_reg_idx = 0usize;
-        let mut param_class: Vec<char> = Vec::new(); // 'i', 'f', 's'
+        let mut param_class: Vec<char> = Vec::new(); // 'i', 'f', 's', 'p' (i128 pair)
         let mut param_int_reg: Vec<usize> = Vec::new();
         let mut param_float_reg: Vec<usize> = Vec::new();
         let mut stack_offsets: Vec<i64> = Vec::new();
@@ -408,7 +657,25 @@ impl ArchCodegen for ArmCodegen {
 
         for param in func.params.iter() {
             let is_float = param.ty.is_float();
-            if is_float && float_reg_idx < 8 {
+            let is_i128 = is_i128_type(param.ty);
+            if is_i128 {
+                // AAPCS64: 128-bit integers in even-aligned GP register pair
+                if int_reg_idx % 2 != 0 { int_reg_idx += 1; }
+                if int_reg_idx + 1 < 8 {
+                    param_class.push('p');
+                    param_int_reg.push(int_reg_idx);
+                    param_float_reg.push(0);
+                    stack_offsets.push(0);
+                    int_reg_idx += 2;
+                } else {
+                    param_class.push('s');
+                    param_int_reg.push(0);
+                    param_float_reg.push(0);
+                    stack_offsets.push(stack_offset);
+                    stack_offset += 16;
+                    int_reg_idx = 8;
+                }
+            } else if is_float && float_reg_idx < 8 {
                 param_class.push('f');
                 param_float_reg.push(float_reg_idx);
                 param_int_reg.push(0);
@@ -431,6 +698,19 @@ impl ArchCodegen for ArmCodegen {
 
         // Phase 1: Store all INTEGER register params first (before x0 gets clobbered by float moves).
         for (i, param) in func.params.iter().enumerate() {
+            if param_class[i] == 'p' {
+                // 128-bit integer param: arrives in even-aligned GP register pair
+                if param.name.is_empty() { continue; }
+                if let Some((dest, _ty)) = find_param_alloca(func, i) {
+                    if let Some(slot) = self.state.get_slot(dest.0) {
+                        let lo_reg = ARM_ARG_REGS[param_int_reg[i]];
+                        let hi_reg = ARM_ARG_REGS[param_int_reg[i] + 1];
+                        self.emit_store_to_sp(lo_reg, slot.0, "str");
+                        self.emit_store_to_sp(hi_reg, slot.0 + 8, "str");
+                    }
+                }
+                continue;
+            }
             if param_class[i] != 'i' || param.name.is_empty() { continue; }
             if let Some((dest, ty)) = find_param_alloca(func, i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
@@ -515,10 +795,18 @@ impl ArchCodegen for ArmCodegen {
             if let Some((dest, ty)) = find_param_alloca(func, i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
                     let caller_offset = frame_size + stack_offsets[i];
-                    self.emit_load_from_sp("x0", caller_offset, "ldr");
-                    let store_instr = Self::str_for_type(ty);
-                    let reg = Self::reg_for_type("x0", ty);
-                    self.emit_store_to_sp(reg, slot.0, store_instr);
+                    if is_i128_type(ty) {
+                        // 128-bit stack param: load both halves
+                        self.emit_load_from_sp("x0", caller_offset, "ldr");
+                        self.emit_store_to_sp("x0", slot.0, "str");
+                        self.emit_load_from_sp("x0", caller_offset + 8, "ldr");
+                        self.emit_store_to_sp("x0", slot.0 + 8, "str");
+                    } else {
+                        self.emit_load_from_sp("x0", caller_offset, "ldr");
+                        let store_instr = Self::str_for_type(ty);
+                        let reg = Self::reg_for_type("x0", ty);
+                        self.emit_store_to_sp(reg, slot.0, store_instr);
+                    }
                 }
             }
         }
@@ -533,6 +821,24 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
+        if is_i128_type(ty) {
+            // 128-bit store: load value into x0:x1, then store both halves
+            self.operand_to_x0_x1(val);
+            if let Some(slot) = self.state.get_slot(ptr.0) {
+                if self.state.is_alloca(ptr.0) {
+                    self.emit_store_to_sp("x0", slot.0, "str");
+                    self.emit_store_to_sp("x1", slot.0 + 8, "str");
+                } else {
+                    // ptr is indirect: save x0:x1, load ptr, then store
+                    self.state.emit("    mov x2, x0");
+                    self.state.emit("    mov x3, x1");
+                    self.emit_load_from_sp("x4", slot.0, "ldr");
+                    self.state.emit("    str x2, [x4]");
+                    self.state.emit("    str x3, [x4, #8]");
+                }
+            }
+            return;
+        }
         self.operand_to_x0(val);
         if let Some(slot) = self.state.get_slot(ptr.0) {
             if self.state.is_alloca(ptr.0) {
@@ -550,6 +856,21 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) {
+        if is_i128_type(ty) {
+            // 128-bit load: load both halves into x0:x1
+            if let Some(slot) = self.state.get_slot(ptr.0) {
+                if self.state.is_alloca(ptr.0) {
+                    self.emit_load_from_sp("x0", slot.0, "ldr");
+                    self.emit_load_from_sp("x1", slot.0 + 8, "ldr");
+                } else {
+                    self.emit_load_from_sp("x2", slot.0, "ldr");
+                    self.state.emit("    ldr x0, [x2]");
+                    self.state.emit("    ldr x1, [x2, #8]");
+                }
+                self.store_x0_x1_to(dest);
+            }
+            return;
+        }
         if let Some(slot) = self.state.get_slot(ptr.0) {
             let load_instr = Self::ldr_for_type(ty);
             let dest_reg = Self::load_dest_reg(ty);
@@ -592,6 +913,11 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        if is_i128_type(ty) {
+            self.emit_i128_binop(dest, op, lhs, rhs);
+            return;
+        }
+
         self.operand_to_x0(lhs);
         self.state.emit("    mov x1, x0");
         self.operand_to_x0(rhs);
@@ -663,6 +989,26 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
+        if is_i128_type(ty) {
+            self.operand_to_x0_x1(src);
+            match op {
+                IrUnaryOp::Neg => {
+                    // 128-bit negate: ~x + 1
+                    self.state.emit("    mvn x0, x0");
+                    self.state.emit("    mvn x1, x1");
+                    self.state.emit("    adds x0, x0, #1");
+                    self.state.emit("    adc x1, x1, xzr");
+                }
+                IrUnaryOp::Not => {
+                    // 128-bit bitwise NOT
+                    self.state.emit("    mvn x0, x0");
+                    self.state.emit("    mvn x1, x1");
+                }
+                _ => {} // Clz/Ctz/Bswap/Popcount not expected for 128-bit
+            }
+            self.store_x0_x1_to(dest);
+            return;
+        }
         self.operand_to_x0(src);
         if ty.is_float() {
             match op {
@@ -724,6 +1070,10 @@ impl ArchCodegen for ArmCodegen {
     }
 
     fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        if is_i128_type(ty) {
+            self.emit_i128_cmp(dest, op, lhs, rhs);
+            return;
+        }
         if ty.is_float() {
             self.operand_to_x0(lhs);
             self.state.emit("    mov x1, x0");
@@ -798,7 +1148,9 @@ impl ArchCodegen for ArmCodegen {
         // in FP registers. The callee saves both GP and FP register sets in variadic functions
         // and va_arg uses __gr_offs/__vr_offs to locate args in the correct save area.
         // F128 (long double) uses Q registers (128-bit) and consumes one FP register slot.
-        let mut arg_classes: Vec<char> = Vec::new(); // 'f' = float reg, 'i' = int reg, 's' = stack, 'q' = F128 in Q reg
+        // Arg classes: 'f' = float reg, 'i' = int reg, 's' = stack, 'q' = F128 in Q reg,
+        // 'S' = stack quad (overflow), 'p' = i128 in GP register pair, 'P' = i128 stack
+        let mut arg_classes: Vec<char> = Vec::new();
         let mut fi = 0usize;
         let mut ii = 0usize;
         let _ = is_variadic; // AAPCS64: variadic status doesn't affect register assignment
@@ -806,18 +1158,28 @@ impl ArchCodegen for ArmCodegen {
         for (i, _arg) in args.iter().enumerate() {
             let arg_ty = if i < arg_types.len() { Some(arg_types[i]) } else { None };
             let is_long_double = arg_ty == Some(IrType::F128);
+            let is_i128 = arg_ty.map(|t| is_i128_type(t)).unwrap_or(false);
             let is_float = if let Some(ty) = arg_ty {
                 ty.is_float()
             } else {
                 matches!(args[i], Operand::Const(IrConst::F32(_) | IrConst::F64(_)))
             };
-            if is_long_double {
-                // F128 (long double) uses a Q register (128-bit SIMD), consuming one FP slot
+            if is_i128 {
+                // AAPCS64: 128-bit integers go in even-aligned GP register pair
+                if ii % 2 != 0 { ii += 1; } // align to even register
+                if ii + 1 < 8 {
+                    arg_classes.push('p'); // GP register pair
+                    ii += 2;
+                } else {
+                    arg_classes.push('P'); // stack (16 bytes)
+                    ii = 8;
+                }
+            } else if is_long_double {
                 if fi < 8 {
-                    arg_classes.push('q'); // quad = F128 in Q register
+                    arg_classes.push('q');
                     fi += 1;
                 } else {
-                    arg_classes.push('S'); // stack quad (overflow)
+                    arg_classes.push('S');
                 }
             } else if is_float && fi < 8 {
                 arg_classes.push('f');
@@ -830,15 +1192,15 @@ impl ArchCodegen for ArmCodegen {
             }
         }
 
-        // Count stack arguments - 'S' (stack overflow quad) args need 16 bytes, 's' args need 8 bytes
+        // Count stack arguments - 'S'/'P' need 16 bytes, 's' args need 8 bytes
         let stack_arg_indices: Vec<usize> = args.iter().enumerate()
-            .filter(|(i, _)| arg_classes[*i] == 's' || arg_classes[*i] == 'S')
+            .filter(|(i, _)| arg_classes[*i] == 's' || arg_classes[*i] == 'S' || arg_classes[*i] == 'P')
             .map(|(i, _)| i)
             .collect();
         let mut stack_arg_space: usize = 0;
         for &idx in &stack_arg_indices {
-            if arg_classes[idx] == 'S' {
-                // Align to 16 bytes for quad
+            if arg_classes[idx] == 'S' || arg_classes[idx] == 'P' {
+                // Align to 16 bytes for quad/i128
                 stack_arg_space = (stack_arg_space + 15) & !15;
                 stack_arg_space += 16;
             } else {
@@ -857,9 +1219,54 @@ impl ArchCodegen for ArmCodegen {
             let mut stack_offset = 0i64;
             for &arg_idx in &stack_arg_indices {
                 let is_stack_quad = arg_classes[arg_idx] == 'S';
-                if is_stack_quad {
-                    // Align stack_offset to 16 bytes for quad-precision long double
+                let is_stack_i128 = arg_classes[arg_idx] == 'P';
+                if is_stack_quad || is_stack_i128 {
+                    // Align stack_offset to 16 bytes for quad-precision or i128
                     stack_offset = (stack_offset + 15) & !15;
+                }
+                if is_stack_i128 {
+                    // 128-bit integer stack arg
+                    // Load 128-bit value, adjusting for SP movement
+                    match &args[arg_idx] {
+                        Operand::Const(c) => {
+                            if let IrConst::I128(v) = c {
+                                let low = *v as u64;
+                                let high = (*v >> 64) as u64;
+                                self.emit_load_imm64("x0", low as i64);
+                                self.emit_store_to_sp("x0", stack_offset, "str");
+                                self.emit_load_imm64("x0", high as i64);
+                                self.emit_store_to_sp("x0", stack_offset + 8, "str");
+                            } else {
+                                self.operand_to_x0(&args[arg_idx]);
+                                self.emit_store_to_sp("x0", stack_offset, "str");
+                                self.state.emit("    mov x0, #0");
+                                self.emit_store_to_sp("x0", stack_offset + 8, "str");
+                            }
+                        }
+                        Operand::Value(v) => {
+                            if let Some(slot) = self.state.get_slot(v.0) {
+                                let adjusted = slot.0 + stack_arg_space as i64;
+                                if self.state.is_alloca(v.0) {
+                                    self.emit_add_sp_offset("x0", adjusted);
+                                    self.emit_store_to_sp("x0", stack_offset, "str");
+                                    self.state.emit("    mov x0, #0");
+                                    self.emit_store_to_sp("x0", stack_offset + 8, "str");
+                                } else {
+                                    // 128-bit value: load both halves
+                                    self.emit_load_from_sp("x0", adjusted, "ldr");
+                                    self.emit_store_to_sp("x0", stack_offset, "str");
+                                    self.emit_load_from_sp("x0", adjusted + 8, "ldr");
+                                    self.emit_store_to_sp("x0", stack_offset + 8, "str");
+                                }
+                            } else {
+                                self.state.emit("    mov x0, #0");
+                                self.emit_store_to_sp("x0", stack_offset, "str");
+                                self.emit_store_to_sp("x0", stack_offset + 8, "str");
+                            }
+                        }
+                    }
+                    stack_offset += 16;
+                    continue;
                 }
                 // For constants, no SP adjustment needed
                 match &args[arg_idx] {
@@ -1067,9 +1474,16 @@ impl ArchCodegen for ArmCodegen {
         }
 
         // Phase 3: Move GP args from temp regs to actual arg registers (x0-x7).
+        // Track which GP registers are assigned for 'i' and 'p' classes.
         let mut int_reg_idx = 0usize;
         gp_tmp_idx = 0;
         for (i, _arg) in args.iter().enumerate() {
+            if arg_classes[i] == 'p' {
+                // i128 pair: skip 2 registers (handled below)
+                if int_reg_idx % 2 != 0 { int_reg_idx += 1; }
+                int_reg_idx += 2;
+                continue;
+            }
             if arg_classes[i] != 'i' { continue; }
             if gp_tmp_idx >= 8 { break; }
             if int_reg_idx < 8 {
@@ -1077,6 +1491,76 @@ impl ArchCodegen for ArmCodegen {
                 int_reg_idx += 1;
             }
             gp_tmp_idx += 1;
+        }
+
+        // Phase 3b: Load i128 register pair args directly into their target registers.
+        // Must be done last since it writes to x0-x7 directly.
+        {
+            let mut pair_reg_idx = 0usize;
+            for (i, _arg) in args.iter().enumerate() {
+                if arg_classes[i] == 'p' {
+                    if pair_reg_idx % 2 != 0 { pair_reg_idx += 1; }
+                    // Load 128-bit value, adjusting for SP if stack args present
+                    if stack_arg_space > 0 {
+                        match &args[i] {
+                            Operand::Value(v) => {
+                                if let Some(slot) = self.state.get_slot(v.0) {
+                                    let adjusted = slot.0 + stack_arg_space as i64;
+                                    if self.state.is_alloca(v.0) {
+                                        // Alloca pointer, not 128-bit value
+                                        self.emit_load_from_sp(ARM_ARG_REGS[pair_reg_idx], adjusted, "ldr");
+                                        self.state.emit(&format!("    mov {}, #0", ARM_ARG_REGS[pair_reg_idx + 1]));
+                                    } else {
+                                        self.emit_load_from_sp(ARM_ARG_REGS[pair_reg_idx], adjusted, "ldr");
+                                        self.emit_load_from_sp(ARM_ARG_REGS[pair_reg_idx + 1], adjusted + 8, "ldr");
+                                    }
+                                }
+                            }
+                            Operand::Const(c) => {
+                                if let IrConst::I128(v) = c {
+                                    self.emit_load_imm64(ARM_ARG_REGS[pair_reg_idx], *v as u64 as i64);
+                                    self.emit_load_imm64(ARM_ARG_REGS[pair_reg_idx + 1], (*v >> 64) as u64 as i64);
+                                } else {
+                                    self.operand_to_x0(&args[i]);
+                                    if pair_reg_idx != 0 {
+                                        self.state.emit(&format!("    mov {}, x0", ARM_ARG_REGS[pair_reg_idx]));
+                                    }
+                                    self.state.emit(&format!("    mov {}, #0", ARM_ARG_REGS[pair_reg_idx + 1]));
+                                }
+                            }
+                        }
+                    } else {
+                        match &args[i] {
+                            Operand::Value(v) => {
+                                if let Some(slot) = self.state.get_slot(v.0) {
+                                    if self.state.is_alloca(v.0) {
+                                        self.emit_add_sp_offset(ARM_ARG_REGS[pair_reg_idx], slot.0);
+                                        self.state.emit(&format!("    mov {}, #0", ARM_ARG_REGS[pair_reg_idx + 1]));
+                                    } else {
+                                        self.emit_load_from_sp(ARM_ARG_REGS[pair_reg_idx], slot.0, "ldr");
+                                        self.emit_load_from_sp(ARM_ARG_REGS[pair_reg_idx + 1], slot.0 + 8, "ldr");
+                                    }
+                                }
+                            }
+                            Operand::Const(c) => {
+                                if let IrConst::I128(v) = c {
+                                    self.emit_load_imm64(ARM_ARG_REGS[pair_reg_idx], *v as u64 as i64);
+                                    self.emit_load_imm64(ARM_ARG_REGS[pair_reg_idx + 1], (*v >> 64) as u64 as i64);
+                                } else {
+                                    self.operand_to_x0(&args[i]);
+                                    if pair_reg_idx != 0 {
+                                        self.state.emit(&format!("    mov {}, x0", ARM_ARG_REGS[pair_reg_idx]));
+                                    }
+                                    self.state.emit(&format!("    mov {}, #0", ARM_ARG_REGS[pair_reg_idx + 1]));
+                                }
+                            }
+                        }
+                    }
+                    pair_reg_idx += 2;
+                } else if arg_classes[i] == 'i' {
+                    pair_reg_idx += 1;
+                }
+            }
         }
         // FP args already in d0-d7/q0-q7 from Phase 2b.
 
@@ -1092,19 +1576,23 @@ impl ArchCodegen for ArmCodegen {
         }
 
         if let Some(dest) = dest {
-            if return_type.is_long_double() {
+            if is_i128_type(return_type) {
+                // 128-bit return: x0 = low, x1 = high per AAPCS64
+                self.store_x0_x1_to(&dest);
+            } else if return_type.is_long_double() {
                 // F128 return value is in q0 per AAPCS64.
-                // Convert from f128 to f64 using __trunctfdf2 (input in q0, output in d0).
                 self.state.emit("    bl __trunctfdf2");
                 self.state.emit("    fmov x0, d0");
+                self.store_x0_to(&dest);
             } else if return_type == IrType::F32 {
-                // F32 return value is in s0 per AAPCS64
                 self.state.emit("    fmov w0, s0");
+                self.store_x0_to(&dest);
             } else if return_type.is_float() {
-                // F64 return value is in d0 per AAPCS64
                 self.state.emit("    fmov x0, d0");
+                self.store_x0_to(&dest);
+            } else {
+                self.store_x0_to(&dest);
             }
-            self.store_x0_to(&dest);
         }
     }
 
@@ -1224,7 +1712,46 @@ impl ArchCodegen for ArmCodegen {
         }
     }
 
-    // emit_cast uses the default from ArchCodegen: load → emit_cast_instrs → store
+    /// Override emit_cast to handle 128-bit widening/narrowing.
+    fn emit_cast(&mut self, dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType) {
+        if is_i128_type(to_ty) && !is_i128_type(from_ty) {
+            // Widening to 128-bit
+            self.operand_to_x0(src);
+            // First widen to 64-bit if needed
+            if from_ty.size() < 8 {
+                self.emit_cast_instrs(from_ty, if from_ty.is_signed() { IrType::I64 } else { IrType::U64 });
+            }
+            if from_ty.is_signed() {
+                // Sign-extend: x1 = x0 >> 63 (arithmetic)
+                self.state.emit("    asr x1, x0, #63");
+            } else {
+                // Zero-extend
+                self.state.emit("    mov x1, #0");
+            }
+            self.store_x0_x1_to(dest);
+            return;
+        }
+        if is_i128_type(from_ty) && !is_i128_type(to_ty) {
+            // Narrowing from 128-bit: use low 64 bits
+            self.operand_to_x0_x1(src);
+            // x0 already has the low 64 bits
+            if to_ty.size() < 8 {
+                self.emit_cast_instrs(IrType::I64, to_ty);
+            }
+            self.store_x0_to(dest);
+            return;
+        }
+        if is_i128_type(from_ty) && is_i128_type(to_ty) {
+            // I128 <-> U128: same representation, just copy
+            self.operand_to_x0_x1(src);
+            self.store_x0_x1_to(dest);
+            return;
+        }
+        // Default path for non-128-bit casts
+        self.emit_load_operand(src);
+        self.emit_cast_instrs(from_ty, to_ty);
+        self.emit_store_result(dest);
+    }
 
     fn emit_memcpy(&mut self, dest: &Value, src: &Value, size: usize) {
         // Load dest address into x9, src address into x10
@@ -1469,6 +1996,13 @@ impl ArchCodegen for ArmCodegen {
 
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {
         if let Some(val) = val {
+            if is_i128_type(self.current_return_type) {
+                // 128-bit return: x0 = low, x1 = high per AAPCS64
+                self.operand_to_x0_x1(val);
+                self.emit_epilogue_arm(frame_size);
+                self.state.emit("    ret");
+                return;
+            }
             self.operand_to_x0(val);
             if self.current_return_type.is_long_double() {
                 // F128 return: convert f64 bit pattern in x0 to f128 in q0 via __extenddftf2.
@@ -1678,91 +2212,101 @@ impl ArchCodegen for ArmCodegen {
         self.state.emit("    dmb ish");
     }
 
-    fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], _operand_types: &[IrType]) {
-        // Allocate registers for operands.
-        // outputs come first in operand numbering, then inputs.
-        // Use x9..x15 (caller-saved scratch) for GP operands.
-        let gp_regs: &[&str] = &["x9", "x10", "x11", "x12", "x13", "x14", "x15", "x19", "x20", "x21"];
-
-        // Build operand list: (reg_name, optional symbolic_name)
-        let mut op_regs: Vec<String> = Vec::new();
-        let mut op_names: Vec<Option<String>> = Vec::new();
-
-        // Assign registers to outputs
-        let mut reg_idx = 0;
-        for (_constraint, _ptr, name) in outputs {
-            let reg = if reg_idx < gp_regs.len() { gp_regs[reg_idx].to_string() } else { format!("x{}", 9 + reg_idx) };
-            op_regs.push(reg);
-            op_names.push(name.clone());
-            reg_idx += 1;
-        }
-
-        // Assign registers to inputs
-        for (_constraint, _val, name) in inputs {
-            let reg = if reg_idx < gp_regs.len() { gp_regs[reg_idx].to_string() } else { format!("x{}", 9 + reg_idx) };
-            op_regs.push(reg);
-            op_names.push(name.clone());
-            reg_idx += 1;
-        }
-
-        // For "+r" outputs: the input value was added as extra inputs during lowering.
-        // The first N inputs that correspond to "+r" outputs share the same register.
-        let mut plus_idx = 0;
-        for (i, (constraint, _, _)) in outputs.iter().enumerate() {
-            if constraint.contains('+') {
-                // The input at position `plus_idx` shares register with output `i`
-                if outputs.len() + plus_idx < op_regs.len() {
-                    op_regs[outputs.len() + plus_idx] = op_regs[i].clone();
-                }
-                plus_idx += 1;
-            }
-        }
-
-        // Load input values into their assigned registers
-        for (i, (_constraint, val, _)) in inputs.iter().enumerate() {
-            let op_idx = outputs.len() + i;
-            let reg = op_regs[op_idx].clone();
-            match val {
-                Operand::Const(c) => {
-                    self.emit_load_imm64(&reg, c.to_i64().unwrap_or(0));
-                }
-                Operand::Value(v) => {
-                    if let Some(slot) = self.state.get_slot(v.0) {
-                        self.emit_load_from_sp(&reg, slot.0, "ldr");
-                    }
-                }
-            }
-        }
-
-        // Substitute operand references in template and emit
-        // Handle: %0, %1, %[name], %w0, %x0, %w[name], %x[name]
-        // Split on literal \n (escaped newline in the string)
-        let lines: Vec<&str> = template.split('\n').collect();
-        for line in &lines {
-            let line = line.trim().trim_start_matches('\t').trim();
-            if line.is_empty() {
-                continue;
-            }
-            let resolved = Self::substitute_asm_operands_static(line, &op_regs, &op_names);
-            self.state.emit(&format!("    {}", resolved));
-        }
-
-        // Store output register values back to their stack slots
-        for (i, (constraint, ptr, _)) in outputs.iter().enumerate() {
-            if constraint.contains('=') || constraint.contains('+') {
-                let reg = &op_regs[i];
-                if let Some(slot) = self.state.get_slot(ptr.0) {
-                    self.emit_store_to_sp(reg, slot.0, "str");
-                }
-            }
-        }
+    fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], operand_types: &[IrType]) {
+        emit_inline_asm_common(self, template, outputs, inputs, operand_types);
     }
 
-    // emit_copy_i128: uses default implementation (64-bit truncation)
+    fn emit_copy_i128(&mut self, dest: &Value, src: &Operand) {
+        // Full 128-bit copy: load src into x0:x1, store to dest
+        self.operand_to_x0_x1(src);
+        self.store_x0_x1_to(dest);
+    }
 }
 
 impl Default for ArmCodegen {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// AArch64 scratch registers for inline asm (caller-saved temporaries).
+const ARM_GP_SCRATCH: &[&str] = &["x9", "x10", "x11", "x12", "x13", "x14", "x15", "x19", "x20", "x21"];
+
+impl InlineAsmEmitter for ArmCodegen {
+    fn asm_state(&mut self) -> &mut CodegenState { &mut self.state }
+    fn asm_state_ref(&self) -> &CodegenState { &self.state }
+
+    fn classify_constraint(&self, constraint: &str) -> AsmOperandKind {
+        let c = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+        if !c.is_empty() && c.chars().all(|ch| ch.is_ascii_digit()) {
+            if let Ok(n) = c.parse::<usize>() {
+                return AsmOperandKind::Tied(n);
+            }
+        }
+        if c == "m" { return AsmOperandKind::Memory; }
+        // ARM doesn't use specific single-letter constraints like x86,
+        // all "r" constraints get GP scratch registers.
+        AsmOperandKind::GpReg
+    }
+
+    fn setup_operand_metadata(&self, op: &mut AsmOperand, val: &Operand, _is_output: bool) {
+        if matches!(op.kind, AsmOperandKind::Memory) {
+            if let Operand::Value(v) = val {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    op.mem_offset = slot.0;
+                }
+            }
+        }
+    }
+
+    fn assign_scratch_reg(&mut self, _kind: &AsmOperandKind) -> String {
+        let idx = self.asm_scratch_idx;
+        self.asm_scratch_idx += 1;
+        if idx < ARM_GP_SCRATCH.len() {
+            ARM_GP_SCRATCH[idx].to_string()
+        } else {
+            format!("x{}", 9 + idx)
+        }
+    }
+
+    fn load_input_to_reg(&mut self, op: &AsmOperand, val: &Operand, _constraint: &str) {
+        let reg = &op.reg;
+        match val {
+            Operand::Const(c) => {
+                self.emit_load_imm64(reg, c.to_i64().unwrap_or(0));
+            }
+            Operand::Value(v) => {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    self.emit_load_from_sp(reg, slot.0, "ldr");
+                }
+            }
+        }
+    }
+
+    fn preload_readwrite_output(&mut self, op: &AsmOperand, ptr: &Value) {
+        let reg = &op.reg;
+        if let Some(slot) = self.state.get_slot(ptr.0) {
+            self.emit_load_from_sp(reg, slot.0, "ldr");
+        }
+    }
+
+    fn substitute_template_line(&self, line: &str, operands: &[AsmOperand], _gcc_to_internal: &[usize], _operand_types: &[IrType]) -> String {
+        let op_regs: Vec<String> = operands.iter().map(|o| o.reg.clone()).collect();
+        let op_names: Vec<Option<String>> = operands.iter().map(|o| o.name.clone()).collect();
+        Self::substitute_asm_operands_static(line, &op_regs, &op_names)
+    }
+
+    fn store_output_from_reg(&mut self, op: &AsmOperand, ptr: &Value, _constraint: &str) {
+        if matches!(op.kind, AsmOperandKind::Memory) {
+            return;
+        }
+        let reg = &op.reg;
+        if let Some(slot) = self.state.get_slot(ptr.0) {
+            self.emit_store_to_sp(reg, slot.0, "str");
+        }
+    }
+
+    fn reset_scratch_state(&mut self) {
+        self.asm_scratch_idx = 0;
     }
 }

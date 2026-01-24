@@ -498,6 +498,12 @@ fn generate_terminator(cg: &mut dyn ArchCodegen, term: &Terminator, frame_size: 
     }
 }
 
+/// Check if an IR type is a 128-bit integer type (I128 or U128).
+/// Used by all backends to detect 128-bit operands.
+pub fn is_i128_type(ty: IrType) -> bool {
+    matches!(ty, IrType::I128 | IrType::U128)
+}
+
 /// Shared stack space calculation: iterates over all instructions, assigns stack
 /// slots for allocas and value results. Arch-specific offset direction is handled
 /// by the `assign_slot` closure.
@@ -694,4 +700,270 @@ pub fn find_param_alloca(func: &IrFunction, param_idx: usize) -> Option<(Value, 
                 }
             })
     })
+}
+
+// ============================================================================
+// Shared inline assembly framework
+// ============================================================================
+
+/// Operand classification for inline asm. Each backend classifies its constraints
+/// into these categories so the shared framework can orchestrate register
+/// assignment, tied operand resolution, and GCC numbering.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AsmOperandKind {
+    /// General-purpose register (e.g., x86 "r", ARM "r", RISC-V "r").
+    GpReg,
+    /// Floating-point register (RISC-V "f").
+    FpReg,
+    /// Memory operand (all arches "m").
+    Memory,
+    /// Specific named register (x86 "a"→"rax", RISC-V "a0", etc.).
+    Specific(String),
+    /// Tied to another operand by index (e.g., "0", "1").
+    Tied(usize),
+    /// Immediate value (RISC-V "I", "i", "n").
+    Immediate,
+    /// Address for atomic ops (RISC-V "A").
+    Address,
+    /// Zero-or-register (RISC-V "rJ", "J").
+    ZeroOrReg,
+}
+
+/// Per-operand state tracked by the shared inline asm framework.
+/// Backends populate arch-specific fields (mem_addr, mem_offset, imm_value)
+/// during constraint classification.
+#[derive(Debug, Clone)]
+pub struct AsmOperand {
+    pub kind: AsmOperandKind,
+    pub reg: String,
+    pub name: Option<String>,
+    /// x86: memory address string like "offset(%rbp)".
+    pub mem_addr: String,
+    /// RISC-V/ARM: stack offset for memory/address operands.
+    pub mem_offset: i64,
+    /// Immediate value for "I"/"i" constraints.
+    pub imm_value: Option<i64>,
+}
+
+impl AsmOperand {
+    pub fn new(kind: AsmOperandKind, name: Option<String>) -> Self {
+        Self { kind, reg: String::new(), name, mem_addr: String::new(), mem_offset: 0, imm_value: None }
+    }
+}
+
+/// Trait that backends implement to provide architecture-specific inline asm behavior.
+/// The shared `emit_inline_asm_common` function calls these methods to handle the
+/// architecture-dependent parts of inline assembly processing.
+pub trait InlineAsmEmitter {
+    /// Mutable access to the codegen state (for emitting instructions).
+    fn asm_state(&mut self) -> &mut CodegenState;
+    /// Immutable access to the codegen state.
+    fn asm_state_ref(&self) -> &CodegenState;
+
+    /// Classify a constraint string into an AsmOperandKind, and optionally
+    /// return the specific register name for Specific constraints.
+    fn classify_constraint(&self, constraint: &str) -> AsmOperandKind;
+
+    /// Set up arch-specific operand metadata after classification.
+    /// Called once per operand. For memory/address operands, set mem_addr or mem_offset.
+    /// For immediate operands, set imm_value. The `val` is the IR value associated
+    /// with this operand (output pointer for outputs, input value for inputs).
+    fn setup_operand_metadata(&self, op: &mut AsmOperand, val: &Operand, is_output: bool);
+
+    /// Assign the next available scratch register for the given operand kind.
+    /// Returns the register name. Called during Phase 1 for operands without
+    /// specific register assignments.
+    fn assign_scratch_reg(&mut self, kind: &AsmOperandKind) -> String;
+
+    /// Load an input value into its assigned register. Called during Phase 2.
+    fn load_input_to_reg(&mut self, op: &AsmOperand, val: &Operand, constraint: &str);
+
+    /// Pre-load a read-write ("+") output's current value into its register.
+    fn preload_readwrite_output(&mut self, op: &AsmOperand, ptr: &Value);
+
+    /// Substitute operand references in a single template line and return the result.
+    fn substitute_template_line(&self, line: &str, operands: &[AsmOperand], gcc_to_internal: &[usize], operand_types: &[IrType]) -> String;
+
+    /// Store an output register value back to its stack slot after the asm executes.
+    fn store_output_from_reg(&mut self, op: &AsmOperand, ptr: &Value, constraint: &str);
+
+    /// Reset scratch register allocation state (called at start of each inline asm).
+    fn reset_scratch_state(&mut self);
+}
+
+/// Shared inline assembly emission logic. All three backends call this from their
+/// `emit_inline_asm` implementation, providing an `InlineAsmEmitter` to handle
+/// arch-specific details.
+///
+/// The 4-phase structure is:
+/// 1. Classify constraints, assign registers (specific first, then scratch), resolve ties
+/// 2. Load input values into registers, pre-load read-write outputs
+/// 3. Substitute operand references in template and emit
+/// 4. Store output registers back to stack slots
+pub fn emit_inline_asm_common(
+    emitter: &mut dyn InlineAsmEmitter,
+    template: &str,
+    outputs: &[(String, Value, Option<String>)],
+    inputs: &[(String, Operand, Option<String>)],
+    operand_types: &[IrType],
+) {
+    emitter.reset_scratch_state();
+    let total_operands = outputs.len() + inputs.len();
+
+    // Phase 1: Classify all operands and assign registers
+    let mut operands: Vec<AsmOperand> = Vec::with_capacity(total_operands);
+
+    // Classify outputs
+    for (constraint, ptr, name) in outputs {
+        let kind = emitter.classify_constraint(constraint);
+        let mut op = AsmOperand::new(kind, name.clone());
+        // Set up specific register if classified as Specific
+        if let AsmOperandKind::Specific(ref reg) = op.kind {
+            op.reg = reg.clone();
+        }
+        let val = Operand::Value(*ptr);
+        emitter.setup_operand_metadata(&mut op, &val, true);
+        operands.push(op);
+    }
+
+    // Track which inputs are tied (to avoid assigning scratch regs)
+    let mut input_tied_to: Vec<Option<usize>> = Vec::with_capacity(inputs.len());
+
+    // Classify inputs
+    for (constraint, val, name) in inputs {
+        let kind = emitter.classify_constraint(constraint);
+        let mut op = AsmOperand::new(kind.clone(), name.clone());
+        if let AsmOperandKind::Specific(ref reg) = op.kind {
+            op.reg = reg.clone();
+        }
+        if let AsmOperandKind::Tied(idx) = &kind {
+            input_tied_to.push(Some(*idx));
+        } else {
+            input_tied_to.push(None);
+        }
+        emitter.setup_operand_metadata(&mut op, val, false);
+        operands.push(op);
+    }
+
+    // Assign scratch registers to operands that need them (not specific, not memory,
+    // not immediate, not tied)
+    for i in 0..total_operands {
+        if !operands[i].reg.is_empty() {
+            continue;
+        }
+        match &operands[i].kind {
+            AsmOperandKind::Memory | AsmOperandKind::Immediate => continue,
+            AsmOperandKind::Tied(_) => continue,
+            kind => {
+                // Check if this is a tied input
+                let is_tied = if i >= outputs.len() {
+                    input_tied_to[i - outputs.len()].is_some()
+                } else {
+                    false
+                };
+                if !is_tied {
+                    operands[i].reg = emitter.assign_scratch_reg(kind);
+                }
+            }
+        }
+    }
+
+    // Resolve tied operands: copy register and metadata from the target operand
+    for i in 0..total_operands {
+        if let AsmOperandKind::Tied(tied_to) = operands[i].kind.clone() {
+            if tied_to < operands.len() {
+                operands[i].reg = operands[tied_to].reg.clone();
+                operands[i].mem_addr = operands[tied_to].mem_addr.clone();
+                operands[i].mem_offset = operands[tied_to].mem_offset;
+                if matches!(operands[tied_to].kind, AsmOperandKind::Memory) {
+                    operands[i].kind = AsmOperandKind::Memory;
+                } else if matches!(operands[tied_to].kind, AsmOperandKind::Address) {
+                    operands[i].kind = AsmOperandKind::Address;
+                }
+            }
+        }
+    }
+    // Also check via input_tied_to for x86-style tied operands (not classified as Tied kind)
+    for (i, tied_to) in input_tied_to.iter().enumerate() {
+        if let Some(tied_to) = tied_to {
+            let op_idx = outputs.len() + i;
+            if *tied_to < operands.len() && operands[op_idx].reg.is_empty() {
+                operands[op_idx].reg = operands[*tied_to].reg.clone();
+                operands[op_idx].mem_addr = operands[*tied_to].mem_addr.clone();
+                operands[op_idx].mem_offset = operands[*tied_to].mem_offset;
+                if matches!(operands[*tied_to].kind, AsmOperandKind::Memory) {
+                    operands[op_idx].kind = AsmOperandKind::Memory;
+                }
+            }
+        }
+    }
+
+    // Handle "+" read-write constraints: synthetic inputs share the output's register.
+    // The IR lowering adds synthetic inputs at the BEGINNING of the inputs list
+    // (one per "+" output, in order).
+    let mut plus_idx = 0;
+    for (i, (constraint, _, _)) in outputs.iter().enumerate() {
+        if constraint.contains('+') {
+            let plus_input_idx = outputs.len() + plus_idx;
+            if plus_input_idx < total_operands {
+                operands[plus_input_idx].reg = operands[i].reg.clone();
+                operands[plus_input_idx].kind = operands[i].kind.clone();
+                operands[plus_input_idx].mem_addr = operands[i].mem_addr.clone();
+                operands[plus_input_idx].mem_offset = operands[i].mem_offset;
+            }
+            plus_idx += 1;
+        }
+    }
+
+    // Build GCC operand number → internal index mapping.
+    // GCC numbers: outputs first, then EXPLICIT inputs (synthetic "+" inputs are hidden).
+    let num_plus = outputs.iter().filter(|(c,_,_)| c.contains('+')).count();
+    let num_gcc_operands = outputs.len() + (inputs.len() - num_plus);
+    let mut gcc_to_internal: Vec<usize> = Vec::with_capacity(num_gcc_operands);
+    for i in 0..outputs.len() {
+        gcc_to_internal.push(i);
+    }
+    for i in num_plus..inputs.len() {
+        gcc_to_internal.push(outputs.len() + i);
+    }
+
+    // Phase 2: Load input values into their assigned registers
+    for (i, (constraint, val, _)) in inputs.iter().enumerate() {
+        let op_idx = outputs.len() + i;
+        match &operands[op_idx].kind {
+            AsmOperandKind::Memory | AsmOperandKind::Immediate => continue,
+            _ => {}
+        }
+        if operands[op_idx].reg.is_empty() {
+            continue;
+        }
+        emitter.load_input_to_reg(&operands[op_idx], val, constraint);
+    }
+
+    // Pre-load read-write output values
+    for (i, (constraint, ptr, _)) in outputs.iter().enumerate() {
+        if constraint.contains('+') {
+            if !matches!(operands[i].kind, AsmOperandKind::Memory) {
+                emitter.preload_readwrite_output(&operands[i], ptr);
+            }
+        }
+    }
+
+    // Phase 3: Substitute operand references in template and emit
+    let lines: Vec<&str> = template.split('\n').collect();
+    for line in &lines {
+        let line = line.trim().trim_start_matches('\t').trim();
+        if line.is_empty() {
+            continue;
+        }
+        let resolved = emitter.substitute_template_line(line, &operands, &gcc_to_internal, operand_types);
+        emitter.asm_state().emit(&format!("    {}", resolved));
+    }
+
+    // Phase 4: Store output register values back to their stack slots
+    for (i, (constraint, ptr, _)) in outputs.iter().enumerate() {
+        if constraint.contains('=') || constraint.contains('+') {
+            emitter.store_output_from_reg(&operands[i], ptr, constraint);
+        }
+    }
 }

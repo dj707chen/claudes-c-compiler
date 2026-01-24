@@ -556,6 +556,33 @@ impl Lowerer {
 
             let field_ty = &layout.fields[field_idx].ty;
 
+            // Handle nested designators: e.g., .u.keyword={"hello", -5}
+            // The item targets a sub-member of a struct/union field.
+            // We must check the designated sub-member for addr fields, not the
+            // outer field type directly.
+            let has_nested_designator = item.designators.len() > 1
+                && matches!(item.designators.first(), Some(Designator::Field(_)));
+
+            if has_nested_designator {
+                // Drill into the sub-composite with remaining designators
+                let sub_item = InitializerItem {
+                    designators: item.designators[1..].to_vec(),
+                    init: item.init.clone(),
+                };
+                if let Some(sub_layout) = self.get_struct_layout_for_ctype(field_ty) {
+                    if self.struct_init_has_addr_fields(&[sub_item], &sub_layout) {
+                        return true;
+                    }
+                }
+                // Also check if the init itself contains addr exprs (fallback)
+                if self.init_has_addr_exprs(&item.init) {
+                    return true;
+                }
+                current_field_idx = field_idx + 1;
+                item_idx += 1;
+                continue;
+            }
+
             match &item.init {
                 Initializer::Expr(expr) => {
                     // Direct string literal or address expression

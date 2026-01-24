@@ -17,6 +17,11 @@ Completed items:
 - emit_binop decomposed: default dispatches float→emit_float_binop, int→emit_int_binop.
   x86-64 overrides emit_binop for 128-bit integer arithmetic.
   Each backend provides arch-specific emit_float_binop and emit_int_binop.
+- emit_inline_asm: Shared InlineAsmEmitter trait + emit_inline_asm_common() function
+  extracts the 4-phase operand handling framework (classify constraints, assign registers,
+  resolve tied/+ operands, build GCC numbering, load inputs, emit template, store outputs).
+  Each backend implements InlineAsmEmitter with arch-specific constraint classification,
+  register pools, load/store, and template substitution.
 
 Remaining opportunities (diminishing returns):
 
@@ -28,8 +33,3 @@ Remaining opportunities (diminishing returns):
 2. emit_memcpy: ARM and RISC-V share the same loop algorithm but differ in addressing
    modes (ARM post-increment vs RISC-V explicit pointer advance). x86 uses rep movsb.
    The savings are marginal (~10 lines) since the loop bodies are structurally different.
-
-3. emit_inline_asm: All three backends share a 4-phase operand handling framework
-   (assign registers, handle + constraints, load inputs, substitute template).
-   A shared framework could save ~100 lines, but the register constraint classification
-   is deeply arch-specific. Medium effort, medium reward.

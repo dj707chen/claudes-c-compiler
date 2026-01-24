@@ -15,6 +15,9 @@ pub struct RiscvCodegen {
     current_frame_size: i64,
     /// Whether the current function is variadic.
     is_variadic: bool,
+    /// Scratch register indices for inline asm allocation.
+    asm_gp_scratch_idx: usize,
+    asm_fp_scratch_idx: usize,
 }
 
 impl RiscvCodegen {
@@ -25,6 +28,8 @@ impl RiscvCodegen {
             va_named_gp_count: 0,
             current_frame_size: 0,
             is_variadic: false,
+            asm_gp_scratch_idx: 0,
+            asm_fp_scratch_idx: 0,
         }
     }
 
@@ -181,6 +186,288 @@ impl RiscvCodegen {
         }
     }
 
+    // --- 128-bit integer helpers ---
+    // Convention: 128-bit values use t0 (low 64 bits) and t1 (high 64 bits).
+    // Stack slots for 128-bit values are 16 bytes: slot(s0) = low, slot+8(s0) = high.
+
+    /// Load a 128-bit operand into t0 (low) : t1 (high).
+    fn operand_to_t0_t1(&mut self, op: &Operand) {
+        match op {
+            Operand::Const(c) => {
+                match c {
+                    IrConst::I128(v) => {
+                        let low = *v as u64 as i64;
+                        let high = (*v >> 64) as u64 as i64;
+                        self.state.emit(&format!("    li t0, {}", low));
+                        self.state.emit(&format!("    li t1, {}", high));
+                    }
+                    IrConst::Zero => {
+                        self.state.emit("    li t0, 0");
+                        self.state.emit("    li t1, 0");
+                    }
+                    _ => {
+                        self.operand_to_t0(op);
+                        self.state.emit("    li t1, 0");
+                    }
+                }
+            }
+            Operand::Value(v) => {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    if self.state.is_alloca(v.0) {
+                        self.emit_addi_s0("t0", slot.0);
+                        self.state.emit("    li t1, 0");
+                    } else {
+                        // 128-bit value in 16-byte stack slot
+                        self.emit_load_from_s0("t0", slot.0, "ld");
+                        self.emit_load_from_s0("t1", slot.0 + 8, "ld");
+                    }
+                } else {
+                    self.state.emit("    li t0, 0");
+                    self.state.emit("    li t1, 0");
+                }
+            }
+        }
+    }
+
+    /// Store t0 (low) : t1 (high) to a 128-bit value's stack slot.
+    fn store_t0_t1_to(&mut self, dest: &Value) {
+        if let Some(slot) = self.state.get_slot(dest.0) {
+            self.emit_store_to_s0("t0", slot.0, "sd");
+            self.emit_store_to_s0("t1", slot.0 + 8, "sd");
+        }
+    }
+
+    /// Prepare a 128-bit binary operation: load lhs into t3:t4, rhs into t5:t6.
+    fn prep_i128_binop(&mut self, lhs: &Operand, rhs: &Operand) {
+        self.operand_to_t0_t1(lhs);
+        self.state.emit("    mv t3, t0");
+        self.state.emit("    mv t4, t1");
+        self.operand_to_t0_t1(rhs);
+        self.state.emit("    mv t5, t0");
+        self.state.emit("    mv t6, t1");
+    }
+
+    /// Emit a 128-bit integer binary operation.
+    fn emit_i128_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand) {
+        match op {
+            IrBinOp::Add => {
+                // 128-bit add with carry: result_lo = a_lo + b_lo, carry = (result_lo < a_lo)
+                // result_hi = a_hi + b_hi + carry
+                self.prep_i128_binop(lhs, rhs);
+                self.state.emit("    add t0, t3, t5");        // t0 = a_lo + b_lo
+                self.state.emit("    sltu t2, t0, t3");       // t2 = carry
+                self.state.emit("    add t1, t4, t6");        // t1 = a_hi + b_hi
+                self.state.emit("    add t1, t1, t2");        // t1 += carry
+            }
+            IrBinOp::Sub => {
+                // 128-bit sub with borrow: result_lo = a_lo - b_lo, borrow = (a_lo < b_lo)
+                // result_hi = a_hi - b_hi - borrow
+                self.prep_i128_binop(lhs, rhs);
+                self.state.emit("    sltu t2, t3, t5");       // t2 = borrow (a_lo < b_lo)
+                self.state.emit("    sub t0, t3, t5");        // t0 = a_lo - b_lo
+                self.state.emit("    sub t1, t4, t6");        // t1 = a_hi - b_hi
+                self.state.emit("    sub t1, t1, t2");        // t1 -= borrow
+            }
+            IrBinOp::Mul => {
+                // 128-bit multiply using mulhu for widening
+                // result_lo = a_lo * b_lo (low 64 bits)
+                // result_hi = mulhu(a_lo, b_lo) + a_hi*b_lo + a_lo*b_hi
+                self.prep_i128_binop(lhs, rhs);
+                // t3:t4 = lhs, t5:t6 = rhs
+                self.state.emit("    mul t0, t3, t5");        // t0 = lo(a_lo * b_lo)
+                self.state.emit("    mulhu t1, t3, t5");      // t1 = hi(a_lo * b_lo)
+                self.state.emit("    mul t2, t4, t5");        // t2 = a_hi * b_lo (low 64)
+                self.state.emit("    add t1, t1, t2");        // t1 += a_hi * b_lo
+                self.state.emit("    mul t2, t3, t6");        // t2 = a_lo * b_hi (low 64)
+                self.state.emit("    add t1, t1, t2");        // t1 += a_lo * b_hi
+            }
+            IrBinOp::And => {
+                self.prep_i128_binop(lhs, rhs);
+                self.state.emit("    and t0, t3, t5");
+                self.state.emit("    and t1, t4, t6");
+            }
+            IrBinOp::Or => {
+                self.prep_i128_binop(lhs, rhs);
+                self.state.emit("    or t0, t3, t5");
+                self.state.emit("    or t1, t4, t6");
+            }
+            IrBinOp::Xor => {
+                self.prep_i128_binop(lhs, rhs);
+                self.state.emit("    xor t0, t3, t5");
+                self.state.emit("    xor t1, t4, t6");
+            }
+            IrBinOp::Shl => {
+                // 128-bit left shift
+                self.prep_i128_binop(lhs, rhs);
+                // t3:t4 = value, t5 = shift amount
+                let lbl = self.state.fresh_label("shl128");
+                let done = self.state.fresh_label("shl128_done");
+                let noop = self.state.fresh_label("shl128_noop");
+                self.state.emit("    andi t5, t5, 127");        // mask to 0-127
+                self.state.emit(&format!("    beqz t5, {}", noop));
+                self.state.emit("    li t2, 64");
+                self.state.emit(&format!("    bge t5, t2, {}", lbl));
+                // shift < 64: hi = (hi << n) | (lo >> (64-n)), lo = lo << n
+                self.state.emit("    sll t1, t4, t5");
+                self.state.emit("    sub t2, t2, t5");  // t2 = 64 - n
+                self.state.emit("    srl t6, t3, t2");
+                self.state.emit("    or t1, t1, t6");
+                self.state.emit("    sll t0, t3, t5");
+                self.state.emit(&format!("    j {}", done));
+                // shift >= 64: hi = lo << (n-64), lo = 0
+                self.state.emit(&format!("{}:", lbl));
+                self.state.emit("    li t2, 64");
+                self.state.emit("    sub t5, t5, t2");
+                self.state.emit("    sll t1, t3, t5");
+                self.state.emit("    li t0, 0");
+                self.state.emit(&format!("    j {}", done));
+                // shift == 0: just copy
+                self.state.emit(&format!("{}:", noop));
+                self.state.emit("    mv t0, t3");
+                self.state.emit("    mv t1, t4");
+                self.state.emit(&format!("{}:", done));
+            }
+            IrBinOp::LShr => {
+                // 128-bit logical right shift
+                self.prep_i128_binop(lhs, rhs);
+                let lbl = self.state.fresh_label("lshr128");
+                let done = self.state.fresh_label("lshr128_done");
+                let noop = self.state.fresh_label("lshr128_noop");
+                self.state.emit("    andi t5, t5, 127");
+                self.state.emit(&format!("    beqz t5, {}", noop));
+                self.state.emit("    li t2, 64");
+                self.state.emit(&format!("    bge t5, t2, {}", lbl));
+                // shift < 64: lo = (lo >> n) | (hi << (64-n)), hi = hi >> n
+                self.state.emit("    srl t0, t3, t5");
+                self.state.emit("    sub t2, t2, t5");
+                self.state.emit("    sll t6, t4, t2");
+                self.state.emit("    or t0, t0, t6");
+                self.state.emit("    srl t1, t4, t5");
+                self.state.emit(&format!("    j {}", done));
+                // shift >= 64: lo = hi >> (n-64), hi = 0
+                self.state.emit(&format!("{}:", lbl));
+                self.state.emit("    li t2, 64");
+                self.state.emit("    sub t5, t5, t2");
+                self.state.emit("    srl t0, t4, t5");
+                self.state.emit("    li t1, 0");
+                self.state.emit(&format!("    j {}", done));
+                self.state.emit(&format!("{}:", noop));
+                self.state.emit("    mv t0, t3");
+                self.state.emit("    mv t1, t4");
+                self.state.emit(&format!("{}:", done));
+            }
+            IrBinOp::AShr => {
+                // 128-bit arithmetic right shift
+                self.prep_i128_binop(lhs, rhs);
+                let lbl = self.state.fresh_label("ashr128");
+                let done = self.state.fresh_label("ashr128_done");
+                let noop = self.state.fresh_label("ashr128_noop");
+                self.state.emit("    andi t5, t5, 127");
+                self.state.emit(&format!("    beqz t5, {}", noop));
+                self.state.emit("    li t2, 64");
+                self.state.emit(&format!("    bge t5, t2, {}", lbl));
+                // shift < 64: lo = (lo >> n) | (hi << (64-n)), hi = hi >>a n
+                self.state.emit("    srl t0, t3, t5");
+                self.state.emit("    sub t2, t2, t5");
+                self.state.emit("    sll t6, t4, t2");
+                self.state.emit("    or t0, t0, t6");
+                self.state.emit("    sra t1, t4, t5");
+                self.state.emit(&format!("    j {}", done));
+                // shift >= 64: lo = hi >>a (n-64), hi = hi >>a 63
+                self.state.emit(&format!("{}:", lbl));
+                self.state.emit("    li t2, 64");
+                self.state.emit("    sub t5, t5, t2");
+                self.state.emit("    sra t0, t4, t5");
+                self.state.emit("    srai t1, t4, 63");
+                self.state.emit(&format!("    j {}", done));
+                self.state.emit(&format!("{}:", noop));
+                self.state.emit("    mv t0, t3");
+                self.state.emit("    mv t1, t4");
+                self.state.emit(&format!("{}:", done));
+            }
+            IrBinOp::SDiv | IrBinOp::UDiv | IrBinOp::SRem | IrBinOp::URem => {
+                // Call compiler-rt helper functions
+                let func_name = match op {
+                    IrBinOp::SDiv => "__divti3",
+                    IrBinOp::UDiv => "__udivti3",
+                    IrBinOp::SRem => "__modti3",
+                    IrBinOp::URem => "__umodti3",
+                    _ => unreachable!(),
+                };
+                // RISC-V LP64D: first 128-bit arg in a0:a1, second in a2:a3
+                self.operand_to_t0_t1(lhs);
+                self.state.emit("    mv a0, t0");
+                self.state.emit("    mv a1, t1");
+                self.operand_to_t0_t1(rhs);
+                self.state.emit("    mv a2, t0");
+                self.state.emit("    mv a3, t1");
+                self.state.emit(&format!("    call {}", func_name));
+                // Result in a0:a1
+                self.state.emit("    mv t0, a0");
+                self.state.emit("    mv t1, a1");
+            }
+        }
+        self.store_t0_t1_to(dest);
+    }
+
+    /// Emit a 128-bit comparison.
+    fn emit_i128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand) {
+        self.prep_i128_binop(lhs, rhs);
+        // t3:t4 = lhs, t5:t6 = rhs
+        match op {
+            IrCmpOp::Eq => {
+                // XOR both halves and OR the differences
+                self.state.emit("    xor t0, t3, t5");
+                self.state.emit("    xor t1, t4, t6");
+                self.state.emit("    or t0, t0, t1");
+                self.state.emit("    seqz t0, t0");
+            }
+            IrCmpOp::Ne => {
+                self.state.emit("    xor t0, t3, t5");
+                self.state.emit("    xor t1, t4, t6");
+                self.state.emit("    or t0, t0, t1");
+                self.state.emit("    snez t0, t0");
+            }
+            _ => {
+                // Ordered comparisons: compare high halves first
+                let done = self.state.fresh_label("cmp128_done");
+                let hi_equal = self.state.fresh_label("cmp128_hi_eq");
+                // Compare high halves
+                self.state.emit(&format!("    bne t4, t6, {}", done));
+                // High halves equal, compare low halves (always unsigned)
+                self.state.emit(&format!("    j {}", hi_equal));
+                // hi != hi: set result based on high comparison
+                self.state.emit(&format!("{}:", done));
+                match op {
+                    IrCmpOp::Slt | IrCmpOp::Sle => self.state.emit("    slt t0, t4, t6"),
+                    IrCmpOp::Sgt | IrCmpOp::Sge => self.state.emit("    slt t0, t6, t4"),
+                    IrCmpOp::Ult | IrCmpOp::Ule => self.state.emit("    sltu t0, t4, t6"),
+                    IrCmpOp::Ugt | IrCmpOp::Uge => self.state.emit("    sltu t0, t6, t4"),
+                    _ => unreachable!(),
+                }
+                let end = self.state.fresh_label("cmp128_end");
+                self.state.emit(&format!("    j {}", end));
+                // High halves equal: compare low halves (unsigned for all orderings)
+                self.state.emit(&format!("{}:", hi_equal));
+                match op {
+                    IrCmpOp::Slt | IrCmpOp::Ult => self.state.emit("    sltu t0, t3, t5"),
+                    IrCmpOp::Sle | IrCmpOp::Ule => {
+                        self.state.emit("    sltu t0, t5, t3");
+                        self.state.emit("    xori t0, t0, 1");
+                    }
+                    IrCmpOp::Sgt | IrCmpOp::Ugt => self.state.emit("    sltu t0, t5, t3"),
+                    IrCmpOp::Sge | IrCmpOp::Uge => {
+                        self.state.emit("    sltu t0, t3, t5");
+                        self.state.emit("    xori t0, t0, 1");
+                    }
+                    _ => unreachable!(),
+                }
+                self.state.emit(&format!("{}:", end));
+            }
+        }
+        self.store_t0_to(dest);
+    }
+
     fn store_for_type(ty: IrType) -> &'static str {
         match ty {
             IrType::I8 | IrType::U8 => "sb",
@@ -303,6 +590,7 @@ impl ArchCodegen for RiscvCodegen {
 
         for (_i, param) in func.params.iter().enumerate() {
             let is_long_double = param.ty.is_long_double();
+            let is_i128_param = is_i128_type(param.ty);
             let is_float = param.ty.is_float() && !is_long_double;
 
             // For variadic functions: ALL args (including floats) go through GP registers.
@@ -313,9 +601,11 @@ impl ArchCodegen for RiscvCodegen {
                 is_float && float_reg_idx >= 8 && int_reg_idx < 8
             };
 
-            let is_stack_passed = if func.is_variadic {
-                // In variadic functions, all args go through GP regs (a0-a7).
-                // F128 takes 2 GP regs (aligned to even).
+            let is_stack_passed = if is_i128_param {
+                // 128-bit integer needs aligned register pair
+                let aligned = (int_reg_idx + 1) & !1;
+                aligned + 1 >= 8
+            } else if func.is_variadic {
                 if is_long_double {
                     let aligned = (int_reg_idx + 1) & !1;
                     aligned + 1 >= 8
@@ -323,11 +613,9 @@ impl ArchCodegen for RiscvCodegen {
                     int_reg_idx >= 8
                 }
             } else if is_long_double {
-                // F128 needs an aligned pair of GP regs
-                let aligned = (int_reg_idx + 1) & !1; // align to even
+                let aligned = (int_reg_idx + 1) & !1;
                 aligned + 1 >= 8
             } else if is_float {
-                // FP args spill to GPRs first, then to stack
                 float_reg_idx >= 8 && int_reg_idx >= 8
             } else {
                 int_reg_idx >= 8
@@ -335,22 +623,22 @@ impl ArchCodegen for RiscvCodegen {
 
             if param.name.is_empty() {
                 if is_stack_passed {
-                    if is_long_double {
+                    if is_i128_param || is_long_double {
                         stack_param_offset = (stack_param_offset + 15) & !15;
                         stack_param_offset += 16;
-                        int_reg_idx = 8; // consumed all GP regs
+                        int_reg_idx = 8;
                     } else {
                         stack_param_offset += 8;
                     }
+                } else if is_i128_param {
+                    if int_reg_idx % 2 != 0 { int_reg_idx += 1; }
+                    int_reg_idx += 2;
                 } else if is_long_double {
-                    // Align to even GP register
                     if int_reg_idx % 2 != 0 { int_reg_idx += 1; }
                     int_reg_idx += 2;
                 } else if func.is_variadic {
-                    // All args in variadic functions go through GP regs
                     int_reg_idx += 1;
                 } else if is_float_in_gpr {
-                    // FP arg spilled to GPR - consume a GPR slot
                     int_reg_idx += 1;
                 } else if is_float {
                     float_reg_idx += 1;
@@ -361,7 +649,42 @@ impl ArchCodegen for RiscvCodegen {
             }
             if let Some((dest, ty)) = find_param_alloca(func, _i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
-                    if func.is_variadic {
+                    // Handle i128 parameters first (both variadic and non-variadic)
+                    if is_i128_param && !is_stack_passed {
+                        // 128-bit integer in aligned GP register pair
+                        if int_reg_idx % 2 != 0 { int_reg_idx += 1; }
+                        if func.is_variadic {
+                            // Load from register save area at s0+idx*8
+                            let lo_off = (int_reg_idx as i64) * 8;
+                            let hi_off = ((int_reg_idx + 1) as i64) * 8;
+                            self.emit_load_from_s0("t0", lo_off, "ld");
+                            self.emit_store_to_s0("t0", slot.0, "sd");
+                            self.emit_load_from_s0("t0", hi_off, "ld");
+                            self.emit_store_to_s0("t0", slot.0 + 8, "sd");
+                        } else if has_f128_reg_params {
+                            // Load from GP save area
+                            let lo_off = f128_save_offset + (int_reg_idx as i64) * 8;
+                            let hi_off = f128_save_offset + ((int_reg_idx + 1) as i64) * 8;
+                            self.state.emit(&format!("    ld t0, {}(sp)", lo_off));
+                            self.emit_store_to_s0("t0", slot.0, "sd");
+                            self.state.emit(&format!("    ld t0, {}(sp)", hi_off));
+                            self.emit_store_to_s0("t0", slot.0 + 8, "sd");
+                        } else {
+                            // Direct from registers
+                            self.emit_store_to_s0(RISCV_ARG_REGS[int_reg_idx], slot.0, "sd");
+                            self.emit_store_to_s0(RISCV_ARG_REGS[int_reg_idx + 1], slot.0 + 8, "sd");
+                        }
+                        int_reg_idx += 2;
+                    } else if is_i128_param && is_stack_passed {
+                        // 128-bit integer on stack
+                        stack_param_offset = (stack_param_offset + 15) & !15;
+                        self.emit_load_from_s0("t0", stack_param_offset, "ld");
+                        self.emit_store_to_s0("t0", slot.0, "sd");
+                        self.emit_load_from_s0("t0", stack_param_offset + 8, "ld");
+                        self.emit_store_to_s0("t0", slot.0 + 8, "sd");
+                        stack_param_offset += 16;
+                        int_reg_idx = 8;
+                    } else if func.is_variadic {
                         // In variadic functions, ALL named params come through GP registers.
                         // We already saved a0-a7 at s0+0..s0+56. Load from the save area.
                         if is_long_double && !is_stack_passed {
@@ -527,6 +850,24 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
+        if is_i128_type(ty) {
+            // 128-bit store: load value into t0:t1, then store both halves
+            self.operand_to_t0_t1(val);
+            if let Some(slot) = self.state.get_slot(ptr.0) {
+                if self.state.is_alloca(ptr.0) {
+                    self.emit_store_to_s0("t0", slot.0, "sd");
+                    self.emit_store_to_s0("t1", slot.0 + 8, "sd");
+                } else {
+                    // ptr is indirect: save t0:t1, load ptr, then store
+                    self.state.emit("    mv t3, t0");
+                    self.state.emit("    mv t4, t1");
+                    self.emit_load_from_s0("t5", slot.0, "ld");
+                    self.state.emit("    sd t3, 0(t5)");
+                    self.state.emit("    sd t4, 8(t5)");
+                }
+            }
+            return;
+        }
         self.operand_to_t0(val);
         if let Some(slot) = self.state.get_slot(ptr.0) {
             if self.state.is_alloca(ptr.0) {
@@ -542,6 +883,21 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) {
+        if is_i128_type(ty) {
+            // 128-bit load: load both halves into t0:t1
+            if let Some(slot) = self.state.get_slot(ptr.0) {
+                if self.state.is_alloca(ptr.0) {
+                    self.emit_load_from_s0("t0", slot.0, "ld");
+                    self.emit_load_from_s0("t1", slot.0 + 8, "ld");
+                } else {
+                    self.emit_load_from_s0("t2", slot.0, "ld");
+                    self.state.emit("    ld t0, 0(t2)");
+                    self.state.emit("    ld t1, 8(t2)");
+                }
+                self.store_t0_t1_to(dest);
+            }
+            return;
+        }
         if let Some(slot) = self.state.get_slot(ptr.0) {
             if self.state.is_alloca(ptr.0) {
                 let load_instr = Self::load_for_type(ty);
@@ -582,6 +938,11 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        if is_i128_type(ty) {
+            self.emit_i128_binop(dest, op, lhs, rhs);
+            return;
+        }
+
         self.operand_to_t0(lhs);
         self.state.emit("    mv t1, t0");
         self.operand_to_t0(rhs);
@@ -611,6 +972,26 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
+        if is_i128_type(ty) {
+            self.operand_to_t0_t1(src);
+            match op {
+                IrUnaryOp::Neg => {
+                    // 128-bit negate: ~x + 1
+                    self.state.emit("    not t0, t0");
+                    self.state.emit("    not t1, t1");
+                    self.state.emit("    addi t0, t0, 1");
+                    self.state.emit("    seqz t2, t0");    // carry if t0 wrapped to 0
+                    self.state.emit("    add t1, t1, t2");
+                }
+                IrUnaryOp::Not => {
+                    self.state.emit("    not t0, t0");
+                    self.state.emit("    not t1, t1");
+                }
+                _ => {} // Clz/Ctz/Bswap/Popcount not expected for 128-bit
+            }
+            self.store_t0_t1_to(dest);
+            return;
+        }
         self.operand_to_t0(src);
         if ty.is_float() {
             match op {
@@ -651,6 +1032,11 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
+        if is_i128_type(ty) {
+            self.emit_i128_cmp(dest, op, lhs, rhs);
+            return;
+        }
+
         self.operand_to_t0(lhs);
         self.state.emit("    mv t1, t0");
         self.operand_to_t0(rhs);
@@ -731,9 +1117,10 @@ impl ArchCodegen for RiscvCodegen {
         let float_arg_regs = ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"];
 
         // Phase 1: Classify all args into register assignments or stack overflow.
-        // 'I' = GP register, 'F' = FP register, 'Q' = F128 GP register pair, 'S' = stack, 'T' = F128 stack
+        // 'I' = GP register, 'F' = FP register, 'Q' = F128 GP register pair,
+        // 'W' = i128 GP register pair, 'S' = stack, 'T' = F128 stack, 'X' = i128 stack
         let mut arg_classes: Vec<char> = Vec::new();
-        let mut arg_int_indices: Vec<usize> = Vec::new(); // GP reg index for 'I' or base index for 'Q'
+        let mut arg_int_indices: Vec<usize> = Vec::new(); // GP reg index for 'I' or base index for 'Q'/'W'
         let mut arg_fp_indices: Vec<usize> = Vec::new();  // FP reg index for 'F'
         let mut int_idx = 0usize;
         let mut float_idx = 0usize;
@@ -744,13 +1131,32 @@ impl ArchCodegen for RiscvCodegen {
             } else {
                 false
             };
+            let is_i128_arg = if i < arg_types.len() {
+                is_i128_type(arg_types[i])
+            } else {
+                false
+            };
             let is_float_arg = if i < arg_types.len() {
                 arg_types[i].is_float()
             } else {
                 matches!(args[i], Operand::Const(IrConst::F32(_) | IrConst::F64(_)))
             };
 
-            if is_long_double {
+            if is_i128_arg {
+                // 128-bit integer: needs aligned register pair
+                if int_idx % 2 != 0 { int_idx += 1; }
+                if int_idx + 1 < 8 {
+                    arg_classes.push('W'); // i128 register pair
+                    arg_int_indices.push(int_idx);
+                    arg_fp_indices.push(0);
+                    int_idx += 2;
+                } else {
+                    arg_classes.push('X'); // i128 stack overflow
+                    arg_int_indices.push(0);
+                    arg_fp_indices.push(0);
+                    int_idx = 8;
+                }
+            } else if is_long_double {
                 // Align int_idx to even for register pair
                 if int_idx % 2 != 0 {
                     int_idx += 1;
@@ -816,15 +1222,16 @@ impl ArchCodegen for RiscvCodegen {
         }
 
         // Phase 3: Handle stack overflow args.
-        let stack_args: Vec<(usize, bool)> = args.iter().enumerate()
-            .filter(|(i, _)| arg_classes[*i] == 'S' || arg_classes[*i] == 'T')
-            .map(|(i, _)| (i, arg_classes[i] == 'T'))
+        // 'S' = normal stack, 'T' = F128 stack, 'X' = i128 stack
+        let stack_args: Vec<(usize, char)> = args.iter().enumerate()
+            .filter(|(i, _)| arg_classes[*i] == 'S' || arg_classes[*i] == 'T' || arg_classes[*i] == 'X')
+            .map(|(i, _)| (i, arg_classes[i]))
             .collect();
 
         let mut stack_arg_space: usize = 0;
         if !stack_args.is_empty() {
-            for &(_, is_f128) in &stack_args {
-                if is_f128 {
+            for &(_, cls) in &stack_args {
+                if cls == 'T' || cls == 'X' {
                     stack_arg_space = (stack_arg_space + 15) & !15;
                     stack_arg_space += 16;
                 } else {
@@ -834,8 +1241,42 @@ impl ArchCodegen for RiscvCodegen {
             stack_arg_space = (stack_arg_space + 15) & !15;
             self.state.emit(&format!("    addi sp, sp, -{}", stack_arg_space));
             let mut offset: usize = 0;
-            for &(arg_i, is_f128) in &stack_args {
-                if is_f128 {
+            for &(arg_i, cls) in &stack_args {
+                if cls == 'X' {
+                    // 128-bit integer stack arg
+                    offset = (offset + 15) & !15;
+                    match &args[arg_i] {
+                        Operand::Const(c) => {
+                            if let IrConst::I128(v) = c {
+                                let low = *v as u64 as i64;
+                                let high = (*v >> 64) as u64 as i64;
+                                self.state.emit(&format!("    li t0, {}", low));
+                                self.state.emit(&format!("    sd t0, {}(sp)", offset));
+                                self.state.emit(&format!("    li t0, {}", high));
+                                self.state.emit(&format!("    sd t0, {}(sp)", offset + 8));
+                            } else {
+                                self.operand_to_t0(&args[arg_i]);
+                                self.state.emit(&format!("    sd t0, {}(sp)", offset));
+                                self.state.emit(&format!("    sd zero, {}(sp)", offset + 8));
+                            }
+                        }
+                        Operand::Value(v) => {
+                            if let Some(slot) = self.state.get_slot(v.0) {
+                                if self.state.is_alloca(v.0) {
+                                    self.emit_addi_s0("t0", slot.0);
+                                    self.state.emit(&format!("    sd t0, {}(sp)", offset));
+                                    self.state.emit(&format!("    sd zero, {}(sp)", offset + 8));
+                                } else {
+                                    self.emit_load_from_s0("t0", slot.0, "ld");
+                                    self.state.emit(&format!("    sd t0, {}(sp)", offset));
+                                    self.emit_load_from_s0("t0", slot.0 + 8, "ld");
+                                    self.state.emit(&format!("    sd t0, {}(sp)", offset + 8));
+                                }
+                            }
+                        }
+                    }
+                    offset += 16;
+                } else if cls == 'T' {
                     offset = (offset + 15) & !15;
                     match &args[arg_i] {
                         Operand::Const(ref c) => {
@@ -930,6 +1371,37 @@ impl ArchCodegen for RiscvCodegen {
             }
         }
 
+        // Phase 7: Load i128 register pair args into their target register pairs.
+        for (i, _arg) in args.iter().enumerate() {
+            if arg_classes[i] != 'W' { continue; }
+            let base_reg = arg_int_indices[i];
+            match &args[i] {
+                Operand::Const(c) => {
+                    if let IrConst::I128(v) = c {
+                        let low = *v as u64 as i64;
+                        let high = (*v >> 64) as u64 as i64;
+                        self.state.emit(&format!("    li {}, {}", RISCV_ARG_REGS[base_reg], low));
+                        self.state.emit(&format!("    li {}, {}", RISCV_ARG_REGS[base_reg + 1], high));
+                    } else {
+                        self.operand_to_t0(&args[i]);
+                        self.state.emit(&format!("    mv {}, t0", RISCV_ARG_REGS[base_reg]));
+                        self.state.emit(&format!("    mv {}, zero", RISCV_ARG_REGS[base_reg + 1]));
+                    }
+                }
+                Operand::Value(v) => {
+                    if let Some(slot) = self.state.get_slot(v.0) {
+                        if self.state.is_alloca(v.0) {
+                            self.emit_addi_s0(RISCV_ARG_REGS[base_reg], slot.0);
+                            self.state.emit(&format!("    mv {}, zero", RISCV_ARG_REGS[base_reg + 1]));
+                        } else {
+                            self.emit_load_from_s0(RISCV_ARG_REGS[base_reg], slot.0, "ld");
+                            self.emit_load_from_s0(RISCV_ARG_REGS[base_reg + 1], slot.0 + 8, "ld");
+                        }
+                    }
+                }
+            }
+        }
+
         // Clean up F128 temp space before the call (only if no stack overflow args below it)
         if f128_temp_space > 0 && stack_arg_space == 0 {
             self.state.emit(&format!("    addi sp, sp, {}", f128_temp_space));
@@ -952,7 +1424,11 @@ impl ArchCodegen for RiscvCodegen {
 
         if let Some(dest) = dest {
             if let Some(slot) = self.state.get_slot(dest.0) {
-                if return_type.is_long_double() {
+                if is_i128_type(return_type) {
+                    // 128-bit return: a0 = low, a1 = high per RISC-V LP64D ABI
+                    self.emit_store_to_s0("a0", slot.0, "sd");
+                    self.emit_store_to_s0("a1", slot.0 + 8, "sd");
+                } else if return_type.is_long_double() {
                     // F128 return value is in a0:a1 (GP register pair).
                     // Convert from f128 back to f64 using __trunctfdf2.
                     self.state.emit("    call __trunctfdf2");
@@ -1118,7 +1594,45 @@ impl ArchCodegen for RiscvCodegen {
         }
     }
 
-    // emit_cast uses the default from ArchCodegen: load → emit_cast_instrs → store
+    /// Override emit_cast to handle 128-bit widening/narrowing.
+    fn emit_cast(&mut self, dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType) {
+        if is_i128_type(to_ty) && !is_i128_type(from_ty) {
+            // Widening to 128-bit
+            self.operand_to_t0(src);
+            // First widen to 64-bit if needed
+            if from_ty.size() < 8 {
+                self.emit_cast_instrs(from_ty, if from_ty.is_signed() { IrType::I64 } else { IrType::U64 });
+            }
+            if from_ty.is_signed() {
+                // Sign-extend: t1 = t0 >> 63 (arithmetic)
+                self.state.emit("    srai t1, t0, 63");
+            } else {
+                self.state.emit("    li t1, 0");
+            }
+            self.store_t0_t1_to(dest);
+            return;
+        }
+        if is_i128_type(from_ty) && !is_i128_type(to_ty) {
+            // Narrowing from 128-bit: use low 64 bits
+            self.operand_to_t0_t1(src);
+            // t0 already has the low 64 bits
+            if to_ty.size() < 8 {
+                self.emit_cast_instrs(IrType::I64, to_ty);
+            }
+            self.store_t0_to(dest);
+            return;
+        }
+        if is_i128_type(from_ty) && is_i128_type(to_ty) {
+            // I128 <-> U128: same representation, just copy
+            self.operand_to_t0_t1(src);
+            self.store_t0_t1_to(dest);
+            return;
+        }
+        // Default path
+        self.emit_load_operand(src);
+        self.emit_cast_instrs(from_ty, to_ty);
+        self.emit_store_result(dest);
+    }
 
     fn emit_memcpy(&mut self, dest: &Value, src: &Value, size: usize) {
         // Load dest address into t1, src address into t2
@@ -1239,6 +1753,15 @@ impl ArchCodegen for RiscvCodegen {
 
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {
         if let Some(val) = val {
+            if is_i128_type(self.current_return_type) {
+                // 128-bit return: a0 = low, a1 = high per RISC-V LP64D ABI
+                self.operand_to_t0_t1(val);
+                self.state.emit("    mv a0, t0");
+                self.state.emit("    mv a1, t1");
+                self.emit_epilogue_riscv(frame_size);
+                self.state.emit("    ret");
+                return;
+            }
             self.operand_to_t0(val);
             if self.current_return_type.is_long_double() {
                 // F128 return: convert f64 bit pattern to f128 via __extenddftf2.
@@ -1460,281 +1983,193 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    fence rw, rw");
     }
 
-    fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], _operand_types: &[IrType]) {
-        // RISC-V inline assembly support.
-        // Handles: r (GP reg), f (FP reg), A (address for AMO/LR/SC),
-        // m (memory), I/i (immediate), J (zero constant), rJ (reg or zero),
-        // tied operands (0, 1, ...), specific regs (a0-a7, t0-t2, ra).
+    fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], _clobbers: &[String], operand_types: &[IrType]) {
+        emit_inline_asm_common(self, template, outputs, inputs, operand_types);
+    }
 
-        let gp_scratch: &[&str] = &["t0", "t1", "t2", "t3", "t4", "t5", "t6", "a2", "a3", "a4", "a5", "a6", "a7"];
-        let fp_scratch: &[&str] = &["ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7"];
-        let mut scratch_idx = 0;
-        let mut fp_scratch_idx = 0;
+    fn emit_copy_i128(&mut self, dest: &Value, src: &Operand) {
+        // Full 128-bit copy: load src into t0:t1, store to dest
+        self.operand_to_t0_t1(src);
+        self.store_t0_t1_to(dest);
+    }
+}
 
-        let total_operands = outputs.len() + inputs.len();
-        let mut op_regs: Vec<String> = vec![String::new(); total_operands];
-        let mut op_kinds: Vec<RvConstraintKind> = vec![RvConstraintKind::GpReg; total_operands];
-        let mut op_names: Vec<Option<String>> = vec![None; total_operands];
-        let mut op_mem_offsets: Vec<i64> = vec![0; total_operands];
-        // For immediate operands, store the constant value
-        let mut op_imm_values: Vec<Option<i64>> = vec![None; total_operands];
+impl Default for RiscvCodegen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-        // First pass: classify output constraints
-        for (i, (constraint, ptr, name)) in outputs.iter().enumerate() {
-            op_names[i] = name.clone();
-            let kind = classify_rv_constraint(constraint);
-            match &kind {
-                RvConstraintKind::Memory => {
-                    if let Some(slot) = self.state.get_slot(ptr.0) {
-                        op_mem_offsets[i] = slot.0;
-                    }
-                }
-                RvConstraintKind::Address => {
-                    // Address constraint: we load the address into a GP register
-                    // but format it as (reg) during substitution
-                    if let Some(slot) = self.state.get_slot(ptr.0) {
-                        op_mem_offsets[i] = slot.0;
-                    }
-                }
-                RvConstraintKind::Specific(reg) => {
-                    op_regs[i] = reg.clone();
-                }
-                _ => {}
-            }
-            op_kinds[i] = kind;
+/// RISC-V scratch registers for inline asm.
+const RISCV_GP_SCRATCH: &[&str] = &["t0", "t1", "t2", "t3", "t4", "t5", "t6", "a2", "a3", "a4", "a5", "a6", "a7"];
+const RISCV_FP_SCRATCH: &[&str] = &["ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7"];
+
+impl InlineAsmEmitter for RiscvCodegen {
+    fn asm_state(&mut self) -> &mut CodegenState { &mut self.state }
+    fn asm_state_ref(&self) -> &CodegenState { &self.state }
+
+    fn classify_constraint(&self, constraint: &str) -> AsmOperandKind {
+        // Map RISC-V's richer constraint types into the shared AsmOperandKind.
+        let rv_kind = classify_rv_constraint(constraint);
+        match rv_kind {
+            RvConstraintKind::GpReg => AsmOperandKind::GpReg,
+            RvConstraintKind::FpReg => AsmOperandKind::FpReg,
+            RvConstraintKind::Memory => AsmOperandKind::Memory,
+            RvConstraintKind::Address => AsmOperandKind::Address,
+            RvConstraintKind::Immediate => AsmOperandKind::Immediate,
+            RvConstraintKind::ZeroOrReg => AsmOperandKind::ZeroOrReg,
+            RvConstraintKind::Specific(reg) => AsmOperandKind::Specific(reg),
+            RvConstraintKind::Tied(n) => AsmOperandKind::Tied(n),
         }
+    }
 
-        // First pass: classify input constraints
-        for (i, (constraint, val, name)) in inputs.iter().enumerate() {
-            let op_idx = outputs.len() + i;
-            op_names[op_idx] = name.clone();
-            let kind = classify_rv_constraint(constraint);
-            match &kind {
-                RvConstraintKind::Memory => {
-                    if let Operand::Value(v) = val {
-                        if let Some(slot) = self.state.get_slot(v.0) {
-                            op_mem_offsets[op_idx] = slot.0;
-                        }
-                    }
-                }
-                RvConstraintKind::Address => {
-                    if let Operand::Value(v) = val {
-                        if let Some(slot) = self.state.get_slot(v.0) {
-                            op_mem_offsets[op_idx] = slot.0;
-                        }
-                    }
-                }
-                RvConstraintKind::Specific(reg) => {
-                    op_regs[op_idx] = reg.clone();
-                }
-                RvConstraintKind::Immediate => {
-                    // Store the immediate value for direct substitution
-                    if let Operand::Const(c) = val {
-                        op_imm_values[op_idx] = Some(c.to_i64().unwrap_or(0));
-                    } else {
-                        // Value operand for immediate constraint: fall back to GP register
-                        op_kinds[op_idx] = RvConstraintKind::GpReg;
-                    }
-                }
-                RvConstraintKind::ZeroOrReg => {
-                    // If the value is a constant 0, use "zero" register
-                    if let Operand::Const(c) = val {
-                        if c.to_i64() == Some(0) {
-                            op_regs[op_idx] = "zero".to_string();
-                        }
-                    }
-                }
-                _ => {}
-            }
-            op_kinds[op_idx] = kind;
-        }
-
-        // Second pass: assign scratch registers for operands that need them
-        for i in 0..total_operands {
-            if !op_regs[i].is_empty() {
-                continue; // Already assigned (specific or zero)
-            }
-            match &op_kinds[i] {
-                RvConstraintKind::Memory | RvConstraintKind::Immediate => continue,
-                RvConstraintKind::Tied(_) => continue, // Resolve later
-                RvConstraintKind::FpReg => {
-                    if fp_scratch_idx < fp_scratch.len() {
-                        op_regs[i] = fp_scratch[fp_scratch_idx].to_string();
-                        fp_scratch_idx += 1;
-                    }
-                }
-                RvConstraintKind::Address => {
-                    // Address operands need a GP register to hold the address
-                    if scratch_idx < gp_scratch.len() {
-                        op_regs[i] = gp_scratch[scratch_idx].to_string();
-                        scratch_idx += 1;
-                    }
-                }
-                RvConstraintKind::GpReg | RvConstraintKind::ZeroOrReg | RvConstraintKind::Specific(_) => {
-                    if scratch_idx < gp_scratch.len() {
-                        op_regs[i] = gp_scratch[scratch_idx].to_string();
-                        scratch_idx += 1;
-                    } else {
-                        op_regs[i] = format!("s{}", 2 + scratch_idx - gp_scratch.len());
-                        scratch_idx += 1;
-                    }
-                }
-            }
-        }
-
-        // Third pass: resolve tied operands
-        for i in 0..total_operands {
-            if let RvConstraintKind::Tied(tied_to) = op_kinds[i].clone() {
-                if tied_to < op_regs.len() {
-                    op_regs[i] = op_regs[tied_to].clone();
-                    // Inherit the kind for substitution purposes
-                    if op_kinds[tied_to] == RvConstraintKind::Address {
-                        op_kinds[i] = RvConstraintKind::Address;
-                        op_mem_offsets[i] = op_mem_offsets[tied_to];
-                    }
-                }
-            }
-        }
-
-        // Handle "+" read-write: synthetic inputs share register with their output
-        let num_plus = outputs.iter().filter(|(c,_,_)| c.contains('+')).count();
-        let mut plus_idx = 0;
-        for (i, (constraint, _, _)) in outputs.iter().enumerate() {
-            if constraint.contains('+') {
-                let plus_input_idx = outputs.len() + plus_idx;
-                if plus_input_idx < total_operands {
-                    op_regs[plus_input_idx] = op_regs[i].clone();
-                    op_kinds[plus_input_idx] = op_kinds[i].clone();
-                    op_mem_offsets[plus_input_idx] = op_mem_offsets[i];
-                }
-                plus_idx += 1;
-            }
-        }
-
-        // Build GCC operand number → internal index mapping.
-        let num_plus = outputs.iter().filter(|(c,_,_)| c.contains('+')).count();
-        let num_gcc_operands = outputs.len() + (inputs.len() - num_plus);
-        let mut gcc_to_internal: Vec<usize> = Vec::with_capacity(num_gcc_operands);
-        for i in 0..outputs.len() {
-            gcc_to_internal.push(i);
-        }
-        for i in num_plus..inputs.len() {
-            gcc_to_internal.push(outputs.len() + i);
-        }
-
-        // Phase 2: Load input values into their assigned registers
-        for (i, (constraint, val, _)) in inputs.iter().enumerate() {
-            let op_idx = outputs.len() + i;
-            match &op_kinds[op_idx] {
-                RvConstraintKind::Memory | RvConstraintKind::Immediate => continue,
-                _ => {}
-            }
-            let reg = &op_regs[op_idx];
-            if reg.is_empty() {
-                continue;
-            }
-
-            let is_fp = op_kinds[op_idx] == RvConstraintKind::FpReg;
-            let is_addr = op_kinds[op_idx] == RvConstraintKind::Address;
-
-            match val {
-                Operand::Const(c) => {
-                    if is_fp {
-                        // Load float constant: li to temp GP, then fmv to FP reg
-                        // Use t5 (not t6, which is reserved for large-offset stack access)
-                        let imm = c.to_i64().unwrap_or(0);
-                        self.state.emit(&format!("    li t5, {}", imm));
-                        if constraint.contains('f') && !constraint.contains("64") {
-                            self.state.emit(&format!("    fmv.w.x {}, t5", reg));
-                        } else {
-                            self.state.emit(&format!("    fmv.d.x {}, t5", reg));
-                        }
-                    } else {
-                        let imm = c.to_i64().unwrap_or(0);
-                        self.state.emit(&format!("    li {}, {}", reg, imm));
-                    }
-                }
-                Operand::Value(v) => {
+    fn setup_operand_metadata(&self, op: &mut AsmOperand, val: &Operand, _is_output: bool) {
+        match &op.kind {
+            AsmOperandKind::Memory | AsmOperandKind::Address => {
+                if let Operand::Value(v) = val {
                     if let Some(slot) = self.state.get_slot(v.0) {
-                        if is_addr || (!is_addr && self.state.is_alloca(v.0)) {
-                            // For address constraints OR alloca values, load the address
-                            self.emit_addi_s0(reg, slot.0);
-                        } else if is_fp {
-                            // Load FP value from stack
-                            self.emit_load_from_s0(reg, slot.0, "fld");
-                        } else {
-                            self.emit_load_from_s0(reg, slot.0, "ld");
-                        }
+                        op.mem_offset = slot.0;
                     }
                 }
             }
-        }
-
-        // Pre-load read-write output values
-        for (i, (constraint, ptr, _)) in outputs.iter().enumerate() {
-            if constraint.contains('+') {
-                let reg = &op_regs[i].clone();
-                if let Some(slot) = self.state.get_slot(ptr.0) {
-                    match &op_kinds[i] {
-                        RvConstraintKind::Address => {
-                            // For +A: load the address of the memory location
-                            self.emit_addi_s0(reg, slot.0);
-                        }
-                        RvConstraintKind::FpReg => {
-                            self.emit_load_from_s0(reg, slot.0, "fld");
-                        }
-                        RvConstraintKind::Memory => {}
-                        _ => {
-                            self.emit_load_from_s0(reg, slot.0, "ld");
-                        }
+            AsmOperandKind::Immediate => {
+                if let Operand::Const(c) = val {
+                    op.imm_value = Some(c.to_i64().unwrap_or(0));
+                } else {
+                    // Value operand for immediate constraint: fall back to GP register
+                    op.kind = AsmOperandKind::GpReg;
+                }
+            }
+            AsmOperandKind::ZeroOrReg => {
+                // If the value is a constant 0, use "zero" register
+                if let Operand::Const(c) = val {
+                    if c.to_i64() == Some(0) {
+                        op.reg = "zero".to_string();
                     }
                 }
             }
+            _ => {}
         }
+    }
 
-        // Phase 3: Substitute operand references in template and emit
-        let lines: Vec<&str> = template.split('\n').collect();
-        for line in &lines {
-            let line = line.trim().trim_start_matches('\t').trim();
-            if line.is_empty() {
-                continue;
+    fn assign_scratch_reg(&mut self, kind: &AsmOperandKind) -> String {
+        match kind {
+            AsmOperandKind::FpReg => {
+                let idx = self.asm_fp_scratch_idx;
+                self.asm_fp_scratch_idx += 1;
+                if idx < RISCV_FP_SCRATCH.len() {
+                    RISCV_FP_SCRATCH[idx].to_string()
+                } else {
+                    format!("fs{}", idx - RISCV_FP_SCRATCH.len())
+                }
             }
-            let resolved = Self::substitute_riscv_asm_operands(line, &op_regs, &op_names, &op_kinds, &op_mem_offsets, &op_imm_values, &gcc_to_internal);
-            self.state.emit(&format!("    {}", resolved));
+            _ => {
+                let idx = self.asm_gp_scratch_idx;
+                self.asm_gp_scratch_idx += 1;
+                if idx < RISCV_GP_SCRATCH.len() {
+                    RISCV_GP_SCRATCH[idx].to_string()
+                } else {
+                    format!("s{}", 2 + idx - RISCV_GP_SCRATCH.len())
+                }
+            }
         }
+    }
 
-        // Phase 4: Store output register values back to their stack slots
-        for (i, (constraint, ptr, _)) in outputs.iter().enumerate() {
-            if constraint.contains('=') || constraint.contains('+') {
-                match &op_kinds[i] {
-                    RvConstraintKind::Memory => continue,
-                    RvConstraintKind::Address => {
-                        // For "=A" or "+A": the value was stored via the address in the asm.
-                        // No store needed since the asm wrote through the pointer directly.
-                        continue;
+    fn load_input_to_reg(&mut self, op: &AsmOperand, val: &Operand, constraint: &str) {
+        let reg = &op.reg;
+        let is_fp = matches!(op.kind, AsmOperandKind::FpReg);
+        let is_addr = matches!(op.kind, AsmOperandKind::Address);
+
+        match val {
+            Operand::Const(c) => {
+                if is_fp {
+                    let imm = c.to_i64().unwrap_or(0);
+                    self.state.emit(&format!("    li t5, {}", imm));
+                    if constraint.contains('f') && !constraint.contains("64") {
+                        self.state.emit(&format!("    fmv.w.x {}, t5", reg));
+                    } else {
+                        self.state.emit(&format!("    fmv.d.x {}, t5", reg));
                     }
-                    RvConstraintKind::FpReg => {
-                        let reg = &op_regs[i].clone();
-                        if let Some(slot) = self.state.get_slot(ptr.0) {
-                            self.emit_store_to_s0(reg, slot.0, "fsd");
-                        }
-                    }
-                    _ => {
-                        let reg = &op_regs[i].clone();
-                        if let Some(slot) = self.state.get_slot(ptr.0) {
-                            self.emit_store_to_s0(reg, slot.0, "sd");
-                        }
+                } else {
+                    let imm = c.to_i64().unwrap_or(0);
+                    self.state.emit(&format!("    li {}, {}", reg, imm));
+                }
+            }
+            Operand::Value(v) => {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    if is_addr || (!is_addr && self.state.is_alloca(v.0)) {
+                        self.emit_addi_s0(reg, slot.0);
+                    } else if is_fp {
+                        self.emit_load_from_s0(reg, slot.0, "fld");
+                    } else {
+                        self.emit_load_from_s0(reg, slot.0, "ld");
                     }
                 }
             }
         }
     }
 
-    // emit_copy_i128: uses default implementation (64-bit truncation)
-}
+    fn preload_readwrite_output(&mut self, op: &AsmOperand, ptr: &Value) {
+        let reg = op.reg.clone();
+        if let Some(slot) = self.state.get_slot(ptr.0) {
+            match &op.kind {
+                AsmOperandKind::Address => {
+                    self.emit_addi_s0(&reg, slot.0);
+                }
+                AsmOperandKind::FpReg => {
+                    self.emit_load_from_s0(&reg, slot.0, "fld");
+                }
+                AsmOperandKind::Memory => {} // No preload for memory
+                _ => {
+                    self.emit_load_from_s0(&reg, slot.0, "ld");
+                }
+            }
+        }
+    }
 
-impl Default for RiscvCodegen {
-    fn default() -> Self {
-        Self::new()
+    fn substitute_template_line(&self, line: &str, operands: &[AsmOperand], gcc_to_internal: &[usize], _operand_types: &[IrType]) -> String {
+        // Build parallel arrays for the RISC-V substitution function
+        let op_regs: Vec<String> = operands.iter().map(|o| o.reg.clone()).collect();
+        let op_names: Vec<Option<String>> = operands.iter().map(|o| o.name.clone()).collect();
+        let op_mem_offsets: Vec<i64> = operands.iter().map(|o| o.mem_offset).collect();
+        let op_imm_values: Vec<Option<i64>> = operands.iter().map(|o| o.imm_value).collect();
+
+        // Convert AsmOperandKind back to RvConstraintKind for the substitution function
+        let op_kinds: Vec<RvConstraintKind> = operands.iter().map(|o| match &o.kind {
+            AsmOperandKind::GpReg => RvConstraintKind::GpReg,
+            AsmOperandKind::FpReg => RvConstraintKind::FpReg,
+            AsmOperandKind::Memory => RvConstraintKind::Memory,
+            AsmOperandKind::Address => RvConstraintKind::Address,
+            AsmOperandKind::Immediate => RvConstraintKind::Immediate,
+            AsmOperandKind::ZeroOrReg => RvConstraintKind::ZeroOrReg,
+            AsmOperandKind::Specific(r) => RvConstraintKind::Specific(r.clone()),
+            AsmOperandKind::Tied(n) => RvConstraintKind::Tied(*n),
+        }).collect();
+
+        Self::substitute_riscv_asm_operands(line, &op_regs, &op_names, &op_kinds, &op_mem_offsets, &op_imm_values, gcc_to_internal)
+    }
+
+    fn store_output_from_reg(&mut self, op: &AsmOperand, ptr: &Value, _constraint: &str) {
+        match &op.kind {
+            AsmOperandKind::Memory => return,
+            AsmOperandKind::Address => return, // AMO/LR/SC wrote through the pointer
+            AsmOperandKind::FpReg => {
+                let reg = op.reg.clone();
+                if let Some(slot) = self.state.get_slot(ptr.0) {
+                    self.emit_store_to_s0(&reg, slot.0, "fsd");
+                }
+            }
+            _ => {
+                let reg = op.reg.clone();
+                if let Some(slot) = self.state.get_slot(ptr.0) {
+                    self.emit_store_to_s0(&reg, slot.0, "sd");
+                }
+            }
+        }
+    }
+
+    fn reset_scratch_state(&mut self) {
+        self.asm_gp_scratch_idx = 0;
+        self.asm_fp_scratch_idx = 0;
     }
 }
