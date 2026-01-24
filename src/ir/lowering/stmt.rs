@@ -746,12 +746,29 @@ impl Lowerer {
 
             match &item.init {
                 Initializer::Expr(e) => {
-                    let val = self.lower_and_cast_init_expr(e, field_ty);
-                    let field_addr = self.emit_gep_offset(base, field_offset, field_ty);
-                    if let (Some(bit_offset), Some(bit_width)) = (field.bit_offset, field.bit_width) {
-                        self.store_bitfield(field_addr, field_ty, bit_offset, bit_width, val);
+                    // For struct/union fields initialized from expressions that produce
+                    // struct values (e.g., function calls returning structs via sret),
+                    // we need to emit a memcpy rather than a scalar store, because
+                    // lower_expr returns the sret alloca address (a pointer), not the
+                    // struct data itself.
+                    let is_struct_field = matches!(field.ty, CType::Struct(_) | CType::Union(_));
+                    if is_struct_field && self.struct_value_size(e).is_some() {
+                        let src_addr = self.get_struct_base_addr(e);
+                        let field_size = field.ty.size();
+                        let field_addr = self.emit_gep_offset(base, field_offset, IrType::Ptr);
+                        self.emit(Instruction::Memcpy {
+                            dest: field_addr,
+                            src: src_addr,
+                            size: field_size,
+                        });
                     } else {
-                        self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
+                        let val = self.lower_and_cast_init_expr(e, field_ty);
+                        let field_addr = self.emit_gep_offset(base, field_offset, field_ty);
+                        if let (Some(bit_offset), Some(bit_width)) = (field.bit_offset, field.bit_width) {
+                            self.store_bitfield(field_addr, field_ty, bit_offset, bit_width, val);
+                        } else {
+                            self.emit(Instruction::Store { val, ptr: field_addr, ty: field_ty });
+                        }
                     }
                 }
                 Initializer::List(sub_items) => {
