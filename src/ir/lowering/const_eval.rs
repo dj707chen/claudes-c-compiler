@@ -309,26 +309,9 @@ impl Lowerer {
                         }
                         None
                     }
-                    // &arr[index] -> GlobalAddrOffset("arr", index * elem_size)
-                    Expr::ArraySubscript(base, index, _) => {
-                        if let Expr::Identifier(name, _) = base.as_ref() {
-                            if let Some(global_name) = self.resolve_to_global_name(name) {
-                                if let Some(ginfo) = self.globals.get(&global_name) {
-                                    if ginfo.is_array {
-                                        if let Some(idx_val) = self.eval_const_expr(index) {
-                                            if let Some(idx) = self.const_to_i64(&idx_val) {
-                                                let offset = idx * ginfo.elem_size as i64;
-                                                if offset == 0 {
-                                                    return Some(GlobalInit::GlobalAddr(global_name));
-                                                }
-                                                return Some(GlobalInit::GlobalAddrOffset(global_name, offset));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        None
+                    // &arr[i] or &arr[i][j][k] -> GlobalAddrOffset("arr", total_offset)
+                    Expr::ArraySubscript(_, _, _) => {
+                        self.resolve_chained_array_subscript(inner)
                     }
                     // &s.field or &s.a.b.c or &arr[i].field -> GlobalAddrOffset
                     Expr::MemberAccess(_, _, _) => {
@@ -449,6 +432,66 @@ impl Lowerer {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Resolve a chained array subscript expression like `arr[i][j][k]` to a global
+    /// address with computed offset. Walks nested ArraySubscript nodes from outermost
+    /// to innermost, collecting (index, stride) pairs to compute the total byte offset.
+    /// Handles 1D (`&arr[i]`), 2D (`&arr[i][j]`), and higher-dimensional arrays.
+    fn resolve_chained_array_subscript(&self, expr: &Expr) -> Option<GlobalInit> {
+        // Collect subscripts from outer to inner: arr[i][j] has outer=[j] inner=[i]
+        let mut subscripts: Vec<&Expr> = Vec::new();
+        let mut current = expr;
+        loop {
+            match current {
+                Expr::ArraySubscript(base, index, _) => {
+                    subscripts.push(index);
+                    current = base.as_ref();
+                }
+                _ => break,
+            }
+        }
+        // current should now be the base identifier
+        let name = match current {
+            Expr::Identifier(name, _) => name,
+            _ => return None,
+        };
+        let global_name = self.resolve_to_global_name(name)?;
+        let ginfo = self.globals.get(&global_name)?;
+        if !ginfo.is_array {
+            return None;
+        }
+
+        // subscripts are collected outer-to-inner, but we need inner-to-outer
+        // for stride computation. Reverse to get [i, j, k] order.
+        subscripts.reverse();
+
+        // Compute the total byte offset using array dimension strides.
+        // For int a[D0][D1][D2]:
+        //   array_dim_strides = [D1*D2*sizeof(int), D2*sizeof(int), sizeof(int)]
+        //   elem_size = D1*D2*sizeof(int) (stride for first dimension)
+        // &a[i][j][k] -> offset = i * strides[0] + j * strides[1] + k * strides[2]
+        let mut total_offset: i64 = 0;
+        let strides = &ginfo.array_dim_strides;
+        for (dim, idx_expr) in subscripts.iter().enumerate() {
+            let idx_val = self.eval_const_expr(idx_expr)?;
+            let idx = self.const_to_i64(&idx_val)?;
+            let stride = if !strides.is_empty() && dim < strides.len() {
+                strides[dim] as i64
+            } else if dim == 0 {
+                // 1D array: use elem_size as the stride
+                ginfo.elem_size as i64
+            } else {
+                return None;
+            };
+            total_offset += idx * stride;
+        }
+
+        if total_offset == 0 {
+            Some(GlobalInit::GlobalAddr(global_name))
+        } else {
+            Some(GlobalInit::GlobalAddrOffset(global_name, total_offset))
         }
     }
 
