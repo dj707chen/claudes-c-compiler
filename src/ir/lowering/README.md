@@ -10,9 +10,10 @@ handles every C language construct. The `mem2reg` pass later promotes allocas to
 | `definitions.rs` | Shared data structures: `VarInfo`, `LocalInfo`, `GlobalInfo`, `DeclAnalysis`, `LValue`, `SwitchFrame`, `FuncSig`, `FunctionMeta`, `ParamKind`, `IrParamBuildResult` |
 | `func_state.rs` | `FunctionBuildState` (per-function build state) and `FuncScopeFrame` (undo-log scope tracking for locals/statics/consts) |
 | `lowering.rs` | `Lowerer` struct, `lower()` entry point, `lower_function` pipeline, `DeclAnalysis` computation, IR emission helpers |
-| `stmt.rs` | Statement lowering: thin `lower_stmt` dispatcher delegates to per-statement helpers (`lower_if_stmt`, `lower_while_stmt`, `lower_switch_stmt`, etc.), `lower_local_decl`, `emit_struct_init`, control flow |
-| `stmt_init.rs` | Local variable init helpers: expr-init, list-init, extern/func-decl handling |
+| `stmt.rs` | Statement lowering: thin `lower_stmt` dispatcher delegates to per-statement helpers (`lower_if_stmt`, `lower_while_stmt`, `lower_switch_stmt`, etc.), `lower_local_decl`, control flow, inline asm |
+| `stmt_init.rs` | Local variable init helpers: expr-init, list-init, extern/func-decl handling, array init dispatch |
 | `stmt_return.rs` | Return statement: sret, two-reg struct, complex decomposition, scalar returns |
+| `struct_init.rs` | Struct/union initializer list lowering (`emit_struct_init`): field dispatch loop, per-field-type handlers for nested structs, arrays, complex, bitfields, scalars, designated inits |
 | `expr.rs` | Expression lowering: binary/unary ops, casts, ternary, sizeof, pointer arithmetic |
 | `expr_builtins.rs` | `__builtin_*` intrinsics (fpclassify, clz, ctz, bswap, popcount, etc.) |
 | `expr_atomics.rs` | `__atomic_*` and `__sync_*` operations via table-driven dispatch |

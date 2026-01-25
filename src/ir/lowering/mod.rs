@@ -9,6 +9,7 @@ pub mod expr_assign;
 pub mod stmt;
 mod stmt_init;
 mod stmt_return;
+mod struct_init;
 pub mod lvalue;
 pub mod types;
 pub mod structs;
