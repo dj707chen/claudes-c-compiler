@@ -1,0 +1,13 @@
+Fix string concatenation in attribute arguments (section, alias, visibility)
+
+The parser for __attribute__((section("foo" "bar"))) only reads a single string
+literal, but C allows adjacent string literals to be concatenated. This causes
+parse errors for kernel code like:
+
+  __attribute__((section(".data..percpu" "..read_mostly")))
+
+The fix: consume multiple consecutive StringLiteral tokens and concatenate them
+in the section, alias, and visibility attribute parsers.
+
+This affects ~30 of the 2851 kernel source files that include headers using
+section string concatenation.
