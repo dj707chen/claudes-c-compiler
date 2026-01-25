@@ -863,6 +863,15 @@ fn eliminate_dead_stores(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
             // Catch-all: check if line references the offset via string search
             // (handles leaq, movslq, etc. that aren't classified as store/load)
             if matches!(infos[j].kind, LineKind::Other { .. }) {
+                let line = trim_asm(&lines[j]);
+                // Check for indirect memory access through a register (not %rbp).
+                // E.g., (%rcx), (%rdi), 8(%rax) -- these could alias any stack
+                // slot when the register holds a pointer to a stack variable
+                // (address-taken via &var). Treat as barrier.
+                if has_indirect_memory_access(line) {
+                    slot_read = true;
+                    break;
+                }
                 // Build pattern once per outer iteration, reuse for all Other lines
                 if !pattern_built {
                     pattern_buf.clear();
@@ -870,7 +879,6 @@ fn eliminate_dead_stores(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
                     write!(pattern_buf, "{}(%rbp)", store_offset).unwrap();
                     pattern_built = true;
                 }
-                let line = trim_asm(&lines[j]);
                 if line.contains(pattern_buf.as_str()) {
                     slot_read = true;
                     break;
@@ -885,6 +893,28 @@ fn eliminate_dead_stores(lines: &mut [String], infos: &mut [LineInfo]) -> bool {
     }
 
     changed
+}
+
+/// Check if an assembly line contains an indirect memory access through a register
+/// (not %rbp or %rsp). Examples: `(%rcx)`, `8(%rdi)`, `(%rax)`.
+/// These could alias any stack slot when a pointer to a local variable is used.
+fn has_indirect_memory_access(s: &str) -> bool {
+    // Look for patterns like "(%r" where the register is not rbp or rsp
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'(' && i + 2 < len && bytes[i + 1] == b'%' {
+            // Found "(%" - check if it's %rbp or %rsp (which are not indirect aliasing)
+            let rest = &s[i + 2..];
+            if !rest.starts_with("rbp") && !rest.starts_with("rsp")
+                && !rest.starts_with("rip") {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 // ── Helper functions ─────────────────────────────────────────────────────────
@@ -1404,6 +1434,14 @@ fn global_store_forwarding(lines: &mut [String], infos: &mut [LineInfo]) -> bool
                         {
                             invalidate_reg_flat(&mut slot_entries, &mut reg_offsets, 2);
                         }
+                    }
+                }
+                // Indirect memory access through a register (e.g., movl %edx, (%rcx))
+                // could write to any stack slot, invalidating all slot→register mappings.
+                if has_indirect_memory_access(trim_asm(&lines[i])) {
+                    slot_entries.clear();
+                    for rs in reg_offsets.iter_mut() {
+                        rs.clear();
                     }
                 }
                 prev_was_unconditional_jump = false;
