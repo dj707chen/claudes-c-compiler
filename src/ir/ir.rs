@@ -316,14 +316,14 @@ pub enum Terminator {
 }
 
 /// An operand (either a value reference or a constant).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Operand {
     Value(Value),
     Const(IrConst),
 }
 
 /// IR constants.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum IrConst {
     I8(i8),
     I16(i16),
