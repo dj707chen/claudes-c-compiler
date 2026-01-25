@@ -63,6 +63,19 @@ fn licm_function(func: &mut IrFunction) -> usize {
         return 0;
     }
 
+    // Merge natural loops that share the same header block.
+    //
+    // When a loop has multiple back edges (e.g., `continue` in a while-loop
+    // plus `break` from inner switch cases that re-enter the loop), each back
+    // edge produces a separate NaturalLoop whose body is only the blocks
+    // reachable from that specific back edge. Processing these subsets
+    // independently is unsound: a small subset may lack stores or calls that
+    // exist in the full loop, causing LICM to incorrectly determine that a
+    // load is safe to hoist.
+    //
+    // The fix: take the union of all loop bodies for the same header.
+    let loops = merge_loops_by_header(loops);
+
     // Pre-compute function-level alloca analysis for load hoisting.
     let alloca_info = analyze_allocas(func);
 
@@ -120,6 +133,29 @@ fn find_natural_loops(
     }
 
     loops
+}
+
+/// Merge natural loops that share the same header block.
+///
+/// Multiple back edges targeting the same header produce separate NaturalLoop
+/// entries, each with a partial body. We must take the union of all bodies
+/// for the same header to ensure LICM analyzes memory effects across ALL
+/// blocks in the loop.
+fn merge_loops_by_header(loops: Vec<NaturalLoop>) -> Vec<NaturalLoop> {
+    // Group loops by header
+    let mut header_map: FxHashMap<usize, FxHashSet<usize>> = FxHashMap::default();
+    for nl in loops {
+        header_map
+            .entry(nl.header)
+            .or_default()
+            .extend(nl.body);
+    }
+
+    // Convert back to Vec<NaturalLoop>
+    header_map
+        .into_iter()
+        .map(|(header, body)| NaturalLoop { header, body })
+        .collect()
 }
 
 /// Compute the body of a natural loop given a back edge (tail -> header).

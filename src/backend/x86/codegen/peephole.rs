@@ -30,6 +30,10 @@ const REG_NONE: RegId = 255;
 #[derive(Clone, Copy)]
 struct LineInfo {
     kind: LineKind,
+    /// Pre-parsed extension classification for redundant extension elimination.
+    /// Avoids repeated `starts_with`/`ends_with` string comparisons in the hot
+    /// `combined_local_pass` loop.
+    ext_kind: ExtKind,
     /// Byte offset of the first non-space character in the raw line.
     /// Caches `trim_asm` so passes don't repeatedly scan leading whitespace.
     trim_start: u16,
@@ -51,6 +55,9 @@ enum LineKind {
     /// `movX offset(%rbp), %reg` or `movslq offset(%rbp), %reg` – load from stack slot
     LoadRbp  { reg: RegId, offset: i32, size: MoveSize },
 
+    /// `movq %reg, %reg` – self-move (pre-classified to avoid string ops in hot loop)
+    SelfMove,
+
     Label,              // `name:`
     Jmp,                // `jmp label`
     CondJmp,            // `je`/`jne`/`jl`/... label
@@ -66,6 +73,47 @@ enum LineKind {
     /// `dest_reg` is the pre-parsed destination register family (REG_NONE if unknown).
     /// This allows fast register-modification checks without re-parsing.
     Other { dest_reg: RegId },
+}
+
+/// Pre-parsed classification of what kind of extension/operation an instruction performs.
+/// Used by the redundant extension elimination pass to avoid repeated string comparisons
+/// in the hot combined_local_pass loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtKind {
+    /// Not an extension or producer recognized for the extension elimination pass
+    None,
+    /// movzbq %al, %rax (or similar zero-extend of %al to %rax)
+    MovzbqAlRax,
+    /// movzwq %ax, %rax
+    MovzwqAxRax,
+    /// movsbq %al, %rax
+    MovsbqAlRax,
+    /// movslq %eax, %rax
+    MovslqEaxRax,
+    /// movl %eax, %eax (zero-extend of lower 32 bits)
+    MovlEaxEax,
+    /// cltq instruction
+    Cltq,
+    /// Producer that writes to %rax with movzbq
+    ProducerMovzbqToRax,
+    /// Producer that writes to %rax with movzwq
+    ProducerMovzwqToRax,
+    /// Producer that writes to %rax with movsbq
+    ProducerMovsbqToRax,
+    /// Producer that writes to %rax with movslq
+    ProducerMovslqToRax,
+    /// Producer: movq $const, %rax
+    ProducerMovqConstRax,
+    /// Producer: 32-bit arithmetic op (addl, subl, imull, andl, orl, xorl, shll, shrl)
+    ProducerArith32,
+    /// Producer: movl to %eax
+    ProducerMovlToEax,
+    /// Producer: movzbl to %eax or movzbq to %rax
+    ProducerMovzbToEax,
+    /// Producer: movzwl to %eax or movzwq to %rax
+    ProducerMovzwToEax,
+    /// Producer: divl or idivl %ecx
+    ProducerDiv32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +159,18 @@ impl LineInfo {
 
 // ── Line parsing ─────────────────────────────────────────────────────────────
 
+/// Helper to construct a LineInfo with default ext_kind and has_indirect_mem.
+#[inline]
+fn line_info(kind: LineKind, ts: u16) -> LineInfo {
+    LineInfo { kind, ext_kind: ExtKind::None, trim_start: ts, has_indirect_mem: false }
+}
+
+/// Helper to construct a LineInfo with a specific ext_kind.
+#[inline]
+fn line_info_ext(kind: LineKind, ext: ExtKind, ts: u16) -> LineInfo {
+    LineInfo { kind, ext_kind: ext, trim_start: ts, has_indirect_mem: false }
+}
+
 /// Parse one assembly line into a `LineInfo`.
 fn classify_line(raw: &str) -> LineInfo {
     let b = raw.as_bytes();
@@ -122,7 +182,7 @@ fn classify_line(raw: &str) -> LineInfo {
     let sb = s.as_bytes();
 
     if sb.is_empty() {
-        return LineInfo { kind: LineKind::Empty, trim_start: trim_start as u16, has_indirect_mem: false };
+        return line_info(LineKind::Empty, trim_start as u16);
     }
 
     let first = sb[0];
@@ -131,85 +191,254 @@ fn classify_line(raw: &str) -> LineInfo {
 
     // Label: ends with ':'
     if last == b':' {
-        return LineInfo { kind: LineKind::Label, trim_start: ts, has_indirect_mem: false };
+        return line_info(LineKind::Label, ts);
     }
 
     // Directive: starts with '.'
     if first == b'.' {
-        return LineInfo { kind: LineKind::Directive, trim_start: ts, has_indirect_mem: false };
+        return line_info(LineKind::Directive, ts);
     }
 
-    // Fast path: only try store/load parsing if line starts with 'mov'
+    // Fast path: only try store/load/self-move/extension parsing if line starts with 'mov' or 'movs'
     if first == b'm' && sb.len() >= 4 && sb[1] == b'o' && sb[2] == b'v' {
         if let Some((reg_str, offset_str, size)) = parse_store_to_rbp_str(s) {
             let reg = register_family_fast(reg_str);
             let offset = fast_parse_i32(offset_str);
-            return LineInfo { kind: LineKind::StoreRbp { reg, offset, size }, trim_start: ts, has_indirect_mem: false };
+            return line_info(LineKind::StoreRbp { reg, offset, size }, ts);
         }
         if let Some((offset_str, reg_str, size)) = parse_load_from_rbp_str(s) {
             let reg = register_family_fast(reg_str);
             let offset = fast_parse_i32(offset_str);
-            return LineInfo { kind: LineKind::LoadRbp { reg, offset, size }, trim_start: ts, has_indirect_mem: false };
+            // Classify loads that produce results making subsequent extensions redundant:
+            // - movslq offset(%rbp), %rax -> producer for cltq elimination
+            // - movl offset(%rbp), %eax   -> producer for movl %eax,%eax elimination
+            //   (movl already zero-extends to 64 bits)
+            // - movzbl offset(%rbp), %eax -> producer for movl %eax,%eax elimination
+            // - movzwl offset(%rbp), %eax -> producer for movl %eax,%eax elimination
+            let ext = if reg == 0 {
+                match size {
+                    MoveSize::SLQ => ExtKind::ProducerMovslqToRax,
+                    MoveSize::L => ExtKind::ProducerMovlToEax,
+                    _ => ExtKind::None,
+                }
+            } else {
+                ExtKind::None
+            };
+            return line_info_ext(LineKind::LoadRbp { reg, offset, size }, ext, ts);
+        }
+        // Check for self-move: movq %reg, %reg (same src and dst)
+        if sb[3] == b'q' && sb.len() >= 6 && sb[4] == b' ' {
+            if is_self_move_fast(sb) {
+                return line_info(LineKind::SelfMove, ts);
+            }
+        }
+        // Pre-classify extension-related instructions
+        let ext = classify_mov_ext(s, sb);
+        if ext != ExtKind::None {
+            let dest_reg = parse_dest_reg_fast(s);
+            let has_indirect = has_indirect_memory_access(s);
+            return LineInfo {
+                kind: LineKind::Other { dest_reg },
+                ext_kind: ext,
+                trim_start: ts,
+                has_indirect_mem: has_indirect,
+            };
         }
     }
 
     // Control flow: dispatch on first byte
     if first == b'j' {
         if sb.len() >= 4 && sb[1] == b'm' && sb[2] == b'p' && sb[3] == b' ' {
-            return LineInfo { kind: LineKind::Jmp, trim_start: ts, has_indirect_mem: false };
+            return line_info(LineKind::Jmp, ts);
         }
         if is_conditional_jump(s) {
-            return LineInfo { kind: LineKind::CondJmp, trim_start: ts, has_indirect_mem: false };
+            return line_info(LineKind::CondJmp, ts);
         }
     }
 
     if first == b'c' {
         if sb.len() >= 4 && sb[1] == b'a' && sb[2] == b'l' && sb[3] == b'l' {
-            return LineInfo { kind: LineKind::Call, trim_start: ts, has_indirect_mem: false };
+            return line_info(LineKind::Call, ts);
         }
-        // Compare: cmpX or cqto/cltq/cdq/cqo handled below
+        // Compare: cmpX
         if sb.len() >= 5 && sb[1] == b'm' && sb[2] == b'p' {
-            // cmpq, cmpl, cmpw, cmpb
-            return LineInfo { kind: LineKind::Cmp, trim_start: ts, has_indirect_mem: false };
+            return line_info(LineKind::Cmp, ts);
+        }
+        // cltq - classify as extension producer
+        if s == "cltq" {
+            return line_info_ext(LineKind::Other { dest_reg: 0 }, ExtKind::Cltq, ts);
         }
     }
 
     if first == b'r' && s == "ret" {
-        return LineInfo { kind: LineKind::Ret, trim_start: ts, has_indirect_mem: false };
+        return line_info(LineKind::Ret, ts);
     }
 
     // Test instructions
     if first == b't' && sb.len() >= 5 && sb[1] == b'e' && sb[2] == b's' && sb[3] == b't' {
-        return LineInfo { kind: LineKind::Cmp, trim_start: ts, has_indirect_mem: false };
+        return line_info(LineKind::Cmp, ts);
     }
 
     // ucomis* instructions
     if first == b'u' && (s.starts_with("ucomisd ") || s.starts_with("ucomiss ")) {
-        return LineInfo { kind: LineKind::Cmp, trim_start: ts, has_indirect_mem: false };
+        return line_info(LineKind::Cmp, ts);
     }
 
     // Push / Pop (extract register for fast checks)
     if first == b'p' {
         if s.starts_with("pushq ") {
             let reg = register_family_fast(s[6..].trim());
-            return LineInfo { kind: LineKind::Push { reg }, trim_start: ts, has_indirect_mem: false };
+            return line_info(LineKind::Push { reg }, ts);
         }
         if s.starts_with("popq ") {
             let reg = register_family_fast(s[5..].trim());
-            return LineInfo { kind: LineKind::Pop { reg }, trim_start: ts, has_indirect_mem: false };
+            return line_info(LineKind::Pop { reg }, ts);
         }
     }
 
     // SetCC
     if first == b's' && sb.len() >= 4 && sb[1] == b'e' && sb[2] == b't' && parse_setcc(s).is_some() {
-        return LineInfo { kind: LineKind::SetCC, trim_start: ts, has_indirect_mem: false };
+        return line_info(LineKind::SetCC, ts);
     }
+
+    // Pre-classify 32-bit arithmetic producers for extension elimination
+    let ext = classify_arith_ext(s, sb, first);
 
     // Pre-parse destination register for fast modification checks.
     let dest_reg = parse_dest_reg_fast(s);
     // Cache has_indirect_memory_access for Other lines
     let has_indirect = has_indirect_memory_access(s);
-    LineInfo { kind: LineKind::Other { dest_reg }, trim_start: ts, has_indirect_mem: has_indirect }
+    LineInfo { kind: LineKind::Other { dest_reg }, ext_kind: ext, trim_start: ts, has_indirect_mem: has_indirect }
+}
+
+/// Fast check for self-move: `movq %REG, %REG` where both register names match.
+/// Works on the raw bytes after trimming. The caller ensures sb starts with "movq "
+/// and has length >= 6.
+#[inline]
+fn is_self_move_fast(sb: &[u8]) -> bool {
+    // sb = "movq %REG, %REG" - find the comma
+    let len = sb.len();
+    // The source starts at byte 5 (after "movq ")
+    if len < 10 || sb[5] != b'%' { return false; }
+    // Find comma
+    let mut comma = 6;
+    while comma < len {
+        if sb[comma] == b',' { break; }
+        comma += 1;
+    }
+    if comma >= len { return false; }
+    // Source = sb[5..comma], skip whitespace after comma
+    let src = &sb[5..comma];
+    let mut dst_start = comma + 1;
+    while dst_start < len && sb[dst_start] == b' ' {
+        dst_start += 1;
+    }
+    let dst = &sb[dst_start..];
+    // Trim trailing whitespace from dst
+    let mut dst_end = dst.len();
+    while dst_end > 0 && dst[dst_end - 1] == b' ' {
+        dst_end -= 1;
+    }
+    let dst = &dst[..dst_end];
+    src == dst && src.len() >= 2 && src[0] == b'%'
+}
+
+/// Classify mov-family instructions for extension elimination.
+/// Called only when the line starts with "mov".
+#[inline]
+fn classify_mov_ext(s: &str, sb: &[u8]) -> ExtKind {
+    let len = sb.len();
+    // Check specific extension patterns that the combined_local_pass cares about.
+    // Note: movslq %eax, %rax serves dual roles: it IS a consumer (can be eliminated
+    // after another movslq to %rax) and is also a producer for cltq elimination.
+    // We classify it as ProducerMovslqToRax so cltq elimination works, and add
+    // MovslqEaxRax to the consumer matching so it can also be eliminated.
+    if s == "movzbq %al, %rax" { return ExtKind::MovzbqAlRax; }
+    if s == "movzwq %ax, %rax" { return ExtKind::MovzwqAxRax; }
+    if s == "movsbq %al, %rax" { return ExtKind::MovsbqAlRax; }
+    if s == "movslq %eax, %rax" { return ExtKind::MovslqEaxRax; }
+    if s == "movl %eax, %eax" { return ExtKind::MovlEaxEax; }
+
+    // Producers: movslq ... %rax
+    if len >= 7 && sb[3] == b's' && sb[4] == b'l' && sb[5] == b'q' && sb[6] == b' ' {
+        // movslq - check if destination is %rax
+        if s.ends_with("%rax") {
+            return ExtKind::ProducerMovslqToRax;
+        }
+    }
+
+    // Producers: movq $const, %rax
+    if len >= 6 && sb[3] == b'q' && sb[4] == b' ' && sb[5] == b'$' {
+        if s.ends_with("%rax") {
+            return ExtKind::ProducerMovqConstRax;
+        }
+    }
+
+    // Producers: movzbq ... %rax
+    if s.starts_with("movzbq ") && s.ends_with("%rax") {
+        return ExtKind::ProducerMovzbqToRax;
+    }
+    if s.starts_with("movzwq ") && s.ends_with("%rax") {
+        return ExtKind::ProducerMovzwqToRax;
+    }
+    if s.starts_with("movsbq ") && s.ends_with("%rax") {
+        return ExtKind::ProducerMovsbqToRax;
+    }
+
+    // Producers: movl ... %eax
+    if len >= 6 && sb[3] == b'l' && sb[4] == b' ' {
+        if s.ends_with("%eax") {
+            return ExtKind::ProducerMovlToEax;
+        }
+    }
+
+    // Producers: movzbl ... %eax
+    if s.starts_with("movzbl ") && s.ends_with("%eax") {
+        return ExtKind::ProducerMovzbToEax;
+    }
+    // movzbq ... %rax is already handled above as ProducerMovzbqToRax
+    // which also counts as ProducerMovzbToEax for movl %eax,%eax elimination
+
+    // Producers: movzwl ... %eax
+    if s.starts_with("movzwl ") && s.ends_with("%eax") {
+        return ExtKind::ProducerMovzwToEax;
+    }
+    // movzwq ... %rax is already handled above
+
+    ExtKind::None
+}
+
+/// Classify arithmetic instructions that produce 32-bit results for extension elimination.
+#[inline]
+fn classify_arith_ext(s: &str, _sb: &[u8], first: u8) -> ExtKind {
+    match first {
+        b'a' => {
+            if s.starts_with("addl ") || s.starts_with("andl ") { ExtKind::ProducerArith32 }
+            else { ExtKind::None }
+        }
+        b's' => {
+            if s.starts_with("subl ") || s.starts_with("shll ") || s.starts_with("shrl ") { ExtKind::ProducerArith32 }
+            else { ExtKind::None }
+        }
+        b'i' => {
+            if s.starts_with("imull ") { ExtKind::ProducerArith32 }
+            else if s == "idivl %ecx" { ExtKind::ProducerDiv32 }
+            else { ExtKind::None }
+        }
+        b'o' => {
+            if s.starts_with("orl ") { ExtKind::ProducerArith32 }
+            else { ExtKind::None }
+        }
+        b'x' => {
+            if s.starts_with("xorl ") { ExtKind::ProducerArith32 }
+            else { ExtKind::None }
+        }
+        b'd' => {
+            if s == "divl %ecx" { ExtKind::ProducerDiv32 }
+            else { ExtKind::None }
+        }
+        _ => ExtKind::None,
+    }
 }
 
 /// Compute byte offset to first non-space character.
@@ -484,7 +713,7 @@ impl LineStore {
 
 #[inline]
 fn mark_nop(info: &mut LineInfo) {
-    *info = LineInfo { kind: LineKind::Nop, trim_start: 0, has_indirect_mem: false };
+    *info = LineInfo { kind: LineKind::Nop, ext_kind: ExtKind::None, trim_start: 0, has_indirect_mem: false };
 }
 
 /// Replace a line's text and re-classify it.
@@ -513,16 +742,22 @@ pub fn peephole_optimize(asm: String) -> String {
     let mut infos: Vec<LineInfo> = (0..line_count).map(|i| classify_line(store.get(i))).collect();
 
     // Phase 1: Iterative cheap local passes.
-    // 8 iterations is sufficient: local patterns rarely chain deeper than 3-4 levels.
-    // The combined_local_pass merges 5 simple passes into one linear scan,
-    // reducing the number of full scans from 7 to 3 per iteration.
+    // Run combined_local_pass first; if it makes changes, also run push/pop passes.
+    // The push/pop passes are only useful when the combined pass has removed or
+    // modified instructions, exposing new push/pop pair opportunities.
+    // 8 iterations max: local patterns rarely chain deeper than 3-4 levels.
     let mut changed = true;
     let mut pass_count = 0;
     while changed && pass_count < 8 {
         changed = false;
-        changed |= combined_local_pass(&store, &mut infos);
-        changed |= eliminate_push_pop_pairs(&store, &mut infos);
-        changed |= eliminate_binop_push_pop_pattern(&mut store, &mut infos);
+        let local_changed = combined_local_pass(&store, &mut infos);
+        changed |= local_changed;
+        // Only run push/pop passes if local pass made changes or this is the first iteration
+        // (first iteration always runs all passes to catch initial opportunities)
+        if local_changed || pass_count == 0 {
+            changed |= eliminate_push_pop_pairs(&store, &mut infos);
+            changed |= eliminate_binop_push_pop_pattern(&mut store, &mut infos);
+        }
         pass_count += 1;
     }
 
@@ -572,14 +807,12 @@ fn combined_local_pass(store: &LineStore, infos: &mut [LineInfo]) -> bool {
         }
 
         // --- Pattern: self-move elimination (movq %reg, %reg) ---
-        if matches!(infos[i].kind, LineKind::Other { .. }) {
-            let trimmed = infos[i].trimmed(store.get(i));
-            if is_self_move(trimmed) {
-                mark_nop(&mut infos[i]);
-                changed = true;
-                i += 1;
-                continue;
-            }
+        // Pre-classified as SelfMove during classify_line, avoiding string parsing.
+        if infos[i].kind == LineKind::SelfMove {
+            mark_nop(&mut infos[i]);
+            changed = true;
+            i += 1;
+            continue;
         }
 
         // --- Pattern: redundant jump to next label ---
@@ -632,8 +865,9 @@ fn combined_local_pass(store: &LineStore, infos: &mut [LineInfo]) -> bool {
             }
         }
 
-        // For the next two patterns, we need the next non-NOP instruction after i.
-        // We compute it once and use it for both cltq and zero-extend checks.
+        // --- Pattern: redundant zero/sign extension (including cltq) ---
+        // Uses pre-classified ExtKind to avoid repeated starts_with/ends_with
+        // string comparisons on every iteration.
         //
         // Find the next non-NOP instruction, skipping stores to rbp (which don't
         // modify registers we care about for extension redundancy).
@@ -651,37 +885,30 @@ fn combined_local_pass(store: &LineStore, infos: &mut [LineInfo]) -> bool {
         }
 
         if ext_idx < len && !infos[ext_idx].is_nop() {
-            let next = infos[ext_idx].trimmed(store.get(ext_idx));
-            let prev = infos[i].trimmed(store.get(i));
+            let next_ext = infos[ext_idx].ext_kind;
+            let prev_ext = infos[i].ext_kind;
 
-            // --- Pattern: redundant zero/sign extension (including cltq) ---
-            let is_redundant_ext = {
-                if next == "movzbq %al, %rax" {
-                    prev.starts_with("movzbq ") && prev.ends_with("%rax")
-                } else if next == "movzwq %ax, %rax" {
-                    prev.starts_with("movzwq ") && prev.ends_with("%rax")
-                } else if next == "movsbq %al, %rax" {
-                    prev.starts_with("movsbq ") && prev.ends_with("%rax")
-                } else if next == "movslq %eax, %rax" {
-                    prev.starts_with("movslq ") && prev.ends_with("%rax")
-                } else if next == "movl %eax, %eax" {
-                    prev.starts_with("addl ") || prev.starts_with("subl ")
-                        || prev.starts_with("imull ") || prev.starts_with("andl ")
-                        || prev.starts_with("orl ") || prev.starts_with("xorl ")
-                        || prev.starts_with("shll ") || prev.starts_with("shrl ")
-                        || (prev.starts_with("movl ") && prev.ends_with("%eax"))
-                        || (prev.starts_with("movzbl ") && prev.ends_with("%eax"))
-                        || (prev.starts_with("movzbq ") && prev.ends_with("%rax"))
-                        || (prev.starts_with("movzwl ") && prev.ends_with("%eax"))
-                        || (prev.starts_with("movzwq ") && prev.ends_with("%rax"))
-                        || prev == "divl %ecx" || prev == "idivl %ecx"
-                } else if next == "cltq" {
-                    // cltq after movslq ... %rax (through intervening stores)
-                    (prev.starts_with("movslq ") && prev.ends_with("%rax"))
-                        || (prev.starts_with("movq $") && prev.ends_with("%rax"))
-                } else {
-                    false
-                }
+            // Use pre-classified ExtKind for fast matching.
+            // Note: Some ExtKind values serve dual roles (both consumer and producer).
+            // For example, MovslqEaxRax is a consumer (after another movslq-to-rax) AND
+            // a producer (for subsequent cltq, since both sign-extend eax to rax).
+            // Similarly, MovzbqAlRax/MovzwqAxRax/MovsbqAlRax can act as producers for
+            // a subsequent identical extension.
+            let is_redundant_ext = match next_ext {
+                ExtKind::MovzbqAlRax => matches!(prev_ext, ExtKind::ProducerMovzbqToRax | ExtKind::MovzbqAlRax),
+                ExtKind::MovzwqAxRax => matches!(prev_ext, ExtKind::ProducerMovzwqToRax | ExtKind::MovzwqAxRax),
+                ExtKind::MovsbqAlRax => matches!(prev_ext, ExtKind::ProducerMovsbqToRax | ExtKind::MovsbqAlRax),
+                ExtKind::MovslqEaxRax => matches!(prev_ext, ExtKind::ProducerMovslqToRax | ExtKind::MovslqEaxRax),
+                ExtKind::Cltq => matches!(prev_ext,
+                    ExtKind::ProducerMovslqToRax | ExtKind::ProducerMovqConstRax |
+                    ExtKind::MovslqEaxRax),
+                ExtKind::MovlEaxEax => matches!(prev_ext,
+                    ExtKind::ProducerArith32 | ExtKind::ProducerMovlToEax |
+                    ExtKind::ProducerMovzbToEax | ExtKind::ProducerMovzbqToRax |
+                    ExtKind::ProducerMovzwToEax | ExtKind::ProducerMovzwqToRax |
+                    ExtKind::ProducerDiv32 |
+                    ExtKind::MovlEaxEax),
+                _ => false,
             };
 
             if is_redundant_ext {
@@ -750,7 +977,8 @@ fn eliminate_push_pop_pairs(store: &LineStore, infos: &mut [LineInfo]) -> bool {
 fn instruction_modifies_reg_id(info: &LineInfo, reg_id: RegId) -> bool {
     match info.kind {
         LineKind::StoreRbp { .. } | LineKind::Cmp | LineKind::Nop | LineKind::Empty
-        | LineKind::Label | LineKind::Directive | LineKind::Jmp | LineKind::CondJmp => false,
+        | LineKind::Label | LineKind::Directive | LineKind::Jmp | LineKind::CondJmp
+        | LineKind::SelfMove => false,
         LineKind::LoadRbp { reg, .. } => reg == reg_id,
         LineKind::Pop { reg } => reg == reg_id,
         LineKind::Push { .. } => false, // push reads, doesn't modify the source reg
@@ -1094,6 +1322,10 @@ fn is_conditional_jump(s: &str) -> bool {
 }
 
 /// Check if an instruction is a self-move (e.g., movq %rax, %rax).
+/// Note: The hot path uses `is_self_move_fast` (byte-level) during classify_line
+/// and pre-classified `SelfMove` in combined_local_pass. This string-level version
+/// is kept for test assertions.
+#[cfg(test)]
 fn is_self_move(s: &str) -> bool {
     if let Some(rest) = s.strip_prefix("movq ") {
         let rest = rest.trim();
