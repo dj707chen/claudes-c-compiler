@@ -13,7 +13,7 @@
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::frontend::parser::ast::*;
-use crate::frontend::sema::{FunctionInfo, ExprTypeMap};
+use crate::frontend::sema::{FunctionInfo, ExprTypeMap, ConstMap};
 use crate::ir::ir::*;
 use crate::common::types::{IrType, CType};
 use crate::backend::Target;
@@ -56,6 +56,12 @@ pub struct Lowerer {
     /// Consulted as a fast O(1) fallback in get_expr_ctype() before the lowerer
     /// does its own (more expensive) type inference using lowering-specific state.
     pub(super) sema_expr_types: ExprTypeMap,
+    /// Pre-computed constant expression values from semantic analysis.
+    /// Maps AST Expr node addresses (as usize) to their IrConst values.
+    /// Consulted as an O(1) fast path in eval_const_expr() before the lowerer
+    /// falls back to its own evaluation (which handles lowering-specific cases
+    /// like global addresses, func_state const locals, etc.).
+    pub(super) sema_const_values: ConstMap,
 }
 
 impl Lowerer {
@@ -78,6 +84,7 @@ impl Lowerer {
         type_context: TypeContext,
         sema_functions: FxHashMap<String, FunctionInfo>,
         sema_expr_types: ExprTypeMap,
+        sema_const_values: ConstMap,
     ) -> Self {
         // Pre-populate known_functions from sema's function map.
         // This means the lowerer knows about all functions before the first pass,
@@ -104,6 +111,7 @@ impl Lowerer {
             emitted_global_names: FxHashSet::default(),
             sema_functions,
             sema_expr_types,
+            sema_const_values,
         }
     }
 

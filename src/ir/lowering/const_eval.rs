@@ -10,8 +10,30 @@ use crate::common::types::{CType, IrType, StructLayout};
 use super::lowering::Lowerer;
 
 impl Lowerer {
+    /// Look up a pre-computed constant value from sema's ConstMap.
+    /// Returns Some(IrConst) if sema successfully evaluated this expression
+    /// at compile time during its pass.
+    fn lookup_sema_const(&self, expr: &Expr) -> Option<IrConst> {
+        let key = expr as *const Expr as usize;
+        self.sema_const_values.get(&key).cloned()
+    }
+
     /// Try to evaluate a constant expression at compile time.
+    ///
+    /// First checks sema's pre-computed ConstMap (O(1) lookup for expressions
+    /// that sema could evaluate). Falls back to the lowerer's own evaluation
+    /// for expressions that require lowering-specific state (global addresses,
+    /// const local values, etc.).
     pub(super) fn eval_const_expr(&self, expr: &Expr) -> Option<IrConst> {
+        // Fast path: consult sema's pre-computed constant values.
+        // This avoids re-evaluating expressions that sema already handled.
+        // We skip the sema lookup for identifiers since the lowerer may have
+        // more information (const local values, static locals) that sema lacks.
+        if !matches!(expr, Expr::Identifier(_, _)) {
+            if let Some(val) = self.lookup_sema_const(expr) {
+                return Some(val);
+            }
+        }
         match expr {
             Expr::IntLiteral(val, _) | Expr::LongLiteral(val, _) => {
                 Some(IrConst::I64(*val))

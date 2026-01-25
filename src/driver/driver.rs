@@ -439,6 +439,7 @@ impl Driver {
             sema_result.type_context,
             sema_result.functions,
             sema_result.expr_types,
+            sema_result.const_values,
         );
         let mut module = lowerer.lower(&ast);
 

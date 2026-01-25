@@ -1,15 +1,16 @@
 HIGH PRIORITY: Expand sema to produce a typed AST, reducing lowering responsibilities
 
-Current state (after Steps 1-4 complete):
+Current state (after Steps 1-5 complete):
 The sema pass collects type information (typedefs, struct layouts, enum constants,
-function signatures), has ExprTypeChecker for CType inference, and now annotates
-every analyzable expression with its CType via an ExprTypeMap. The lowerer receives
-this map and uses it as a fallback in get_expr_ctype(), so sema's type inference
-is consulted before the lowerer falls back to its own inference. It does NOT yet:
+function signatures), has ExprTypeChecker for CType inference, annotates every
+analyzable expression with its CType via ExprTypeMap, and now pre-computes
+compile-time constant values via SemaConstEval into a ConstMap. The lowerer
+receives all three maps and uses them as fast O(1) fallbacks. It does NOT yet:
 - Reject type errors with diagnostics
 - Replace the lowerer's expr_types.rs entirely (lowerer still needs its own
   get_expr_ctype_lowerer for lowering-specific state like locals/globals)
-- Unify constant expression evaluation between sema and lowerer
+- Fully eliminate lowerer's const_eval (lowerer still has its own for global
+  address expressions and func_state const local lookups)
 
 The lowerer (ir/lowering/) is ~18K lines and handles both type inference AND IR
 emission. Key type-inference code that should move to sema:
@@ -23,9 +24,12 @@ emission. Key type-inference code that should move to sema:
    can delegate more to sema.
 
 2. Constant expression evaluation (const_eval.rs, 969 lines)
-   Both sema and lowering have const_eval. Sema's is simpler (for enum values,
-   array dimensions). Lowering's handles more cases (global initializers,
-   sizeof of complex types). These should be unified.
+   PARTIALLY UNIFIED. Sema now has SemaConstEval (const_eval.rs) returning
+   IrConst with: float literals, cast chains, sizeof/alignof, binary ops with
+   proper signedness, offsetof patterns. The lowerer's eval_const_expr uses
+   sema's ConstMap as an O(1) fast path. Lowerer still handles: global address
+   expressions, func_state const local values, pointer arithmetic on globals.
+   TODO: move more of these to sema as sema gains more scope tracking.
 
 3. Type conversion duplication (DONE - unified via TypeConvertContext trait)
    The type_spec_to_ctype dispatch was unified into type_builder.rs.
@@ -62,7 +66,18 @@ Step 4: (DONE) Have lowerer consume sema's type annotations instead of re-comput
           back to sema's pre-computed annotations via lookup_sema_expr_type()
         - Original logic moved to get_expr_ctype_lowerer() internal method
         - Zero regressions across all three backends (x86, ARM, RISC-V)
-Step 5: Move constant evaluation to sema (unify the two const_eval implementations)
+Step 5: (DONE) Expand sema const_eval to produce IrConst values
+        - Added SemaConstEval in sema/const_eval.rs returning Option<IrConst>
+        - Handles: float literals (F32, F64, LongDouble), cast chains with
+          bit-width tracking, binary ops with type-aware signedness, sizeof/alignof
+          via sema's type resolution, ternary conditionals, offsetof patterns,
+          __builtin_types_compatible_p
+        - Added ConstMap (FxHashMap<usize, IrConst>) to SemaResult
+        - Sema's analyze_expr() populates ConstMap via annotate_const_value()
+        - Sema's eval_const_expr() now delegates to SemaConstEval (removed 190
+          lines of duplicated sizeof_type_spec/alignof_type_spec from sema.rs)
+        - Lowerer's eval_const_expr() uses sema ConstMap as O(1) fast path
+        - Zero regressions across all three backends (x86, ARM, RISC-V)
 Step 6: Add actual type error diagnostics in sema
 Step 7: Simplify lowering to assume types are correct
 
@@ -76,7 +91,8 @@ Key files:
 - src/frontend/sema/sema.rs (current sema pass)
 - src/frontend/sema/type_context.rs (TypeContext, in sema)
 - src/frontend/sema/type_checker.rs (ExprTypeChecker for CType inference)
+- src/frontend/sema/const_eval.rs (SemaConstEval for IrConst evaluation)
 - src/common/types.rs (CType methods: usual_arithmetic_conversion, integer_rank, etc.)
 - src/ir/lowering/expr_types.rs (~1200 lines of type inference, partially shared now)
-- src/ir/lowering/const_eval.rs (969 lines of const eval to unify)
-- src/ir/lowering/lowering.rs (analyze_declaration to move; now consumes sema functions)
+- src/ir/lowering/const_eval.rs (969 lines of const eval, now with sema fast path)
+- src/ir/lowering/lowering.rs (analyze_declaration to move; consumes sema functions + consts)

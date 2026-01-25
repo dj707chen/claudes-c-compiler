@@ -506,6 +506,7 @@ impl<'a> ExprTypeChecker<'a> {
     }
 
     /// Simple constant expression evaluation for array sizes.
+    /// TODO: delegate to SemaConstEval to unify const_eval across sema modules
     fn eval_const_expr(&self, expr: &Expr) -> Option<i64> {
         match expr {
             Expr::IntLiteral(val, _) | Expr::LongLiteral(val, _) => Some(*val),

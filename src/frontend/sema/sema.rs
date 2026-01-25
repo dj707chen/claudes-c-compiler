@@ -22,6 +22,7 @@ use crate::common::source::Span;
 use crate::frontend::parser::ast::*;
 use crate::frontend::sema::builtins;
 use super::type_context::{TypeContext, FunctionTypedefInfo};
+use super::const_eval::{SemaConstEval, ConstMap};
 
 use std::cell::Cell;
 use crate::common::fx_hash::FxHashMap;
@@ -64,6 +65,12 @@ pub struct SemaResult {
     /// ExprTypeChecker. The lowerer consults this as a fallback in
     /// get_expr_ctype() after its own lowering-state-based inference fails.
     pub expr_types: ExprTypeMap,
+    /// Pre-computed constant expression values: maps AST Expr node addresses
+    /// to their compile-time IrConst values. Populated during sema's walk
+    /// using SemaConstEval (handles float literals, cast chains, sizeof,
+    /// binary ops with proper signedness semantics). The lowerer consults
+    /// this as an O(1) fast path before its own eval_const_expr.
+    pub const_values: ConstMap,
 }
 
 impl Default for SemaResult {
@@ -73,6 +80,7 @@ impl Default for SemaResult {
             type_context: TypeContext::new(),
             warnings: Vec::new(),
             expr_types: ExprTypeMap::default(),
+            const_values: ConstMap::default(),
         }
     }
 }
@@ -197,13 +205,10 @@ impl SemanticAnalyzer {
     // === Declaration analysis ===
 
     fn analyze_declaration(&mut self, decl: &Declaration, is_global: bool) {
-        // Check for enum declarations (which define constants)
-        if let TypeSpecifier::Enum(_, Some(variants)) = &decl.type_spec {
-            self.process_enum_variants(variants);
-        }
-
-        // Check for struct/union definitions
-        // (These are registered implicitly through type_spec_to_ctype)
+        // Register enum constants from this declaration's type specifier.
+        // This recursively walks into struct/union fields to find inline
+        // enum definitions (e.g., `struct { enum { A, B } mode; }`).
+        self.collect_enum_constants_from_type_spec(&decl.type_spec);
 
         let base_type = self.type_spec_to_ctype(&decl.type_spec);
 
@@ -338,6 +343,28 @@ impl SemanticAnalyzer {
                 is_defined: true,
             });
             self.enum_counter += 1;
+        }
+    }
+
+    /// Recursively collect enum constants from a type specifier, walking into
+    /// struct/union field types. This ensures that inline enum definitions
+    /// within structs (e.g., `struct { enum { A, B } mode; }`) have their
+    /// constants registered in the enclosing scope, matching GCC/Clang behavior.
+    fn collect_enum_constants_from_type_spec(&mut self, ts: &TypeSpecifier) {
+        match ts {
+            TypeSpecifier::Enum(_, Some(variants)) => {
+                self.process_enum_variants(variants);
+            }
+            TypeSpecifier::Struct(_, Some(fields), _, _, _)
+            | TypeSpecifier::Union(_, Some(fields), _, _, _) => {
+                for field in fields {
+                    self.collect_enum_constants_from_type_spec(&field.type_spec);
+                }
+            }
+            TypeSpecifier::Array(inner, _) | TypeSpecifier::Pointer(inner) => {
+                self.collect_enum_constants_from_type_spec(inner);
+            }
+            _ => {}
         }
     }
 
@@ -582,6 +609,11 @@ impl SemanticAnalyzer {
         // will consult this map as a fast O(1) fallback before doing its own
         // (more expensive) type inference that requires lowering state.
         self.annotate_expr_type(expr);
+
+        // Also try to evaluate this expression as a compile-time constant.
+        // The lowerer will consult the const_values map as an O(1) fast path
+        // before doing its own eval_const_expr.
+        self.annotate_const_value(expr);
     }
 
     /// Infer the CType of an expression via ExprTypeChecker and record it
@@ -595,6 +627,21 @@ impl SemanticAnalyzer {
         if let Some(ctype) = checker.infer_expr_ctype(expr) {
             let key = expr as *const Expr as usize;
             self.result.expr_types.insert(key, ctype);
+        }
+    }
+
+    /// Try to evaluate an expression as a compile-time constant using
+    /// SemaConstEval and record the result in the const_values map.
+    /// The lowerer will consult this as an O(1) fast path.
+    fn annotate_const_value(&mut self, expr: &Expr) {
+        let evaluator = SemaConstEval {
+            types: &self.result.type_context,
+            symbols: &self.symbol_table,
+            functions: &self.result.functions,
+        };
+        if let Some(val) = evaluator.eval_const_expr(expr) {
+            let key = expr as *const Expr as usize;
+            self.result.const_values.insert(key, val);
         }
     }
 
@@ -654,276 +701,17 @@ impl SemanticAnalyzer {
 
     /// Try to evaluate a constant expression at compile time.
     /// Returns None if the expression cannot be evaluated.
+    ///
+    /// This delegates to the richer SemaConstEval which returns IrConst,
+    /// then extracts the i64 value. This ensures enum values, bitfield
+    /// widths, and array sizes all use the same evaluation logic.
     fn eval_const_expr(&self, expr: &Expr) -> Option<i64> {
-        match expr {
-            Expr::IntLiteral(val, _) | Expr::LongLiteral(val, _) => Some(*val),
-            Expr::UIntLiteral(val, _) | Expr::ULongLiteral(val, _) => Some(*val as i64),
-            Expr::CharLiteral(ch, _) => Some(*ch as i64),
-            Expr::Identifier(name, _) => {
-                self.result.type_context.enum_constants.get(name).copied()
-            }
-            Expr::BinaryOp(op, lhs, rhs, _) => {
-                let l = self.eval_const_expr(lhs)?;
-                let r = self.eval_const_expr(rhs)?;
-                Some(match op {
-                    BinOp::Add => l.wrapping_add(r),
-                    BinOp::Sub => l.wrapping_sub(r),
-                    BinOp::Mul => l.wrapping_mul(r),
-                    BinOp::Div => if r != 0 { l.wrapping_div(r) } else { return None },
-                    BinOp::Mod => if r != 0 { l.wrapping_rem(r) } else { return None },
-                    BinOp::BitAnd => l & r,
-                    BinOp::BitOr => l | r,
-                    BinOp::BitXor => l ^ r,
-                    BinOp::Shl => l.wrapping_shl(r as u32),
-                    BinOp::Shr => l.wrapping_shr(r as u32),
-                    BinOp::Eq => if l == r { 1 } else { 0 },
-                    BinOp::Ne => if l != r { 1 } else { 0 },
-                    BinOp::Lt => if l < r { 1 } else { 0 },
-                    BinOp::Le => if l <= r { 1 } else { 0 },
-                    BinOp::Gt => if l > r { 1 } else { 0 },
-                    BinOp::Ge => if l >= r { 1 } else { 0 },
-                    BinOp::LogicalAnd => if l != 0 && r != 0 { 1 } else { 0 },
-                    BinOp::LogicalOr => if l != 0 || r != 0 { 1 } else { 0 },
-                })
-            }
-            Expr::UnaryOp(op, inner, _) => {
-                let v = self.eval_const_expr(inner)?;
-                Some(match op {
-                    UnaryOp::Neg => v.wrapping_neg(),
-                    UnaryOp::BitNot => !v,
-                    UnaryOp::LogicalNot => if v == 0 { 1 } else { 0 },
-                    UnaryOp::Plus => v,
-                    _ => return None,
-                })
-            }
-            Expr::Cast(_, inner, _) => {
-                // Simple cast: try evaluating the inner expression
-                self.eval_const_expr(inner)
-            }
-            Expr::GnuConditional(cond, else_expr, _) => {
-                let c = self.eval_const_expr(cond)?;
-                if c != 0 {
-                    Some(c) // condition value is used as result
-                } else {
-                    self.eval_const_expr(else_expr)
-                }
-            }
-            Expr::Conditional(cond, then_expr, else_expr, _) => {
-                let c = self.eval_const_expr(cond)?;
-                if c != 0 {
-                    self.eval_const_expr(then_expr)
-                } else {
-                    self.eval_const_expr(else_expr)
-                }
-            }
-            Expr::Sizeof(arg, _) => {
-                // TODO: compute sizeof for types
-                match arg.as_ref() {
-                    SizeofArg::Type(type_spec) => {
-                        // Rough size computation
-                        Some(self.sizeof_type_spec(type_spec) as i64)
-                    }
-                    SizeofArg::Expr(_) => {
-                        // Can't easily determine type of expression here
-                        None
-                    }
-                }
-            }
-            Expr::Alignof(ref ts, _) => {
-                Some(self.alignof_type_spec(ts) as i64)
-            }
-            _ => None,
-        }
-    }
-
-    /// Compute sizeof for a type specifier, used in constant expression evaluation.
-    /// This must accurately handle struct/union types by looking up their cached layouts,
-    /// since array dimensions in struct fields may reference sizeof(struct_type).
-    fn sizeof_type_spec(&self, spec: &TypeSpecifier) -> usize {
-        match spec {
-            TypeSpecifier::Void => 0,
-            TypeSpecifier::Char | TypeSpecifier::UnsignedChar => 1,
-            TypeSpecifier::Short | TypeSpecifier::UnsignedShort => 2,
-            TypeSpecifier::Int | TypeSpecifier::UnsignedInt | TypeSpecifier::Signed | TypeSpecifier::Unsigned => 4,
-            TypeSpecifier::Long | TypeSpecifier::UnsignedLong | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong => 8,
-            TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128 => 16,
-            TypeSpecifier::Float => 4,
-            TypeSpecifier::Double => 8,
-            TypeSpecifier::LongDouble => 16,
-            TypeSpecifier::Bool => 1,
-            TypeSpecifier::ComplexFloat => 8,
-            TypeSpecifier::ComplexDouble => 16,
-            TypeSpecifier::ComplexLongDouble => 32,
-            TypeSpecifier::Pointer(_) => 8,
-            TypeSpecifier::FunctionPointer(_, _, _) => 8,
-            TypeSpecifier::Array(elem, Some(size)) => {
-                let elem_size = self.sizeof_type_spec(elem);
-                if let Some(n) = self.eval_const_expr(size) {
-                    elem_size * n as usize
-                } else {
-                    8 // fallback
-                }
-            }
-            TypeSpecifier::Array(_, None) => 8, // incomplete array
-            TypeSpecifier::Struct(tag, fields, is_packed, pragma_pack, struct_aligned) => {
-                // Look up cached layout for tagged structs
-                if let Some(tag) = tag {
-                    let key = format!("struct.{}", tag);
-                    if let Some(layout) = self.result.type_context.struct_layouts.get(&key) {
-                        return layout.size;
-                    }
-                }
-                // For inline struct definitions, compute from fields
-                if let Some(fields) = fields {
-                    let struct_fields = self.convert_struct_fields(fields);
-                    if !struct_fields.is_empty() {
-                        let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
-                        let mut layout = StructLayout::for_struct_with_packing(
-                            &struct_fields, max_field_align, &self.result.type_context.struct_layouts
-                        );
-                        if let Some(a) = struct_aligned {
-                            if *a > layout.align {
-                                layout.align = *a;
-                                let mask = layout.align - 1;
-                                layout.size = (layout.size + mask) & !mask;
-                            }
-                        }
-                        return layout.size;
-                    }
-                }
-                0 // incomplete struct
-            }
-            TypeSpecifier::Union(tag, fields, is_packed, pragma_pack, struct_aligned) => {
-                // Look up cached layout for tagged unions
-                if let Some(tag) = tag {
-                    let key = format!("union.{}", tag);
-                    if let Some(layout) = self.result.type_context.struct_layouts.get(&key) {
-                        return layout.size;
-                    }
-                }
-                // For inline union definitions, compute from fields
-                if let Some(fields) = fields {
-                    let union_fields = self.convert_struct_fields(fields);
-                    if !union_fields.is_empty() {
-                        let mut layout = StructLayout::for_union(&union_fields, &self.result.type_context.struct_layouts);
-                        if *is_packed {
-                            layout.align = 1;
-                            layout.size = layout.fields.iter().map(|f| f.ty.size_ctx(&self.result.type_context.struct_layouts)).max().unwrap_or(0);
-                        } else if let Some(pack) = pragma_pack {
-                            if *pack < layout.align {
-                                layout.align = *pack;
-                                let mask = layout.align - 1;
-                                layout.size = (layout.size + mask) & !mask;
-                            }
-                        }
-                        if let Some(a) = struct_aligned {
-                            if *a > layout.align {
-                                layout.align = *a;
-                                let mask = layout.align - 1;
-                                layout.size = (layout.size + mask) & !mask;
-                            }
-                        }
-                        return layout.size;
-                    }
-                }
-                0 // incomplete union
-            }
-            TypeSpecifier::Enum(_, _) => 4, // enums are int-sized
-            TypeSpecifier::TypedefName(name) => {
-                // Resolve typedef and compute size from the resolved CType
-                if let Some(ctype) = self.result.type_context.typedefs.get(name) {
-                    ctype.size_ctx(&self.result.type_context.struct_layouts)
-                } else {
-                    8 // fallback for unknown typedef
-                }
-            }
-            TypeSpecifier::TypeofType(inner) => self.sizeof_type_spec(inner),
-            _ => 8, // fallback for remaining cases (Typeof expr, etc.)
-        }
-    }
-
-    /// Compute alignof for a type specifier, used in constant expression evaluation.
-    /// Must accurately handle struct/union types by looking up their cached layouts.
-    fn alignof_type_spec(&self, spec: &TypeSpecifier) -> usize {
-        match spec {
-            TypeSpecifier::Void | TypeSpecifier::Bool => 1,
-            TypeSpecifier::Char | TypeSpecifier::UnsignedChar => 1,
-            TypeSpecifier::Short | TypeSpecifier::UnsignedShort => 2,
-            TypeSpecifier::Int | TypeSpecifier::UnsignedInt | TypeSpecifier::Signed | TypeSpecifier::Unsigned => 4,
-            TypeSpecifier::Long | TypeSpecifier::UnsignedLong | TypeSpecifier::LongLong | TypeSpecifier::UnsignedLongLong => 8,
-            TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128 => 16,
-            TypeSpecifier::Float => 4,
-            TypeSpecifier::Double => 8,
-            TypeSpecifier::LongDouble => 16,
-            TypeSpecifier::ComplexFloat => 4,
-            TypeSpecifier::ComplexDouble => 8,
-            TypeSpecifier::ComplexLongDouble => 16,
-            TypeSpecifier::Pointer(_) | TypeSpecifier::FunctionPointer(_, _, _) => 8,
-            TypeSpecifier::Array(elem, _) => self.alignof_type_spec(elem),
-            TypeSpecifier::Struct(tag, fields, is_packed, pragma_pack, struct_aligned) => {
-                // Look up cached layout for tagged structs
-                if let Some(tag) = tag {
-                    let key = format!("struct.{}", tag);
-                    if let Some(layout) = self.result.type_context.struct_layouts.get(&key) {
-                        return layout.align;
-                    }
-                }
-                // For inline struct definitions, compute from fields
-                if let Some(fields) = fields {
-                    let struct_fields = self.convert_struct_fields(fields);
-                    if !struct_fields.is_empty() {
-                        let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
-                        let mut layout = StructLayout::for_struct_with_packing(
-                            &struct_fields, max_field_align, &self.result.type_context.struct_layouts
-                        );
-                        if let Some(a) = struct_aligned {
-                            if *a > layout.align {
-                                layout.align = *a;
-                            }
-                        }
-                        return layout.align;
-                    }
-                }
-                1 // incomplete struct
-            }
-            TypeSpecifier::Union(tag, fields, is_packed, _pragma_pack, struct_aligned) => {
-                // Look up cached layout for tagged unions
-                if let Some(tag) = tag {
-                    let key = format!("union.{}", tag);
-                    if let Some(layout) = self.result.type_context.struct_layouts.get(&key) {
-                        return layout.align;
-                    }
-                }
-                // For inline union definitions, compute from fields
-                if let Some(fields) = fields {
-                    let union_fields = self.convert_struct_fields(fields);
-                    if !union_fields.is_empty() {
-                        let mut layout = StructLayout::for_union(&union_fields, &self.result.type_context.struct_layouts);
-                        if *is_packed {
-                            layout.align = 1;
-                        }
-                        if let Some(a) = struct_aligned {
-                            if *a > layout.align {
-                                layout.align = *a;
-                            }
-                        }
-                        return layout.align;
-                    }
-                }
-                1 // incomplete union
-            }
-            TypeSpecifier::Enum(_, _) => 4, // enums are int-aligned
-            TypeSpecifier::TypedefName(name) => {
-                // Resolve typedef and compute alignment from the resolved CType
-                if let Some(ctype) = self.result.type_context.typedefs.get(name) {
-                    ctype.align_ctx(&self.result.type_context.struct_layouts)
-                } else {
-                    8 // fallback for unknown typedef
-                }
-            }
-            TypeSpecifier::TypeofType(inner) => self.alignof_type_spec(inner),
-            _ => 8, // fallback for remaining cases
-        }
+        let evaluator = SemaConstEval {
+            types: &self.result.type_context,
+            symbols: &self.symbol_table,
+            functions: &self.result.functions,
+        };
+        evaluator.eval_const_expr(expr)?.to_i64()
     }
 
     // === Implicit declarations ===

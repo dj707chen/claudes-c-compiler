@@ -47,10 +47,15 @@ impl Preprocessor {
                 return Some(String::new());
             }
 
-            // Check for recursive inclusion
-            if self.include_stack.contains(&resolved_path) {
-                // Already including this file; skip to avoid infinite recursion
-                return Some(String::new());
+            // Check for excessive recursive inclusion (depth limit like GCC's default of 200).
+            // Files WITHOUT #pragma once are allowed to be re-included with different
+            // macro definitions active (e.g., TCC's x86_64-gen.c includes itself via
+            // tcc.h with TARGET_DEFS_ONLY defined). Only block when nesting is excessive.
+            {
+                let depth = self.include_stack.iter().filter(|p| *p == &resolved_path).count();
+                if depth >= 200 {
+                    return Some(String::new());
+                }
             }
 
             // Read the file
@@ -148,9 +153,12 @@ impl Preprocessor {
                 return Some(String::new());
             }
 
-            // Check for recursive inclusion
-            if self.include_stack.contains(&resolved_path) {
-                return Some(String::new());
+            // Check for excessive recursive inclusion (depth limit)
+            {
+                let depth = self.include_stack.iter().filter(|p| *p == &resolved_path).count();
+                if depth >= 200 {
+                    return Some(String::new());
+                }
             }
 
             // Read and preprocess the file
