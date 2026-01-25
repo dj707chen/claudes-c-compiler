@@ -77,6 +77,7 @@ impl Lowerer {
             Expr::Identifier(name, _) => {
                 if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(name)) {
                     if info.is_struct { return Some(info.alloc_size); }
+                    return None; // local found but not struct; don't fall through to globals
                 }
                 if let Some(ginfo) = self.globals.get(name) {
                     if ginfo.is_struct {
