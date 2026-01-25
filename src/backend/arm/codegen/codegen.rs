@@ -2614,13 +2614,18 @@ impl InlineAsmEmitter for ArmCodegen {
         false
     }
 
-    fn assign_scratch_reg(&mut self, _kind: &AsmOperandKind) -> String {
-        let idx = self.asm_scratch_idx;
-        self.asm_scratch_idx += 1;
-        if idx < ARM_GP_SCRATCH.len() {
-            ARM_GP_SCRATCH[idx].to_string()
-        } else {
-            format!("x{}", 9 + idx)
+    fn assign_scratch_reg(&mut self, _kind: &AsmOperandKind, excluded: &[String]) -> String {
+        loop {
+            let idx = self.asm_scratch_idx;
+            self.asm_scratch_idx += 1;
+            let reg = if idx < ARM_GP_SCRATCH.len() {
+                ARM_GP_SCRATCH[idx].to_string()
+            } else {
+                format!("x{}", 9 + idx)
+            };
+            if !excluded.iter().any(|e| e == &reg) {
+                return reg;
+            }
         }
     }
 

@@ -2614,7 +2614,7 @@ impl InlineAsmEmitter for RiscvCodegen {
         false
     }
 
-    fn assign_scratch_reg(&mut self, kind: &AsmOperandKind) -> String {
+    fn assign_scratch_reg(&mut self, kind: &AsmOperandKind, excluded: &[String]) -> String {
         match kind {
             AsmOperandKind::FpReg => {
                 let idx = self.asm_fp_scratch_idx;
@@ -2626,12 +2626,17 @@ impl InlineAsmEmitter for RiscvCodegen {
                 }
             }
             _ => {
-                let idx = self.asm_gp_scratch_idx;
-                self.asm_gp_scratch_idx += 1;
-                if idx < RISCV_GP_SCRATCH.len() {
-                    RISCV_GP_SCRATCH[idx].to_string()
-                } else {
-                    format!("s{}", 2 + idx - RISCV_GP_SCRATCH.len())
+                loop {
+                    let idx = self.asm_gp_scratch_idx;
+                    self.asm_gp_scratch_idx += 1;
+                    let reg = if idx < RISCV_GP_SCRATCH.len() {
+                        RISCV_GP_SCRATCH[idx].to_string()
+                    } else {
+                        format!("s{}", 2 + idx - RISCV_GP_SCRATCH.len())
+                    };
+                    if !excluded.iter().any(|e| e == &reg) {
+                        return reg;
+                    }
                 }
             }
         }

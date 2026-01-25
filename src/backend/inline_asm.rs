@@ -99,7 +99,9 @@ pub trait InlineAsmEmitter {
     fn setup_operand_metadata(&self, op: &mut AsmOperand, val: &Operand, is_output: bool);
 
     /// Assign the next available scratch register for the given operand kind.
-    fn assign_scratch_reg(&mut self, kind: &AsmOperandKind) -> String;
+    /// `excluded` contains register names that are already claimed by specific-register
+    /// constraints (e.g., "rcx" from "c" constraint) and must not be reused.
+    fn assign_scratch_reg(&mut self, kind: &AsmOperandKind, excluded: &[String]) -> String;
 
     /// Load an input value into its assigned register. Called during Phase 2.
     fn load_input_to_reg(&mut self, op: &AsmOperand, val: &Operand, constraint: &str);
@@ -132,6 +134,10 @@ pub trait InlineAsmEmitter {
 /// separately by each backend's `classify_constraint`.
 pub fn constraint_has_immediate_alt(constraint: &str) -> bool {
     let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+    // Named tied operands ("[name]") don't have immediates
+    if stripped.starts_with('[') && stripped.ends_with(']') {
+        return false;
+    }
     stripped.chars().any(|c| matches!(c, 'I' | 'i' | 'n'))
 }
 
@@ -139,7 +145,38 @@ pub fn constraint_has_immediate_alt(constraint: &str) -> bool {
 /// Handles both single-character ("m") and multi-character constraints ("rm", "mq").
 pub fn constraint_has_memory_alt(constraint: &str) -> bool {
     let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+    // Named tied operands ("[name]") are not memory constraints
+    if stripped.starts_with('[') && stripped.ends_with(']') {
+        return false;
+    }
     stripped.chars().any(|c| c == 'm')
+}
+
+/// Check whether a constraint is memory-only (has memory alternative but no register
+/// alternative). For constraints like "rm", "qm", "g" that allow both register and
+/// memory, returns false — the backend will prefer registers, so the IR lowering
+/// should provide a value (not an address). Only pure "m"/"o"/"V" constraints need
+/// the address for memory operand formatting.
+pub fn constraint_is_memory_only(constraint: &str) -> bool {
+    let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+    // Named tied operands ("[name]") are never memory-only
+    if stripped.starts_with('[') && stripped.ends_with(']') {
+        return false;
+    }
+    let has_mem = stripped.chars().any(|c| matches!(c, 'm' | 'o' | 'V' | 'p'));
+    if !has_mem {
+        return false;
+    }
+    // Check for any register alternative (GP, FP, or specific register)
+    let has_reg = stripped.chars().any(|c| matches!(c,
+        'r' | 'q' | 'R' | 'Q' | 'l' |  // GP register
+        'g' |                              // general (reg + mem + imm)
+        'x' | 'v' | 'Y' |                 // FP register
+        'a' | 'b' | 'c' | 'd' | 'S' | 'D' // specific register
+    ));
+    // Also check for tied operand (digits) — those get a register
+    let has_tied = stripped.chars().any(|c| c.is_ascii_digit());
+    !has_reg && !has_tied
 }
 
 /// Shared inline assembly emission logic. All three backends call this from their
@@ -177,7 +214,20 @@ pub fn emit_inline_asm_common(
 
     // Classify inputs
     for (constraint, val, name) in inputs {
-        let kind = emitter.classify_constraint(constraint);
+        // Handle named tied operands: "[name]" resolves to the output with that name
+        let kind = if constraint.starts_with('[') && constraint.ends_with(']') {
+            let tied_name = &constraint[1..constraint.len()-1];
+            let tied_idx = outputs.iter().position(|(_, _, oname)| {
+                oname.as_deref() == Some(tied_name)
+            });
+            if let Some(idx) = tied_idx {
+                AsmOperandKind::Tied(idx)
+            } else {
+                emitter.classify_constraint(constraint)
+            }
+        } else {
+            emitter.classify_constraint(constraint)
+        };
         let mut op = AsmOperand::new(kind.clone(), name.clone());
         if let AsmOperandKind::Specific(ref reg) = op.kind {
             op.reg = reg.clone();
@@ -225,6 +275,13 @@ pub fn emit_inline_asm_common(
         }
     }
 
+    // Collect registers claimed by specific-register constraints (e.g., "c" -> rcx)
+    // so the scratch allocator can skip them and avoid conflicts.
+    let specific_regs: Vec<String> = operands.iter()
+        .filter(|op| matches!(op.kind, AsmOperandKind::Specific(_)))
+        .map(|op| op.reg.clone())
+        .collect();
+
     // Assign scratch registers to operands that need them
     for i in 0..total_operands {
         if !operands[i].reg.is_empty() {
@@ -240,7 +297,7 @@ pub fn emit_inline_asm_common(
                     false
                 };
                 if !is_tied {
-                    operands[i].reg = emitter.assign_scratch_reg(kind);
+                    operands[i].reg = emitter.assign_scratch_reg(kind, &specific_regs);
                 }
             }
         }

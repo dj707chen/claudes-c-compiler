@@ -4,7 +4,7 @@ use crate::common::types::{IrType, CType, StructLayout};
 use super::lowering::Lowerer;
 use super::definitions::{LocalInfo, GlobalInfo, DeclAnalysis, SwitchFrame, FuncSig, LValue};
 use crate::frontend::sema::type_context::extract_fptr_typedef_info;
-use crate::backend::inline_asm::{constraint_has_immediate_alt, constraint_has_memory_alt};
+use crate::backend::inline_asm::{constraint_has_immediate_alt, constraint_is_memory_only};
 
 impl Lowerer {
     pub(super) fn lower_compound_stmt(&mut self, compound: &CompoundStmt) {
@@ -1253,9 +1253,11 @@ impl Lowerer {
                             sym_name = Self::extract_symbol_name(&inp.expr);
                             self.lower_expr(&inp.expr)
                         }
-                    } else if constraint_has_memory_alt(&constraint) {
-                        // Memory constraint ("m", "rm", etc.): need the address of the
-                        // operand, not its value. Use lower_lvalue to get the memory address.
+                    } else if constraint_is_memory_only(&constraint) {
+                        // Pure memory constraint ("m"): need the address of the operand,
+                        // not its value. Use lower_lvalue to get the memory address.
+                        // For "rm" or "qm" constraints, the backend prefers registers,
+                        // so we lower as a value (handled by the else branch).
                         if let Some(lv) = self.lower_lvalue(&inp.expr) {
                             let ptr = match lv {
                                 LValue::Variable(v) | LValue::Address(v) => v,

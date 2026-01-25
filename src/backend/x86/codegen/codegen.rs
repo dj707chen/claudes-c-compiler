@@ -2854,7 +2854,7 @@ impl InlineAsmEmitter for X86Codegen {
         false
     }
 
-    fn assign_scratch_reg(&mut self, kind: &AsmOperandKind) -> String {
+    fn assign_scratch_reg(&mut self, kind: &AsmOperandKind, excluded: &[String]) -> String {
         if matches!(kind, AsmOperandKind::FpReg) {
             let idx = self.asm_xmm_scratch_idx;
             self.asm_xmm_scratch_idx += 1;
@@ -2864,12 +2864,18 @@ impl InlineAsmEmitter for X86Codegen {
                 format!("xmm{}", idx)
             }
         } else {
-            let idx = self.asm_scratch_idx;
-            self.asm_scratch_idx += 1;
-            if idx < X86_GP_SCRATCH.len() {
-                X86_GP_SCRATCH[idx].to_string()
-            } else {
-                format!("r{}", 12 + idx - X86_GP_SCRATCH.len())
+            // Skip registers that are claimed by specific-register constraints
+            loop {
+                let idx = self.asm_scratch_idx;
+                self.asm_scratch_idx += 1;
+                let reg = if idx < X86_GP_SCRATCH.len() {
+                    X86_GP_SCRATCH[idx].to_string()
+                } else {
+                    format!("r{}", 12 + idx - X86_GP_SCRATCH.len())
+                };
+                if !excluded.iter().any(|e| e == &reg) {
+                    return reg;
+                }
             }
         }
     }
@@ -2939,20 +2945,39 @@ impl InlineAsmEmitter for X86Codegen {
         let ty = op.operand_type;
         let is_xmm = reg.starts_with("xmm");
         if let Some(slot) = self.state.get_slot(ptr.0) {
-            if is_xmm {
-                let load_instr = match ty {
-                    IrType::F32 => "movss",
-                    _ => "movsd",
-                };
-                self.state.emit_fmt(format_args!("    {} {}(%rbp), %{}", load_instr, slot.0, reg));
+            if self.state.is_alloca(ptr.0) {
+                // Alloca: stack slot IS the variable's storage — load directly
+                if is_xmm {
+                    let load_instr = match ty {
+                        IrType::F32 => "movss",
+                        _ => "movsd",
+                    };
+                    self.state.emit_fmt(format_args!("    {} {}(%rbp), %{}", load_instr, slot.0, reg));
+                } else {
+                    let load_instr = Self::mov_load_for_type(ty);
+                    let dest_reg = match ty {
+                        IrType::U32 | IrType::F32 => format!("%{}", Self::reg_to_32(reg)),
+                        _ => format!("%{}", reg),
+                    };
+                    self.state.emit_fmt(format_args!("    {} {}(%rbp), {}", load_instr, slot.0, dest_reg));
+                }
             } else {
-                // Use type-appropriate load to correctly handle byte/word/dword variables
-                let load_instr = Self::mov_load_for_type(ty);
-                let dest_reg = match ty {
-                    IrType::U32 | IrType::F32 => format!("%{}", Self::reg_to_32(reg)),
-                    _ => format!("%{}", reg),
-                };
-                self.state.emit_fmt(format_args!("    {} {}(%rbp), {}", load_instr, slot.0, dest_reg));
+                // Non-alloca: stack slot holds a pointer — do indirect load
+                self.state.emit_fmt(format_args!("    movq {}(%rbp), %{}", slot.0, reg));
+                if is_xmm {
+                    let load_instr = match ty {
+                        IrType::F32 => "movss",
+                        _ => "movsd",
+                    };
+                    self.state.emit_fmt(format_args!("    {} (%{}), %{}", load_instr, reg, reg));
+                } else {
+                    let load_instr = Self::mov_load_for_type(ty);
+                    let dest_reg = match ty {
+                        IrType::U32 | IrType::F32 => format!("%{}", Self::reg_to_32(reg)),
+                        _ => format!("%{}", reg),
+                    };
+                    self.state.emit_fmt(format_args!("    {} (%{}), {}", load_instr, reg, dest_reg));
+                }
             }
         }
     }
