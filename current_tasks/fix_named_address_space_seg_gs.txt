@@ -1,0 +1,18 @@
+Fix __seg_gs/__seg_fs Named Address Space Support
+
+Implement support for GCC named address spaces (__seg_gs and __seg_fs) to fix
+Linux kernel percpu variable access. The kernel uses CONFIG_CC_HAS_NAMED_AS=1
+(set when built with GCC >= 12.1), which causes percpu accesses to rely on
+__seg_gs type qualifiers instead of explicit %%gs: inline asm prefixes.
+
+Currently __seg_gs/__seg_fs are stripped to empty in the preprocessor, causing
+all percpu accesses to lack the %gs: segment override prefix. This means every
+percpu variable access reads/writes to the wrong memory location, causing
+kernel boot failures.
+
+The fix involves:
+1. Adding __seg_gs/__seg_fs as recognized keyword tokens in the lexer
+2. Handling them as type qualifiers in the parser (setting address space info)
+3. Adding address space tracking to pointer types in the type system
+4. Propagating segment info through IR lowering to inline asm and load/store
+5. Emitting %gs:/%fs: segment prefixes in x86 backend for qualified accesses
