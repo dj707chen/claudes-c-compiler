@@ -309,14 +309,32 @@ impl RiscvCodegen {
                     if self.state.is_alloca(v.0) {
                         self.emit_addi_s0("t0", slot.0);
                         self.state.emit("    li t1, 0");
-                    } else {
+                    } else if self.state.is_i128_value(v.0) {
                         // 128-bit value in 16-byte stack slot
                         self.emit_load_from_s0("t0", slot.0, "ld");
                         self.emit_load_from_s0("t1", slot.0 + 8, "ld");
+                    } else {
+                        // Non-i128 value (e.g. shift amount): load 8 bytes, zero high
+                        // Check register allocation first, since register-allocated values
+                        // may not have their stack slot written.
+                        if let Some(&reg) = self.reg_assignments.get(&v.0) {
+                            let reg_name = callee_saved_name(reg);
+                            self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
+                        } else {
+                            self.emit_load_from_s0("t0", slot.0, "ld");
+                        }
+                        self.state.emit("    li t1, 0");
                     }
                 } else {
-                    self.state.emit("    li t0, 0");
-                    self.state.emit("    li t1, 0");
+                    // No stack slot: check register allocation
+                    if let Some(&reg) = self.reg_assignments.get(&v.0) {
+                        let reg_name = callee_saved_name(reg);
+                        self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
+                        self.state.emit("    li t1, 0");
+                    } else {
+                        self.state.emit("    li t0, 0");
+                        self.state.emit("    li t1, 0");
+                    }
                 }
             }
         }

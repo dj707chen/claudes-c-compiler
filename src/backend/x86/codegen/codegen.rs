@@ -396,14 +396,32 @@ impl X86Codegen {
                         // Alloca: load the address (not a 128-bit value itself)
                         self.state.emit_fmt(format_args!("    leaq {}(%rbp), %rax", slot.0));
                         self.state.emit("    xorq %rdx, %rdx");
-                    } else {
+                    } else if self.state.is_i128_value(v.0) {
                         // 128-bit value in 16-byte stack slot
                         self.state.emit_fmt(format_args!("    movq {}(%rbp), %rax", slot.0));
                         self.state.emit_fmt(format_args!("    movq {}(%rbp), %rdx", slot.0 + 8));
+                    } else {
+                        // Non-i128 value (e.g. shift amount): load 8 bytes, zero-extend rdx
+                        // Check register allocation first, since register-allocated values
+                        // may not have their stack slot written.
+                        if let Some(&reg) = self.reg_assignments.get(&v.0) {
+                            let reg_name = callee_saved_name(reg);
+                            self.state.emit_fmt(format_args!("    movq %{}, %rax", reg_name));
+                        } else {
+                            self.state.emit_fmt(format_args!("    movq {}(%rbp), %rax", slot.0));
+                        }
+                        self.state.emit("    xorq %rdx, %rdx");
                     }
                 } else {
-                    self.state.emit("    xorq %rax, %rax");
-                    self.state.emit("    xorq %rdx, %rdx");
+                    // No stack slot: check register allocation
+                    if let Some(&reg) = self.reg_assignments.get(&v.0) {
+                        let reg_name = callee_saved_name(reg);
+                        self.state.emit_fmt(format_args!("    movq %{}, %rax", reg_name));
+                        self.state.emit("    xorq %rdx, %rdx");
+                    } else {
+                        self.state.emit("    xorq %rax, %rax");
+                        self.state.emit("    xorq %rdx, %rdx");
+                    }
                 }
             }
         }

@@ -312,10 +312,14 @@ impl ArmCodegen {
                         // Alloca: address, not a 128-bit value itself
                         self.emit_add_sp_offset("x0", slot.0);
                         self.state.emit("    mov x1, #0");
-                    } else {
+                    } else if self.state.is_i128_value(v.0) {
                         // 128-bit value in 16-byte stack slot
                         self.emit_load_from_sp("x0", slot.0, "ldr");
                         self.emit_load_from_sp("x1", slot.0 + 8, "ldr");
+                    } else {
+                        // Non-i128 value (e.g. shift amount): load 8 bytes, zero high
+                        self.emit_load_from_sp("x0", slot.0, "ldr");
+                        self.state.emit("    mov x1, #0");
                     }
                 } else {
                     self.state.emit("    mov x0, #0");

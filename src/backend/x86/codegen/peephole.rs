@@ -1603,12 +1603,16 @@ fn global_store_forwarding(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
                 // Use pre-parsed destination register for fast invalidation.
                 if dest_reg != REG_NONE {
                     invalidate_reg_flat(&mut slot_entries, &mut reg_offsets, dest_reg);
-                    // div/idiv/mul also clobber rdx (family 2).
-                    // parse_dest_reg_fast returns 0 (rax) for these; also invalidate rdx.
+                    // Some instructions with dest_reg=0 (rax) also clobber rdx (family 2):
+                    // - div/idiv/mul: produce quotient in rax, remainder in rdx
+                    // - cqto/cqo: sign-extend rax into rdx:rax
+                    // - cdq: sign-extend eax into edx:eax
+                    // parse_dest_reg_fast returns 0 (rax) for all of these.
                     if dest_reg == 0 {
                         let trimmed = infos[i].trimmed(store.get(i));
                         if trimmed.starts_with("div") || trimmed.starts_with("idiv")
                             || trimmed.starts_with("mul")
+                            || trimmed == "cqto" || trimmed == "cqo" || trimmed == "cdq"
                         {
                             invalidate_reg_flat(&mut slot_entries, &mut reg_offsets, 2);
                         }
