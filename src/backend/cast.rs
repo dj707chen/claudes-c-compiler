@@ -19,7 +19,9 @@ pub enum CastKind {
     /// Float to unsigned integer (from_ty is F32 or F64).
     FloatToUnsigned { from_f64: bool, to_u64: bool },
     /// Signed integer to float (to_ty is F32 or F64).
-    SignedToFloat { to_f64: bool },
+    /// `from_ty` is the source integer type, needed to sign-extend sub-64-bit values
+    /// before conversion (e.g., I32 in rax must be sign-extended to 64 bits).
+    SignedToFloat { to_f64: bool, from_ty: IrType },
     /// Unsigned integer to float. `from_u64` indicates U64 source needing
     /// special overflow handling on x86.
     UnsignedToFloat { to_f64: bool, from_u64: bool },
@@ -85,7 +87,7 @@ pub fn classify_cast(from_ty: IrType, to_ty: IrType) -> CastKind {
             let from_u64 = from_ty == IrType::U64;
             return CastKind::UnsignedToFloat { to_f64, from_u64 };
         } else {
-            return CastKind::SignedToFloat { to_f64 };
+            return CastKind::SignedToFloat { to_f64, from_ty };
         }
     }
 

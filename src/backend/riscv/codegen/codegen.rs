@@ -2024,7 +2024,21 @@ impl ArchCodegen for RiscvCodegen {
                 }
             }
 
-            CastKind::SignedToFloat { to_f64 } => {
+            CastKind::SignedToFloat { to_f64, from_ty } => {
+                // For sub-64-bit signed sources, sign-extend to 64 bits first.
+                // The value in t0 may be zero-extended (e.g., from a U32->I32 noop cast).
+                match from_ty.size() {
+                    1 => {
+                        self.state.emit("    slli t0, t0, 56");
+                        self.state.emit("    srai t0, t0, 56");
+                    }
+                    2 => {
+                        self.state.emit("    slli t0, t0, 48");
+                        self.state.emit("    srai t0, t0, 48");
+                    }
+                    4 => self.state.emit("    sext.w t0, t0"),
+                    _ => {} // 8 bytes: already full width
+                }
                 if to_f64 {
                     self.state.emit("    fcvt.d.l ft0, t0");
                     self.state.emit("    fmv.x.d t0, ft0");

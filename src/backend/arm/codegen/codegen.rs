@@ -1899,7 +1899,15 @@ impl ArchCodegen for ArmCodegen {
                 }
             }
 
-            CastKind::SignedToFloat { to_f64 } => {
+            CastKind::SignedToFloat { to_f64, from_ty } => {
+                // For sub-64-bit signed sources, sign-extend to 64 bits first.
+                // The value in x0 may be zero-extended (e.g., from a U32->I32 noop cast).
+                match from_ty.size() {
+                    1 => self.state.emit("    sxtb x0, w0"),
+                    2 => self.state.emit("    sxth x0, w0"),
+                    4 => self.state.emit("    sxtw x0, w0"),
+                    _ => {} // 8 bytes: already full width
+                }
                 if to_f64 {
                     self.state.emit("    scvtf d0, x0");
                     self.state.emit("    fmov x0, d0");

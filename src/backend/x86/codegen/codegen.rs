@@ -852,7 +852,16 @@ impl X86Codegen {
                 }
             }
 
-            CastKind::SignedToFloat { to_f64 } => {
+            CastKind::SignedToFloat { to_f64, from_ty } => {
+                // For sub-64-bit signed sources, sign-extend to 64 bits first.
+                // The value in rax may be zero-extended (e.g., from a U32->I32 noop cast),
+                // so we need explicit sign-extension before the 64-bit int-to-float conversion.
+                match from_ty.size() {
+                    1 => self.state.emit("    movsbq %al, %rax"),
+                    2 => self.state.emit("    movswq %ax, %rax"),
+                    4 => self.state.emit("    movslq %eax, %rax"),
+                    _ => {} // 8 bytes (I64): already full width
+                }
                 if to_f64 {
                     self.state.emit("    cvtsi2sdq %rax, %xmm0");
                     self.state.emit("    movq %xmm0, %rax");
