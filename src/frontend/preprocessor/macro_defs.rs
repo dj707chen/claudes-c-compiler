@@ -7,6 +7,8 @@
 /// - Stringification: `#param`
 /// - Token pasting: `a ## b`
 
+use std::cell::Cell;
+
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 
 use super::utils::{is_ident_start, is_ident_cont, copy_literal, skip_literal};
@@ -32,12 +34,15 @@ pub struct MacroDef {
 #[derive(Debug, Clone)]
 pub struct MacroTable {
     macros: FxHashMap<String, MacroDef>,
+    /// Counter for the __COUNTER__ built-in macro. Increments on each expansion.
+    counter: Cell<usize>,
 }
 
 impl MacroTable {
     pub fn new() -> Self {
         Self {
             macros: FxHashMap::default(),
+            counter: Cell::new(0),
         }
     }
 
@@ -53,7 +58,7 @@ impl MacroTable {
 
     /// Check if a macro is defined.
     pub fn is_defined(&self, name: &str) -> bool {
-        self.macros.contains_key(name)
+        name == "__COUNTER__" || self.macros.contains_key(name)
     }
 
     /// Get a macro definition.
@@ -160,6 +165,15 @@ impl MacroTable {
                     }
                     // No '(' follows - emit _Pragma as-is (shouldn't happen in valid code)
                     result.push_str(&ident);
+                    continue;
+                }
+
+                // Handle __COUNTER__ built-in: expands to a unique integer that
+                // increments on each expansion (GCC/Clang extension).
+                if ident == "__COUNTER__" {
+                    let val = self.counter.get();
+                    self.counter.set(val + 1);
+                    result.push_str(&val.to_string());
                     continue;
                 }
 
@@ -619,16 +633,35 @@ impl MacroTable {
                             result.push_str(&va_args);
                         }
                     } else if let Some(idx) = params.iter().position(|p| p == &right_ident) {
-                        // Substitute parameter with raw argument
-                        let arg = args.get(idx).map(|s| s.as_str()).unwrap_or("");
-                        if arg.is_empty() {
-                            // Empty right side: add space to prevent token merging
-                            // with subsequent macro body tokens
-                            if i < len && !result.is_empty() {
-                                result.push(' ');
+                        // GNU extension: for named variadic parameters (e.g., args...),
+                        // ", ## args" with empty args removes the preceding comma,
+                        // same as ", ## __VA_ARGS__". When non-empty, use ALL variadic args.
+                        let is_named_variadic_param = is_variadic && idx == params.len() - 1;
+                        if is_named_variadic_param {
+                            let va_args = self.get_named_va_args(idx, args);
+                            if va_args.is_empty() {
+                                // Remove preceding comma (GNU extension)
+                                while result.ends_with(' ') || result.ends_with('\t') {
+                                    result.pop();
+                                }
+                                if result.ends_with(',') {
+                                    result.pop();
+                                }
+                            } else {
+                                result.push_str(&va_args);
                             }
                         } else {
-                            result.push_str(arg);
+                            // Regular (non-variadic) parameter substitution
+                            let arg = args.get(idx).map(|s| s.as_str()).unwrap_or("");
+                            if arg.is_empty() {
+                                // Empty right side: add space to prevent token merging
+                                // with subsequent macro body tokens
+                                if i < len && !result.is_empty() {
+                                    result.push(' ');
+                                }
+                            } else {
+                                result.push_str(arg);
+                            }
                         }
                     } else {
                         // Not a parameter, paste as-is
@@ -665,9 +698,14 @@ impl MacroTable {
                         result.push_str(&stringify_arg(&va_args));
                         result.push('"');
                     } else if let Some(idx) = params.iter().position(|p| p == &param_name) {
-                        let arg = args.get(idx).map(|s| s.as_str()).unwrap_or("");
+                        // For named variadic parameters, stringify ALL variadic args
+                        let arg_str = if is_variadic && idx == params.len() - 1 {
+                            self.get_named_va_args(idx, args)
+                        } else {
+                            args.get(idx).map(|s| s.to_string()).unwrap_or_default()
+                        };
                         result.push('"');
-                        result.push_str(&stringify_arg(arg));
+                        result.push_str(&stringify_arg(&arg_str));
                         result.push('"');
                     } else {
                         // Not a parameter, keep as-is
@@ -719,8 +757,15 @@ impl MacroTable {
                     let va_args = self.get_va_args(params, args);
                     result.push_str(&va_args);
                 } else if let Some(idx) = params.iter().position(|p| p == &ident) {
-                    let arg = args.get(idx).map(|s| s.as_str()).unwrap_or("");
-                    result.push_str(arg);
+                    // For named variadic parameters (e.g., args...), substitute
+                    // ALL variadic args from this index onwards.
+                    if is_variadic && idx == params.len() - 1 {
+                        let va_args = self.get_named_va_args(idx, args);
+                        result.push_str(&va_args);
+                    } else {
+                        let arg = args.get(idx).map(|s| s.as_str()).unwrap_or("");
+                        result.push_str(arg);
+                    }
                 } else {
                     result.push_str(&ident);
                 }
@@ -735,10 +780,23 @@ impl MacroTable {
     }
 
     /// Get variadic arguments (__VA_ARGS__) as a comma-separated string.
+    /// For unnamed variadic (`...`), variadic args start after all named params.
+    /// For named variadic (`extra...`), the last param IS the variadic one,
+    /// so variadic args start at that param's index.
     fn get_va_args(&self, params: &[String], args: &[String]) -> String {
         let named_count = params.len();
         if args.len() > named_count {
             args[named_count..].join(", ")
+        } else {
+            String::new()
+        }
+    }
+
+    /// Get ALL arguments for a named variadic parameter (e.g., `extra...`).
+    /// The named variadic param captures args from its index onwards.
+    fn get_named_va_args(&self, param_idx: usize, args: &[String]) -> String {
+        if args.len() > param_idx {
+            args[param_idx..].join(", ")
         } else {
             String::new()
         }
