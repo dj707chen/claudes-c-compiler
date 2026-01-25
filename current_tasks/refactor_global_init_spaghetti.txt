@@ -1,0 +1,21 @@
+Refactor the global initialization spaghetti code in ir/lowering/.
+
+Problem:
+- global_init_compound.rs (1706 lines), global_init_bytes.rs (1267 lines), and
+  global_init.rs (1019 lines) total ~3992 lines with massive code duplication
+- The same GlobalInit::byte_size() match is copy-pasted 5 times in compound.rs
+- The same "emit compound or bytes for sub-struct" block is copy-pasted 5 times (~25 lines each)
+- lower_struct_global_init_compound() is 502 lines of deeply nested spaghetti (6+ levels)
+- StructLayout::default() is written out manually 5 times
+- The bytes and compound files reimplement the same struct/array init logic in different output formats
+
+Fix:
+- Add GlobalInit::byte_size() method to eliminate duplicated match blocks
+- Add StructLayout::empty() or Default impl to eliminate boilerplate
+- Extract helper functions for repeated compound/bytes emission patterns
+- Split the 502-line lower_struct_global_init_compound into union vs struct paths
+- Extract common designator resolution logic into shared helpers
+- General cleanup of deeply nested code paths
+
+Files affected: ir/lowering/global_init.rs, ir/lowering/global_init_bytes.rs,
+ir/lowering/global_init_compound.rs (and possibly ir/ir.rs for GlobalInit methods)
