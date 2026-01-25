@@ -341,11 +341,20 @@ impl Lowerer {
                     return cast_val;
                 }
             }
-            // Default argument promotion: float->double for variadic args,
-            // args beyond known params, or all args for unprototyped functions.
-            if arg_ty == IrType::F32 && (pre_call_variadic || param_types.is_some() || is_unprototyped) {
-                arg_types.push(IrType::F64);
-                return self.emit_implicit_cast(val, IrType::F32, IrType::F64);
+            // Default argument promotions (C11 6.5.2.2p6): for variadic args,
+            // args beyond known params, or all args for unprototyped functions:
+            // - float -> double
+            // - char/short (signed or unsigned) -> int
+            let needs_promotion = pre_call_variadic || param_types.is_some() || is_unprototyped;
+            if needs_promotion {
+                if arg_ty == IrType::F32 {
+                    arg_types.push(IrType::F64);
+                    return self.emit_implicit_cast(val, IrType::F32, IrType::F64);
+                }
+                if matches!(arg_ty, IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16) {
+                    arg_types.push(IrType::I32);
+                    return self.emit_implicit_cast(val, arg_ty, IrType::I32);
+                }
             }
             arg_types.push(arg_ty);
             val

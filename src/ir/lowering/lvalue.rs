@@ -129,6 +129,13 @@ impl Lowerer {
                     None
                 }
             }
+            // _Generic: resolve the selection and delegate to the selected expression's lvalue.
+            // Needed because _Generic returning an lvalue can itself be assigned to,
+            // e.g., _Generic(3.14, double: lvalue) = 2;
+            Expr::GenericSelection(controlling, associations, _) => {
+                let selected = self.resolve_generic_selection(controlling, associations);
+                self.lower_lvalue(selected)
+            }
             _ => None,
         }
     }

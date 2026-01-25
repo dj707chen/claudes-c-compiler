@@ -972,6 +972,13 @@ impl Lowerer {
     }
 
     fn lower_generic_selection(&mut self, controlling: &Expr, associations: &[GenericAssociation]) -> Operand {
+        let selected = self.resolve_generic_selection(controlling, associations);
+        self.lower_expr(selected)
+    }
+
+    /// Resolve a _Generic selection to the matching association expression.
+    /// Used by both lower_generic_selection (rvalue) and lower_lvalue (lvalue context).
+    pub(super) fn resolve_generic_selection<'a>(&mut self, controlling: &Expr, associations: &'a [GenericAssociation]) -> &'a Expr {
         let controlling_ctype = self.get_expr_ctype(controlling);
         let controlling_ir_type = self.get_expr_type(controlling);
 
@@ -999,8 +1006,7 @@ impl Lowerer {
             }
         }
 
-        let selected = matched_expr.or(default_expr).unwrap_or(&associations[0].expr);
-        self.lower_expr(selected)
+        matched_expr.or(default_expr).unwrap_or(&associations[0].expr)
     }
 
     pub(super) fn ctype_matches_generic(&self, controlling: &CType, assoc: &CType) -> bool {
