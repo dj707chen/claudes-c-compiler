@@ -1,0 +1,5 @@
+Task: Fix SIGSEGV crashes in libsodium sign and box test programs
+
+The libsodium sign and box test programs crash with SIGSEGV (exit -11).
+These use Ed25519 (sign) and Curve25519 (box) crypto operations.
+Need to debug and fix the miscompilation causing the crash.
