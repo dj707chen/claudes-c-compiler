@@ -1,0 +1,24 @@
+Refactor: Deduplicate global_init_bytes.rs and global_init_compound.rs
+
+Problem:
+The global_init subsystem has massive structural duplication across its three files
+(global_init.rs, global_init_bytes.rs, global_init_compound.rs - 3946 lines total).
+The bytes path and compound path implement nearly identical struct/array iteration,
+designator resolution, field dispatch, and anonymous member handling logic in parallel.
+Key patterns like designator name extraction, anonymous member detection, nested
+designator checks, and [N].field processing loops are copied 3-10 times each.
+
+Plan:
+1. Extract shared helper functions for repeated patterns:
+   - Designator name extraction
+   - Anonymous member designator detection
+   - Nested field designator detection
+   - has_array_field_designators check
+   - Address resolution cascade
+2. Unify the parallel struct field iteration into a single traversal that can
+   dispatch to either the bytes or compound output path via a trait or callback.
+3. Consolidate the [N].field designator processing loop (duplicated 2x in compound).
+4. Add lowering/ README documenting the global init architecture.
+
+Expected result: ~500-800 lines removed, significantly less duplication,
+clearer separation of "what fields to initialize" from "how to serialize them".
