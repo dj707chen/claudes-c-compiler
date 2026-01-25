@@ -1652,6 +1652,16 @@ impl Lowerer {
         //     Same as local: need the ADDRESS of the alloca. lower_address_of
         //     returns this. ✓
         //   So lower_address_of gives the correct va_list pointer on RISC-V.
+
+        // Check if the requested type is a complex type. Complex types map to
+        // IrType::Ptr, but the backend va_arg code only handles scalar types
+        // (integer, float). We decompose complex va_arg into two component
+        // va_arg calls (one for real, one for imaginary) and reassemble.
+        let ctype = self.type_spec_to_ctype(type_spec);
+        if ctype.is_complex() {
+            return self.lower_va_arg_complex(ap_expr, &ctype);
+        }
+
         use crate::backend::Target;
         let ap_val = if self.target == Target::Riscv64 {
             // RISC-V: va_list is void*, need address of the variable holding it
@@ -1666,6 +1676,50 @@ impl Lowerer {
         let dest = self.fresh_value();
         self.emit(Instruction::VaArg { dest, va_list_ptr, result_ty: result_ty.clone() });
         Operand::Value(dest)
+    }
+
+    /// Lower va_arg for complex types by decomposing into two component va_arg calls.
+    /// Complex types (_Complex float/double/long double) are passed as two separate
+    /// floating-point values in the variadic arg area. We retrieve each component
+    /// individually and store them into an alloca.
+    ///
+    /// This correctly handles _Complex double on all platforms. Edge cases:
+    /// - _Complex float: default argument promotion should promote to _Complex double
+    ///   when passed to variadic functions. The caller side should handle this.
+    /// - _Complex long double on x86-64: passed on stack (MEMORY class), reading as
+    ///   two F128 values from the FP area may not match the x86 ABI exactly.
+    ///   TODO: handle _Complex long double specially on x86-64 if needed.
+    /// - _Complex long double on RISC-V: passed by reference in regular calls, but
+    ///   for variadic args it's passed as two values on the stack.
+    ///   TODO: verify RISC-V _Complex long double variadic ABI.
+    fn lower_va_arg_complex(&mut self, ap_expr: &Expr, ctype: &CType) -> Operand {
+        let comp_ir_ty = Self::complex_component_ir_type(ctype);
+
+        // Get va_list pointer using the shared helper (handles target differences)
+        let ap_val = self.lower_va_list_pointer(ap_expr);
+        let va_list_ptr = self.operand_to_value(ap_val);
+
+        // Retrieve real part via va_arg
+        let real_dest = self.fresh_value();
+        self.emit(Instruction::VaArg {
+            dest: real_dest,
+            va_list_ptr,
+            result_ty: comp_ir_ty,
+        });
+
+        // Retrieve imaginary part via va_arg
+        let imag_dest = self.fresh_value();
+        self.emit(Instruction::VaArg {
+            dest: imag_dest,
+            va_list_ptr,
+            result_ty: comp_ir_ty,
+        });
+
+        // Allocate stack space and store both components
+        let alloca = self.alloca_complex(ctype);
+        self.store_complex_parts(alloca, Operand::Value(real_dest), Operand::Value(imag_dest), ctype);
+
+        Operand::Value(alloca)
     }
 
     /// Get a pointer to the va_list struct from an expression.
