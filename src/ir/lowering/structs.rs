@@ -381,22 +381,50 @@ impl Lowerer {
         }
     }
 
-    /// Resolve member access on a struct expression: returns (byte_offset, ir_type_of_field).
+    /// Look up the struct layout for a member access expression.
+    /// For direct access (s.field), gets the layout of the base expression.
+    /// For pointer access (p->field), gets the layout that the pointer points to.
+    fn get_member_layout(&self, base_expr: &Expr, is_pointer_access: bool) -> Option<StructLayout> {
+        if is_pointer_access {
+            self.get_pointed_struct_layout(base_expr)
+        } else {
+            self.get_layout_for_expr(base_expr)
+        }
+    }
+
+    /// Resolve member access: returns (byte_offset, ir_type_of_field).
+    /// Works for both direct (s.field) and pointer (p->field) access.
     pub(super) fn resolve_member_access(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType) {
-        // Try to find the struct layout from the base expression
-        if let Some(layout) = self.get_layout_for_expr(base_expr) {
+        self.resolve_member_access_impl(base_expr, field_name, false)
+    }
+
+    /// Resolve pointer member access (p->field): returns (byte_offset, ir_type_of_field).
+    pub(super) fn resolve_pointer_member_access(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType) {
+        self.resolve_member_access_impl(base_expr, field_name, true)
+    }
+
+    fn resolve_member_access_impl(&self, base_expr: &Expr, field_name: &str, is_pointer: bool) -> (usize, IrType) {
+        if let Some(layout) = self.get_member_layout(base_expr, is_pointer) {
             if let Some((offset, ctype)) = layout.field_offset(field_name, &self.types) {
                 return (offset, IrType::from_ctype(&ctype));
             }
         }
-        // Fallback: assume 4-byte aligned int fields
         (0, IrType::I32)
     }
 
     /// Resolve member access with full bitfield info.
     /// Returns (byte_offset, ir_type, Option<(bit_offset, bit_width)>).
     pub(super) fn resolve_member_access_full(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType, Option<(u32, u32)>) {
-        if let Some(layout) = self.get_layout_for_expr(base_expr) {
+        self.resolve_member_access_full_impl(base_expr, field_name, false)
+    }
+
+    /// Resolve pointer member access with full bitfield info.
+    pub(super) fn resolve_pointer_member_access_full(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType, Option<(u32, u32)>) {
+        self.resolve_member_access_full_impl(base_expr, field_name, true)
+    }
+
+    fn resolve_member_access_full_impl(&self, base_expr: &Expr, field_name: &str, is_pointer: bool) -> (usize, IrType, Option<(u32, u32)>) {
+        if let Some(layout) = self.get_member_layout(base_expr, is_pointer) {
             if let Some(fl) = layout.field_layout(field_name) {
                 let ir_ty = IrType::from_ctype(&fl.ty);
                 let bf = match (fl.bit_offset, fl.bit_width) {
@@ -407,38 +435,6 @@ impl Lowerer {
             }
             // Fallback: search anonymous struct/union members recursively
             // (field_layout only does flat lookup; field_offset searches anonymous members)
-            if let Some((offset, ctype)) = layout.field_offset(field_name, &self.types) {
-                return (offset, IrType::from_ctype(&ctype), None);
-            }
-        }
-        (0, IrType::I32, None)
-    }
-
-    /// Resolve pointer member access (p->field): returns (byte_offset, ir_type_of_field).
-    /// For p->field, we need the struct layout that p points to.
-    pub(super) fn resolve_pointer_member_access(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType) {
-        // Try to determine what struct layout p points to
-        if let Some(layout) = self.get_pointed_struct_layout(base_expr) {
-            if let Some((offset, ctype)) = layout.field_offset(field_name, &self.types) {
-                return (offset, IrType::from_ctype(&ctype));
-            }
-        }
-        // Fallback: assume first field at offset 0
-        (0, IrType::I32)
-    }
-
-    /// Resolve pointer member access with full bitfield info.
-    pub(super) fn resolve_pointer_member_access_full(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType, Option<(u32, u32)>) {
-        if let Some(layout) = self.get_pointed_struct_layout(base_expr) {
-            if let Some(fl) = layout.field_layout(field_name) {
-                let ir_ty = IrType::from_ctype(&fl.ty);
-                let bf = match (fl.bit_offset, fl.bit_width) {
-                    (Some(bo), Some(bw)) => Some((bo, bw)),
-                    _ => None,
-                };
-                return (fl.offset, ir_ty, bf);
-            }
-            // Fallback: search anonymous struct/union members recursively
             if let Some((offset, ctype)) = layout.field_offset(field_name, &self.types) {
                 return (offset, IrType::from_ctype(&ctype), None);
             }
@@ -480,39 +476,9 @@ impl Lowerer {
                 }
                 None
             }
-            Expr::MemberAccess(inner_base, inner_field, _) => {
-                // expr is something like s.p where p is a pointer to struct.
-                // Get the type of the field `p` from the struct layout of `s`.
-                if let Some(outer_layout) = self.get_layout_for_expr(inner_base) {
-                    if let Some((_offset, ctype)) = outer_layout.field_offset(inner_field, &self.types) {
-                        // If the field is a pointer to struct, resolve directly
-                        if let Some(layout) = self.resolve_struct_from_pointer_ctype(&ctype) {
-                            return Some(layout);
-                        }
-                        // If the field is an array of structs/unions, handle array decay
-                        if let CType::Array(ref elem, _) = ctype {
-                            return self.struct_layout_from_ctype(elem);
-                        }
-                    }
-                }
-                None
-            }
-            Expr::PointerMemberAccess(inner_base, inner_field, _) => {
-                // expr is something like p->q where q is also a pointer to struct
-                if let Some(inner_layout) = self.get_pointed_struct_layout(inner_base) {
-                    if let Some((_offset, ctype)) = inner_layout.field_offset(inner_field, &self.types) {
-                        // If the field is a pointer to struct, resolve directly
-                        if let Some(layout) = self.resolve_struct_from_pointer_ctype(&ctype) {
-                            return Some(layout);
-                        }
-                        // If the field is an array of structs/unions, the array decays to a
-                        // pointer to the first element, so resolve the element struct layout
-                        if let CType::Array(ref elem, _) = ctype {
-                            return self.struct_layout_from_ctype(elem);
-                        }
-                    }
-                }
-                None
+            Expr::MemberAccess(base, field, _) | Expr::PointerMemberAccess(base, field, _) => {
+                let is_ptr = matches!(expr, Expr::PointerMemberAccess(..));
+                self.resolve_field_struct_layout(base, field, is_ptr, true)
             }
             Expr::UnaryOp(UnaryOp::PreInc | UnaryOp::PreDec, inner, _) => {
                 self.get_pointed_struct_layout(inner)
@@ -573,22 +539,7 @@ impl Lowerer {
                 self.get_pointed_struct_layout(base)
             }
             Expr::FunctionCall(func, _, _) => {
-                // Function returning a struct pointer: try direct function name first
-                if let Expr::Identifier(name, _) = func.as_ref() {
-                    if let Some(ctype) = self.func_meta.sigs.get(name.as_str()).and_then(|s| s.return_ctype.as_ref()) {
-                        if let CType::Pointer(pointee) = ctype {
-                            return self.struct_layout_from_ctype(pointee);
-                        }
-                    }
-                }
-                // For indirect calls through function pointers, resolve the
-                // return type from the function pointer's CType.
-                if let Some(ctype) = self.get_expr_ctype(expr) {
-                    if let CType::Pointer(pointee) = &ctype {
-                        return self.struct_layout_from_ctype(pointee);
-                    }
-                }
-                None
+                self.resolve_func_call_struct_layout(func, expr, true)
             }
             Expr::Conditional(_, then_expr, _, _) => {
                 self.get_pointed_struct_layout(then_expr)
@@ -599,16 +550,8 @@ impl Lowerer {
             Expr::Comma(_, last, _) => {
                 self.get_pointed_struct_layout(last)
             }
-            Expr::Assign(lhs, rhs, _) => {
+            Expr::Assign(lhs, rhs, _) | Expr::CompoundAssign(_, lhs, rhs, _) => {
                 // For assignment, the result has the LHS type; try LHS first, then RHS
-                if let Some(layout) = self.get_pointed_struct_layout(lhs) {
-                    return Some(layout);
-                }
-                self.get_pointed_struct_layout(rhs)
-            }
-            Expr::CompoundAssign(_, lhs, rhs, _) => {
-                // For compound assignment (e.g., ptr += 2), the result type is the LHS type.
-                // The RHS is typically an integer offset, not a pointer.
                 if let Some(layout) = self.get_pointed_struct_layout(lhs) {
                     return Some(layout);
                 }
@@ -646,7 +589,7 @@ impl Lowerer {
         None
     }
 
-    /// Try to get the struct layout for an expression.
+    /// Try to get the struct layout for an expression (value, not pointer).
     fn get_layout_for_expr(&self, expr: &Expr) -> Option<StructLayout> {
         match expr {
             Expr::Identifier(name, _) => {
@@ -661,39 +604,9 @@ impl Lowerer {
                 }
                 None
             }
-            Expr::MemberAccess(inner_base, inner_field, _) => {
-                // For nested member access, find the layout of the inner field
-                if let Some(outer_layout) = self.get_layout_for_expr(inner_base) {
-                    if let Some((_offset, ctype)) = outer_layout.field_offset(inner_field, &self.types) {
-                        if let Some(layout) = self.struct_layout_from_ctype(&ctype) {
-                            return Some(layout);
-                        }
-                        // If the field is an array of structs, return the element struct layout
-                        if let CType::Array(ref elem, _) = ctype {
-                            if let Some(layout) = self.struct_layout_from_ctype(elem) {
-                                return Some(layout);
-                            }
-                        }
-                    }
-                }
-                None
-            }
-            Expr::PointerMemberAccess(inner_base, inner_field, _) => {
-                // For p->field where field is an embedded struct, get its layout
-                if let Some(pointed_layout) = self.get_pointed_struct_layout(inner_base) {
-                    if let Some((_offset, ctype)) = pointed_layout.field_offset(inner_field, &self.types) {
-                        if let Some(layout) = self.struct_layout_from_ctype(&ctype) {
-                            return Some(layout);
-                        }
-                        // If the field is an array of structs, return the element struct layout
-                        if let CType::Array(ref elem, _) = ctype {
-                            if let Some(layout) = self.struct_layout_from_ctype(elem) {
-                                return Some(layout);
-                            }
-                        }
-                    }
-                }
-                None
+            Expr::MemberAccess(base, field, _) | Expr::PointerMemberAccess(base, field, _) => {
+                let is_ptr = matches!(expr, Expr::PointerMemberAccess(..));
+                self.resolve_field_struct_layout(base, field, is_ptr, false)
             }
             Expr::ArraySubscript(base, _, _) => {
                 // array[i] where array is of struct type
@@ -704,25 +617,19 @@ impl Lowerer {
                 // If base is a member access yielding an array of structs,
                 // use CType to resolve the element type
                 if let Some(base_ctype) = self.get_expr_ctype(base) {
-                    match &base_ctype {
-                        CType::Array(elem, _) => {
-                            if let Some(layout) = self.struct_layout_from_ctype(elem) {
-                                return Some(layout);
-                            }
+                    let inner = match &base_ctype {
+                        CType::Array(elem, _) => Some(elem.as_ref()),
+                        CType::Pointer(pointee) => Some(pointee.as_ref()),
+                        _ => None,
+                    };
+                    if let Some(inner_ct) = inner {
+                        if let Some(layout) = self.struct_layout_from_ctype(inner_ct) {
+                            return Some(layout);
                         }
-                        CType::Pointer(pointee) => {
-                            if let Some(layout) = self.struct_layout_from_ctype(pointee) {
-                                return Some(layout);
-                            }
-                        }
-                        _ => {}
                     }
                 }
                 // Also try: base is a pointer to struct/union (for ptr[i] patterns)
-                if let Some(layout) = self.get_pointed_struct_layout(base) {
-                    return Some(layout);
-                }
-                None
+                self.get_pointed_struct_layout(base)
             }
             Expr::CompoundLiteral(type_spec, _, _) => {
                 // Compound literal: (struct tag){...} - get layout from the type specifier
@@ -738,27 +645,12 @@ impl Lowerer {
                     .or_else(|| self.get_layout_for_expr(inner))
             }
             Expr::FunctionCall(func, _, _) => {
-                // Function returning a struct: try direct function name first
-                if let Expr::Identifier(name, _) = func.as_ref() {
-                    if let Some(ctype) = self.func_meta.sigs.get(name.as_str()).and_then(|s| s.return_ctype.as_ref()) {
-                        if let Some(layout) = self.struct_layout_from_ctype(ctype) {
-                            return Some(layout);
-                        }
-                    }
-                }
-                // For indirect calls through function pointers, resolve the
-                // return type from the function pointer's CType.
-                if let Some(ctype) = self.get_expr_ctype(expr) {
-                    return self.struct_layout_from_ctype(&ctype);
-                }
-                None
+                self.resolve_func_call_struct_layout(func, expr, false)
             }
             Expr::Assign(lhs, _, _) | Expr::CompoundAssign(_, lhs, _, _) => {
-                // Assignment returns the type of the LHS
                 self.get_layout_for_expr(lhs)
             }
             Expr::Conditional(_, then_expr, _, _) => {
-                // Ternary returns the type of either branch
                 self.get_layout_for_expr(then_expr)
             }
             Expr::GnuConditional(cond, _, _) => {
@@ -771,20 +663,71 @@ impl Lowerer {
         }
     }
 
-    /// Resolve member access to get the CType of the field (not just the IrType).
-    /// This is needed to check if a field is an array type (for array decay behavior).
-    pub(super) fn resolve_member_field_ctype(&self, base_expr: &Expr, field_name: &str) -> Option<CType> {
-        if let Some(layout) = self.get_layout_for_expr(base_expr) {
-            if let Some((_offset, ctype)) = layout.field_offset(field_name, &self.types) {
-                return Some(ctype.clone());
+    /// Shared helper: given a field access (base.field or base->field), resolve the
+    /// struct layout of the field's type. Used by both get_pointed_struct_layout and
+    /// get_layout_for_expr for their MemberAccess/PointerMemberAccess arms.
+    ///
+    /// `is_pointer_base`: whether the base is accessed via pointer (->)
+    /// `want_pointer_deref`: whether the caller wants the field treated as a pointer
+    ///   (true for get_pointed_struct_layout: field is a pointer to struct, resolve its pointee)
+    ///   (false for get_layout_for_expr: field is a struct, resolve its own layout)
+    fn resolve_field_struct_layout(&self, base: &Expr, field: &str, is_pointer_base: bool, want_pointer_deref: bool) -> Option<StructLayout> {
+        let base_layout = self.get_member_layout(base, is_pointer_base)?;
+        let (_offset, ctype) = base_layout.field_offset(field, &self.types)?;
+        if want_pointer_deref {
+            // Caller wants what the field points to (get_pointed_struct_layout path)
+            if let Some(layout) = self.resolve_struct_from_pointer_ctype(&ctype) {
+                return Some(layout);
+            }
+        } else {
+            // Caller wants the field's own layout (get_layout_for_expr path)
+            if let Some(layout) = self.struct_layout_from_ctype(&ctype) {
+                return Some(layout);
+            }
+        }
+        // Both paths: if the field is an array of structs, resolve the element type
+        if let CType::Array(ref elem, _) = ctype {
+            return self.struct_layout_from_ctype(elem);
+        }
+        None
+    }
+
+    /// Shared helper: resolve struct layout from a function call expression.
+    /// For get_pointed_struct_layout: the return type is a pointer to struct, resolve its pointee.
+    /// For get_layout_for_expr: the return type is a struct, resolve its layout.
+    fn resolve_func_call_struct_layout(&self, func: &Expr, call_expr: &Expr, want_pointer_deref: bool) -> Option<StructLayout> {
+        // Try direct function name first
+        if let Expr::Identifier(name, _) = func {
+            if let Some(ctype) = self.func_meta.sigs.get(name.as_str()).and_then(|s| s.return_ctype.as_ref()) {
+                if want_pointer_deref {
+                    if let CType::Pointer(pointee) = ctype {
+                        return self.struct_layout_from_ctype(pointee);
+                    }
+                } else {
+                    if let Some(layout) = self.struct_layout_from_ctype(ctype) {
+                        return Some(layout);
+                    }
+                }
+            }
+        }
+        // For indirect calls through function pointers, resolve from CType
+        if let Some(ctype) = self.get_expr_ctype(call_expr) {
+            if want_pointer_deref {
+                if let CType::Pointer(pointee) = &ctype {
+                    return self.struct_layout_from_ctype(pointee);
+                }
+            } else {
+                return self.struct_layout_from_ctype(&ctype);
             }
         }
         None
     }
 
-    /// Resolve pointer member access to get the CType of the field.
-    pub(super) fn resolve_pointer_member_field_ctype(&self, base_expr: &Expr, field_name: &str) -> Option<CType> {
-        if let Some(layout) = self.get_pointed_struct_layout(base_expr) {
+    /// Resolve member access to get the CType of the field (not just the IrType).
+    /// This is needed to check if a field is an array type (for array decay behavior).
+    /// Handles both direct (s.field) and pointer (p->field) access.
+    pub(super) fn resolve_member_field_ctype_impl(&self, base_expr: &Expr, field_name: &str, is_pointer: bool) -> Option<CType> {
+        if let Some(layout) = self.get_member_layout(base_expr, is_pointer) {
             if let Some((_offset, ctype)) = layout.field_offset(field_name, &self.types) {
                 return Some(ctype.clone());
             }
@@ -795,26 +738,17 @@ impl Lowerer {
     /// Resolve member access and return full info including CType.
     /// Returns (byte_offset, ir_type, bitfield_info, field_ctype).
     pub(super) fn resolve_member_access_with_ctype(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType, Option<(u32, u32)>, Option<CType>) {
-        if let Some(layout) = self.get_layout_for_expr(base_expr) {
-            if let Some(fl) = layout.field_layout(field_name) {
-                let ir_ty = IrType::from_ctype(&fl.ty);
-                let bf = match (fl.bit_offset, fl.bit_width) {
-                    (Some(bo), Some(bw)) => Some((bo, bw)),
-                    _ => None,
-                };
-                return (fl.offset, ir_ty, bf, Some(fl.ty.clone()));
-            }
-            if let Some((offset, ctype)) = layout.field_offset(field_name, &self.types) {
-                return (offset, IrType::from_ctype(&ctype), None, Some(ctype.clone()));
-            }
-        }
-        (0, IrType::I32, None, None)
+        self.resolve_member_access_with_ctype_impl(base_expr, field_name, false)
     }
 
     /// Resolve pointer member access and return full info including CType.
     /// Returns (byte_offset, ir_type, bitfield_info, field_ctype).
     pub(super) fn resolve_pointer_member_access_with_ctype(&self, base_expr: &Expr, field_name: &str) -> (usize, IrType, Option<(u32, u32)>, Option<CType>) {
-        if let Some(layout) = self.get_pointed_struct_layout(base_expr) {
+        self.resolve_member_access_with_ctype_impl(base_expr, field_name, true)
+    }
+
+    fn resolve_member_access_with_ctype_impl(&self, base_expr: &Expr, field_name: &str, is_pointer: bool) -> (usize, IrType, Option<(u32, u32)>, Option<CType>) {
+        if let Some(layout) = self.get_member_layout(base_expr, is_pointer) {
             if let Some(fl) = layout.field_layout(field_name) {
                 let ir_ty = IrType::from_ctype(&fl.ty);
                 let bf = match (fl.bit_offset, fl.bit_width) {

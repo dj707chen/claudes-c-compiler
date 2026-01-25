@@ -1105,15 +1105,7 @@ impl Lowerer {
                 // C requires case constants to be converted to the promoted type
                 // of the controlling expression (e.g., case 2^33 in switch(int) -> 0).
                 if let Some(switch_ty) = self.func_mut().switch_stack.last().map(|f| &f.expr_type) {
-                    case_val = match switch_ty {
-                        IrType::I8 => case_val as i8 as i64,
-                        IrType::U8 => case_val as u8 as i64,
-                        IrType::I16 => case_val as i16 as i64,
-                        IrType::U16 => case_val as u16 as i64,
-                        IrType::I32 => case_val as i32 as i64,
-                        IrType::U32 => case_val as u32 as i64,
-                        _ => case_val,
-                    };
+                    case_val = switch_ty.truncate_i64(case_val);
                 }
 
                 // Create a label for this case
@@ -1141,24 +1133,8 @@ impl Lowerer {
 
                 // Truncate to switch controlling expression type
                 if let Some(switch_ty) = self.func_mut().switch_stack.last().map(|f| &f.expr_type) {
-                    low_val = match switch_ty {
-                        IrType::I8 => low_val as i8 as i64,
-                        IrType::U8 => low_val as u8 as i64,
-                        IrType::I16 => low_val as i16 as i64,
-                        IrType::U16 => low_val as u16 as i64,
-                        IrType::I32 => low_val as i32 as i64,
-                        IrType::U32 => low_val as u32 as i64,
-                        _ => low_val,
-                    };
-                    high_val = match switch_ty {
-                        IrType::I8 => high_val as i8 as i64,
-                        IrType::U8 => high_val as u8 as i64,
-                        IrType::I16 => high_val as i16 as i64,
-                        IrType::U16 => high_val as u16 as i64,
-                        IrType::I32 => high_val as i32 as i64,
-                        IrType::U32 => high_val as u32 as i64,
-                        _ => high_val,
-                    };
+                    low_val = switch_ty.truncate_i64(low_val);
+                    high_val = switch_ty.truncate_i64(high_val);
                 }
 
                 // Create a label for this case range

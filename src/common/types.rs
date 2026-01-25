@@ -922,6 +922,21 @@ impl IrType {
         }
     }
 
+    /// Truncate an i64 value to this type's width, applying sign/zero extension
+    /// back to i64. Used for case-value truncation in switch statements.
+    /// Types wider than 32 bits (and non-integer types) return the value unchanged.
+    pub fn truncate_i64(&self, val: i64) -> i64 {
+        match self {
+            IrType::I8 => val as i8 as i64,
+            IrType::U8 => val as u8 as i64,
+            IrType::I16 => val as i16 as i64,
+            IrType::U16 => val as u16 as i64,
+            IrType::I32 => val as i32 as i64,
+            IrType::U32 => val as u32 as i64,
+            _ => val,
+        }
+    }
+
     /// Get the signed counterpart of this type.
     pub fn to_signed(&self) -> Self {
         match self {

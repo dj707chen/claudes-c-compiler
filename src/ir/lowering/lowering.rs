@@ -122,11 +122,7 @@ impl Lowerer {
     /// Resolve the CType of a struct/union field, handling both direct member access
     /// (s.field) and pointer member access (p->field) through a single entry point.
     pub(super) fn resolve_field_ctype(&self, base_expr: &Expr, field_name: &str, is_pointer_access: bool) -> Option<CType> {
-        if is_pointer_access {
-            self.resolve_pointer_member_field_ctype(base_expr, field_name)
-        } else {
-            self.resolve_member_field_ctype(base_expr, field_name)
-        }
+        self.resolve_member_field_ctype_impl(base_expr, field_name, is_pointer_access)
     }
 
     // --- Scope management delegation ---
