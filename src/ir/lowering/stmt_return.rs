@@ -10,6 +10,17 @@ use crate::common::types::{IrType, CType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
+    /// Check if an expression is a BinaryOp with an arithmetic/bitwise operator.
+    /// Such expressions never produce struct/union types, so struct-return checks can be skipped.
+    fn expr_is_arithmetic_binop(e: &Expr) -> bool {
+        matches!(e, Expr::BinaryOp(op, _, _, _) if matches!(op,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+            | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            | BinOp::Shl | BinOp::Shr
+            | BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+            | BinOp::LogicalAnd | BinOp::LogicalOr))
+    }
+
     /// Lower a return statement's expression to an operand.
     /// Handles all return conventions: sret, two-register, complex decomposition,
     /// and scalar returns with implicit casts.
@@ -61,7 +72,7 @@ impl Lowerer {
         // where CType::size() returns 0 for Struct/Union types. Fall back to the
         // current function's sret_size from sig metadata.
         let mut struct_size = self.struct_value_size(e).unwrap_or(0);
-        if struct_size == 0 {
+        if struct_size == 0 && !Self::expr_is_arithmetic_binop(e) {
             if let Some(ctype) = self.get_expr_ctype(e) {
                 if matches!(ctype, CType::Struct(_) | CType::Union(_)) {
                     let fname = self.func().name.clone();
@@ -129,7 +140,7 @@ impl Lowerer {
         // In that case, fall back to the function's own two_reg_ret_size from sig
         // metadata, since the return type size is reliably known.
         let mut struct_size = self.struct_value_size(e).unwrap_or(0);
-        if struct_size == 0 {
+        if struct_size == 0 && !Self::expr_is_arithmetic_binop(e) {
             if let Some(ctype) = self.get_expr_ctype(e) {
                 if matches!(ctype, CType::Struct(_) | CType::Union(_)) {
                     let fname = self.func().name.clone();

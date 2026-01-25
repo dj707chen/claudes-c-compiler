@@ -395,13 +395,27 @@ impl Lowerer {
                 self.type_spec_to_ctype(type_spec)
             }
             Expr::BinaryOp(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, lhs, rhs, _) => {
-                let lt = self.expr_ctype(lhs);
+                // Iterate left-skewed chains to avoid O(2^n) recursion
                 let rt = self.expr_ctype(rhs);
-                if lt.is_complex() || rt.is_complex() {
-                    // Result is complex
-                    self.common_complex_type(&lt, &rt)
-                } else {
-                    lt // approximate
+                if rt.is_complex() {
+                    let lt = self.expr_ctype(lhs);
+                    return self.common_complex_type(&lt, &rt);
+                }
+                let mut cur = lhs.as_ref();
+                loop {
+                    match cur {
+                        Expr::BinaryOp(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, inner_lhs, inner_rhs, _) => {
+                            let inner_rt = self.expr_ctype(inner_rhs);
+                            if inner_rt.is_complex() {
+                                let inner_lt = self.expr_ctype(inner_lhs);
+                                return self.common_complex_type(&inner_lt, &inner_rt);
+                            }
+                            cur = inner_lhs.as_ref();
+                        }
+                        _ => {
+                            return self.expr_ctype(cur);
+                        }
+                    }
                 }
             }
             Expr::FunctionCall(callee, args, _) => {

@@ -267,29 +267,63 @@ impl Lowerer {
                 promote_integer(lty)
             }
             _ => {
-                let lty = self.get_expr_type(lhs);
+                // Iterate left-skewed chains to avoid O(2^n) recursion
                 let rty = self.get_expr_type(rhs);
-                // Only check complex types if either operand is Ptr
-                // (complex types are represented as Ptr in IR)
-                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
-                    if lty == IrType::Ptr || rty == IrType::Ptr {
-                        let lct = self.expr_ctype(lhs);
-                        let rct = self.expr_ctype(rhs);
-                        if lct.is_complex() || rct.is_complex() {
-                            return IrType::Ptr;
+                let mut result = rty;
+                let mut cur: &Expr = lhs;
+                // Check complex for the rhs first
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) && rty == IrType::Ptr {
+                    let rct = self.expr_ctype(rhs);
+                    if rct.is_complex() {
+                        return IrType::Ptr;
+                    }
+                }
+                loop {
+                    match cur {
+                        Expr::BinaryOp(op2, inner_lhs, inner_rhs, _)
+                            if !op2.is_comparison()
+                                && !matches!(op2, BinOp::LogicalAnd | BinOp::LogicalOr | BinOp::Shl | BinOp::Shr) =>
+                        {
+                            let r_ty = self.get_expr_type(inner_rhs.as_ref());
+                            // Check complex for inner rhs
+                            if matches!(op2, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) && r_ty == IrType::Ptr {
+                                let rct = self.expr_ctype(inner_rhs.as_ref());
+                                if rct.is_complex() {
+                                    return IrType::Ptr;
+                                }
+                            }
+                            result = Self::wider_type(result, r_ty);
+                            cur = inner_lhs.as_ref();
+                        }
+                        _ => {
+                            let l_ty = self.get_expr_type(cur);
+                            // Check complex for leftmost leaf
+                            if l_ty == IrType::Ptr {
+                                let lct = self.expr_ctype(cur);
+                                if lct.is_complex() {
+                                    return IrType::Ptr;
+                                }
+                            }
+                            result = Self::wider_type(result, l_ty);
+                            break;
                         }
                     }
                 }
-                if lty == IrType::F128 || rty == IrType::F128 {
-                    IrType::F128
-                } else if lty == IrType::F64 || rty == IrType::F64 {
-                    IrType::F64
-                } else if lty == IrType::F32 || rty == IrType::F32 {
-                    IrType::F32
-                } else {
-                    Self::common_type(lty, rty)
-                }
+                result
             }
+        }
+    }
+
+    /// Return the wider/common type between two types, preferring float > int.
+    fn wider_type(a: IrType, b: IrType) -> IrType {
+        if a == IrType::F128 || b == IrType::F128 {
+            IrType::F128
+        } else if a == IrType::F64 || b == IrType::F64 {
+            IrType::F64
+        } else if a == IrType::F32 || b == IrType::F32 {
+            IrType::F32
+        } else {
+            Self::common_type(a, b)
         }
     }
 

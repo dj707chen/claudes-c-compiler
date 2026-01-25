@@ -1402,7 +1402,28 @@ impl Lowerer {
                 } else if matches!(op, BinOp::Shl | BinOp::Shr) {
                     Self::integer_promote(self.infer_expr_type(lhs))
                 } else {
-                    Self::common_type(self.infer_expr_type(lhs), self.infer_expr_type(rhs))
+                    // Iterate left-skewed chains to avoid O(2^n) recursion
+                    let rhs_ty = self.infer_expr_type(rhs);
+                    let mut result = rhs_ty;
+                    let mut cur = lhs.as_ref();
+                    loop {
+                        match cur {
+                            Expr::BinaryOp(op2, inner_lhs, inner_rhs, _)
+                                if !op2.is_comparison()
+                                    && !matches!(op2, BinOp::LogicalAnd | BinOp::LogicalOr | BinOp::Shl | BinOp::Shr) =>
+                            {
+                                let r_ty = self.infer_expr_type(inner_rhs);
+                                result = Self::common_type(result, r_ty);
+                                cur = inner_lhs.as_ref();
+                            }
+                            _ => {
+                                let l_ty = self.infer_expr_type(cur);
+                                result = Self::common_type(result, l_ty);
+                                break;
+                            }
+                        }
+                    }
+                    result
                 }
             }
             Expr::UnaryOp(op, inner, _) => {

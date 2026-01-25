@@ -141,7 +141,22 @@ impl Lowerer {
                 match op {
                     BinOp::Add => {
                         // ptr + int or int + ptr yields a pointer
-                        self.expr_is_pointer(lhs) || self.expr_is_pointer(rhs)
+                        // Iterate left-skewed chains to avoid O(2^n) recursion
+                        if self.expr_is_pointer(rhs) {
+                            return true;
+                        }
+                        let mut cur = lhs.as_ref();
+                        loop {
+                            match cur {
+                                Expr::BinaryOp(BinOp::Add, inner_lhs, inner_rhs, _) => {
+                                    if self.expr_is_pointer(inner_rhs) {
+                                        return true;
+                                    }
+                                    cur = inner_lhs.as_ref();
+                                }
+                                _ => return self.expr_is_pointer(cur),
+                            }
+                        }
                     }
                     BinOp::Sub => {
                         // ptr - int yields a pointer; ptr - ptr yields an integer
