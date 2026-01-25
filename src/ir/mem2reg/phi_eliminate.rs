@@ -16,21 +16,113 @@
 //!     %phi1_dest = copy %tmp1
 //!     %phi2_dest = copy %tmp2
 //!     ... rest of block ...
+//!
+//! Critical edge splitting:
+//! When a predecessor block has multiple successors (e.g., a CondBranch) and
+//! the target block has phis, placing copies at the end of the predecessor
+//! would execute them on ALL outgoing paths, not just the edge to the phi's
+//! block. This corrupts values used on other paths. To fix this, we split
+//! the critical edge by inserting a new trampoline block that contains only
+//! the phi copies and branches unconditionally to the target.
 
 use crate::common::fx_hash::FxHashMap;
 use crate::ir::ir::*;
 
 /// Eliminate all phi nodes in the module by lowering them to copies.
 pub fn eliminate_phis(module: &mut IrModule) {
+    // Compute the global max block ID across ALL functions to avoid label collisions
+    // when creating trampoline blocks. Labels are module-wide (.L0, .L1, ...).
+    let mut next_block_id = 0u32;
+    for func in &module.functions {
+        for block in &func.blocks {
+            if block.label.0 >= next_block_id {
+                next_block_id = block.label.0 + 1;
+            }
+        }
+    }
+
     for func in &mut module.functions {
         if func.is_declaration || func.blocks.is_empty() {
             continue;
         }
-        eliminate_phis_in_function(func);
+        eliminate_phis_in_function(func, &mut next_block_id);
     }
 }
 
-fn eliminate_phis_in_function(func: &mut IrFunction) {
+/// Returns the number of distinct successor block IDs for a terminator.
+fn successor_count(term: &Terminator) -> usize {
+    match term {
+        Terminator::Return(_) | Terminator::Unreachable => 0,
+        Terminator::Branch(_) => 1,
+        Terminator::CondBranch { true_label, false_label, .. } => {
+            if true_label == false_label { 1 } else { 2 }
+        }
+        Terminator::IndirectBranch { possible_targets, .. } => possible_targets.len(),
+    }
+}
+
+/// Replace one occurrence of `old_target` with `new_target` in a terminator.
+fn retarget_terminator_once(term: &mut Terminator, old_target: BlockId, new_target: BlockId) {
+    match term {
+        Terminator::Branch(t) => {
+            if *t == old_target {
+                *t = new_target;
+            }
+        }
+        Terminator::CondBranch { true_label, false_label, .. } => {
+            // Only retarget one edge to avoid changing both sides of a diamond
+            if *true_label == old_target {
+                *true_label = new_target;
+            } else if *false_label == old_target {
+                *false_label = new_target;
+            }
+        }
+        Terminator::IndirectBranch { possible_targets, .. } => {
+            for t in possible_targets.iter_mut() {
+                if *t == old_target {
+                    *t = new_target;
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+struct TrampolineBlock {
+    label: BlockId,
+    copies: Vec<Instruction>,
+    branch_target: BlockId,
+    pred_idx: usize,
+    old_target: BlockId,
+}
+
+/// Get or create a trampoline block for a (pred, target) critical edge.
+fn get_or_create_trampoline(
+    trampoline_map: &mut FxHashMap<(usize, BlockId), usize>,
+    trampolines: &mut Vec<TrampolineBlock>,
+    pred_idx: usize,
+    target_block_id: BlockId,
+    next_block_id: &mut u32,
+) -> usize {
+    *trampoline_map
+        .entry((pred_idx, target_block_id))
+        .or_insert_with(|| {
+            let idx = trampolines.len();
+            let label = BlockId(*next_block_id);
+            *next_block_id += 1;
+            trampolines.push(TrampolineBlock {
+                label,
+                copies: Vec::new(),
+                branch_target: target_block_id,
+                pred_idx,
+                old_target: target_block_id,
+            });
+            idx
+        })
+}
+
+fn eliminate_phis_in_function(func: &mut IrFunction, next_block_id: &mut u32) {
     // Use cached next_value_id if available, otherwise scan
     let mut next_value = if func.next_value_id > 0 {
         func.next_value_id
@@ -45,8 +137,12 @@ fn eliminate_phis_in_function(func: &mut IrFunction) {
         .map(|(i, b)| (b.label, i))
         .collect();
 
+    // Determine which blocks have multiple successors (for critical edge detection)
+    let multi_succ: Vec<bool> = func.blocks.iter()
+        .map(|b| successor_count(&b.terminator) > 1)
+        .collect();
+
     // Collect phi information from all blocks.
-    // For each block, collect its phis: Vec<(dest, Vec<(src_operand, pred_block_id)>)>
     struct PhiInfo {
         dest: Value,
         incoming: Vec<(Operand, BlockId)>,
@@ -66,23 +162,29 @@ fn eliminate_phis_in_function(func: &mut IrFunction) {
         block_phis.push(phis);
     }
 
-    // For each block with phis, insert copies in predecessor blocks.
-    // We use a two-step approach to handle parallel copies correctly:
-    // 1. In each predecessor, copy each phi source to a fresh temporary
-    // 2. At the start of the target block, copy each temporary to the phi dest
+    // For each block with phis, determine where to place copies.
+    // If the predecessor has multiple successors (critical edge), we split the
+    // edge by creating a trampoline block for the copies.
 
-    // Collect copies to insert: pred_block_idx -> Vec<Copy instructions to insert before terminator>
+    // pred_copies: pred_block_idx -> Vec<Copy instructions>
+    // For predecessors with a single successor (safe to append copies directly).
     let mut pred_copies: FxHashMap<usize, Vec<Instruction>> = FxHashMap::default();
-    // Collect copies to insert at start of target blocks (after removing phis)
+
+    // target_copies: copies to prepend at start of target blocks
     let mut target_copies: Vec<Vec<Instruction>> = vec![Vec::new(); func.blocks.len()];
+
+    // Trampoline blocks for critical edge splitting.
+    let mut trampolines: Vec<TrampolineBlock> = Vec::new();
+
+    // Track which (pred_idx, target_block_id) pairs already have trampolines
+    let mut trampoline_map: FxHashMap<(usize, BlockId), usize> = FxHashMap::default();
 
     for (block_idx, phis) in block_phis.iter().enumerate() {
         if phis.is_empty() {
             continue;
         }
 
-        // For single-phi blocks, we can skip the temporary and copy directly
-        // in the predecessor. For multi-phi blocks, we need temporaries.
+        let target_block_id = func.blocks[block_idx].label;
         let use_temporaries = phis.len() > 1;
 
         for phi in phis {
@@ -90,46 +192,59 @@ fn eliminate_phis_in_function(func: &mut IrFunction) {
                 let tmp = Value(next_value);
                 next_value += 1;
 
-                // In each predecessor, copy source to temporary
                 for (src, pred_label) in &phi.incoming {
-                    if let Some(&pred_idx) = label_to_idx.get(&pred_label) {
-                        pred_copies
-                            .entry(pred_idx)
-                            .or_default()
-                            .push(Instruction::Copy {
-                                dest: tmp,
-                                src: src.clone(),
-                            });
+                    if let Some(&pred_idx) = label_to_idx.get(pred_label) {
+                        let copy_inst = Instruction::Copy {
+                            dest: tmp,
+                            src: src.clone(),
+                        };
+
+                        if multi_succ[pred_idx] {
+                            // Critical edge: place copy in a trampoline block
+                            let tramp_idx = get_or_create_trampoline(
+                                &mut trampoline_map, &mut trampolines,
+                                pred_idx, target_block_id, next_block_id,
+                            );
+                            trampolines[tramp_idx].copies.push(copy_inst);
+                        } else {
+                            pred_copies.entry(pred_idx).or_default().push(copy_inst);
+                        }
                     }
                 }
 
-                // At start of target block, copy temporary to phi dest
                 target_copies[block_idx].push(Instruction::Copy {
                     dest: phi.dest,
                     src: Operand::Value(tmp),
                 });
             } else {
-                // Single phi: copy directly in predecessors, no temporary needed
+                // Single phi: copy directly
                 for (src, pred_label) in &phi.incoming {
-                    if let Some(&pred_idx) = label_to_idx.get(&pred_label) {
-                        pred_copies
-                            .entry(pred_idx)
-                            .or_default()
-                            .push(Instruction::Copy {
-                                dest: phi.dest,
-                                src: src.clone(),
-                            });
+                    if let Some(&pred_idx) = label_to_idx.get(pred_label) {
+                        let copy_inst = Instruction::Copy {
+                            dest: phi.dest,
+                            src: src.clone(),
+                        };
+
+                        if multi_succ[pred_idx] {
+                            // Critical edge: place copy in a trampoline block
+                            let tramp_idx = get_or_create_trampoline(
+                                &mut trampoline_map, &mut trampolines,
+                                pred_idx, target_block_id, next_block_id,
+                            );
+                            trampolines[tramp_idx].copies.push(copy_inst);
+                        } else {
+                            pred_copies.entry(pred_idx).or_default().push(copy_inst);
+                        }
                     }
                 }
             }
         }
     }
 
-    // Now apply the transformations:
+    // Apply transformations:
     // 1. Remove phi instructions from all blocks
-    // 2. Insert copies in predecessor blocks (before terminators)
-    // 3. Insert copies at start of target blocks (where phis were)
-
+    // 2. Prepend target copies
+    // 3. Insert predecessor copies (for single-successor predecessors only)
     for (block_idx, block) in func.blocks.iter_mut().enumerate() {
         // Remove phi instructions
         block.instructions.retain(|inst| !matches!(inst, Instruction::Phi { .. }));
@@ -141,15 +256,30 @@ fn eliminate_phis_in_function(func: &mut IrFunction) {
             block.instructions = new_insts;
         }
 
-        // Insert predecessor copies before terminator
+        // Insert predecessor copies before terminator (only for single-successor blocks)
         if let Some(copies) = pred_copies.remove(&block_idx) {
-            // Insert all copies before the last instruction position
-            // (they go at the end of the block, before the terminator)
             block.instructions.extend(copies);
         }
+    }
+
+    // 4. Retarget predecessors that need trampolines
+    for trampoline in &trampolines {
+        retarget_terminator_once(
+            &mut func.blocks[trampoline.pred_idx].terminator,
+            trampoline.old_target,
+            trampoline.label,
+        );
+    }
+
+    // 5. Append trampoline blocks to the function
+    for trampoline in trampolines {
+        func.blocks.push(BasicBlock {
+            label: trampoline.label,
+            instructions: trampoline.copies,
+            terminator: Terminator::Branch(trampoline.branch_target),
+        });
     }
 
     // Update cached next_value_id for downstream passes
     func.next_value_id = next_value;
 }
-
