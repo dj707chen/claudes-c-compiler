@@ -55,6 +55,10 @@ fn fold_function_once(func: &mut IrFunction) -> usize {
 fn try_fold(inst: &Instruction) -> Option<Instruction> {
     match inst {
         Instruction::BinOp { dest, op, lhs, rhs, ty } => {
+            // Skip 128-bit types: our fold_binop uses i64, which would truncate
+            if ty.is_128bit() {
+                return None;
+            }
             let lhs_const = as_i64_const(lhs)?;
             let rhs_const = as_i64_const(rhs)?;
             let result = fold_binop(*op, lhs_const, rhs_const)?;
@@ -64,6 +68,10 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
             })
         }
         Instruction::UnaryOp { dest, op, src, ty } => {
+            // Skip 128-bit types
+            if ty.is_128bit() {
+                return None;
+            }
             let src_const = as_i64_const(src)?;
             let result = fold_unaryop(*op, src_const)?;
             Some(Instruction::Copy {
@@ -71,7 +79,11 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
                 src: Operand::Const(IrConst::from_i64(result, *ty)),
             })
         }
-        Instruction::Cmp { dest, op, lhs, rhs, .. } => {
+        Instruction::Cmp { dest, op, lhs, rhs, ty } => {
+            // Skip 128-bit comparison types
+            if ty.is_128bit() {
+                return None;
+            }
             let lhs_const = as_i64_const(lhs)?;
             let rhs_const = as_i64_const(rhs)?;
             let result = fold_cmp(*op, lhs_const, rhs_const);
@@ -81,6 +93,10 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
             })
         }
         Instruction::Cast { dest, src, from_ty, to_ty } => {
+            // Skip casts involving 128-bit types
+            if from_ty.is_128bit() || to_ty.is_128bit() {
+                return None;
+            }
             let src_const = as_i64_const(src)?;
             let result = fold_cast(src_const, *from_ty, *to_ty);
             Some(Instruction::Copy {

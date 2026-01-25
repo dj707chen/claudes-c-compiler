@@ -786,6 +786,11 @@ impl IrType {
         matches!(self, IrType::F128)
     }
 
+    /// Whether this is a 128-bit integer type (I128 or U128).
+    pub fn is_128bit(&self) -> bool {
+        matches!(self, IrType::I128 | IrType::U128)
+    }
+
     /// Get the unsigned counterpart of this type.
     pub fn to_unsigned(&self) -> Self {
         match self {
