@@ -1,0 +1,16 @@
+Fix: Sema struct layout scoping
+
+Bug: When a function defines a local struct with the same tag name as a
+global struct (but different fields), the global layout is permanently
+corrupted. This is because sema's resolve_struct_or_union uses
+insert_struct_layout_from_ref (unscoped) to register struct layouts,
+and sema never pushes/pops TypeContext scopes.
+
+Fix:
+1. Push/pop TypeContext scopes in sema at function entry/exit,
+   compound statement boundaries, and for-loop scopes
+2. Use insert_struct_layout_scoped_from_ref instead of
+   insert_struct_layout_from_ref in resolve_struct_or_union
+
+This ensures inner struct definitions are properly undone when their
+scope exits, preserving global layouts.
