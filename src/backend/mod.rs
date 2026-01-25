@@ -29,6 +29,13 @@ pub struct CodegenOptions {
     pub function_return_thunk: bool,
     /// Whether to replace indirect calls/jumps with retpoline thunks (-mindirect-branch=thunk-extern)
     pub indirect_branch_thunk: bool,
+    /// Patchable function entry: (total_nops, nops_before_entry).
+    /// -fpatchable-function-entry=N[,M] emits NOP padding around function entry points
+    /// and records them in __patchable_function_entries for runtime patching (ftrace).
+    pub patchable_function_entry: Option<(u32, u32)>,
+    /// Whether to emit endbr64 at function entry points (-fcf-protection=branch).
+    /// Required for Intel CET/IBT (Indirect Branch Tracking).
+    pub cf_protection_branch: bool,
 }
 
 /// Target architecture.
@@ -105,6 +112,8 @@ impl Target {
                 cg.set_pic(opts.pic);
                 cg.set_function_return_thunk(opts.function_return_thunk);
                 cg.set_indirect_branch_thunk(opts.indirect_branch_thunk);
+                cg.set_patchable_function_entry(opts.patchable_function_entry);
+                cg.set_cf_protection_branch(opts.cf_protection_branch);
                 cg.generate(module)
             }
             Target::Aarch64 => arm::ArmCodegen::new().generate(module),

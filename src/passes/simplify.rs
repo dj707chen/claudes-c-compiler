@@ -178,18 +178,29 @@ fn simplify_cast(
                 }
 
                 // Double widen: Cast(Cast(x, A->B), B->C) where A < B < C (all ints)
-                // => Cast(x, A->C) - skip intermediate, preserving inner signedness
+                // => Cast(x, A->C) - skip intermediate.
+                // ONLY safe when A and B have the same signedness, because the
+                // extension from B to C uses B's signedness. If we skip B and go
+                // directly A->C, the extension uses A's signedness instead. When
+                // A and B differ in signedness (e.g., I8->U16->I32), the
+                // intermediate unsigned type changes the extension behavior and
+                // skipping it would be incorrect.
                 if inner_from.is_integer() && from_ty.is_integer() && to_ty.is_integer() {
                     let a = inner_from.size();
                     let b = from_ty.size();
                     let c = to_ty.size();
                     if a < b && b < c {
-                        return Some(Instruction::Cast {
-                            dest,
-                            src: inner_src,
-                            from_ty: inner_from,
-                            to_ty,
-                        });
+                        // Only safe when inner source and intermediate have same signedness
+                        let same_sign = inner_from.is_signed() == from_ty.is_signed()
+                            || inner_from.is_unsigned() == from_ty.is_unsigned();
+                        if same_sign {
+                            return Some(Instruction::Cast {
+                                dest,
+                                src: inner_src,
+                                from_ty: inner_from,
+                                to_ty,
+                            });
+                        }
                     }
 
                     // Double narrow: Cast(Cast(x, A->B), B->C) where A > B > C (all ints)
@@ -216,13 +227,25 @@ fn simplify_cast(
 /// Fold a cast of a constant at compile time.
 /// Returns the new constant if the cast can be folded, None otherwise.
 ///
-/// Note: `_from_ty` is not needed because IrConst::to_i64() returns the bit
-/// pattern sign-extended from the constant's storage type (I8/I16/I32/I64).
-/// The target type's truncation in `as i8/i16/i32` handles the narrowing
-/// correctly regardless of source signedness.
-fn fold_const_cast(c: &IrConst, _from_ty: IrType, to_ty: IrType) -> Option<IrConst> {
+/// `from_ty` is needed because IrConst::to_i64() always sign-extends from
+/// the storage type (I8/I16/I32/I64), but unsigned source types require
+/// zero-extension. For example, IrConst::I8(-1) with from_ty=U8 represents
+/// the value 255, not -1.
+fn fold_const_cast(c: &IrConst, from_ty: IrType, to_ty: IrType) -> Option<IrConst> {
     // Integer-to-integer/float constant cast
-    if let Some(val) = c.to_i64() {
+    if let Some(raw_val) = c.to_i64() {
+        // Normalize source value according to from_ty signedness.
+        // Signed types sign-extend; unsigned types zero-extend.
+        let val = match from_ty {
+            IrType::I8 => raw_val as i8 as i64,
+            IrType::U8 => raw_val as u8 as i64,
+            IrType::I16 => raw_val as i16 as i64,
+            IrType::U16 => raw_val as u16 as i64,
+            IrType::I32 => raw_val as i32 as i64,
+            IrType::U32 => raw_val as u32 as i64,
+            _ => raw_val,
+        };
+
         return Some(match to_ty {
             IrType::I8 | IrType::U8 => IrConst::I8(val as i8),
             IrType::I16 | IrType::U16 => IrConst::I16(val as i16),

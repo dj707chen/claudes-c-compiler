@@ -212,6 +212,21 @@ fn real_main() {
             "-fno-PIC" | "-fno-pic" | "-fno-PIE" | "-fno-pie" => {
                 driver.pic = false;
             }
+            "-fcf-protection=branch" | "-fcf-protection=full" => {
+                driver.cf_protection_branch = true;
+            }
+            "-fcf-protection=none" => {
+                driver.cf_protection_branch = false;
+            }
+            arg if arg.starts_with("-fpatchable-function-entry=") => {
+                // Parse -fpatchable-function-entry=N[,M]
+                // N = total NOP bytes, M = NOP bytes before entry point (default 0)
+                let val = &arg["-fpatchable-function-entry=".len()..];
+                let parts: Vec<&str> = val.split(',').collect();
+                let total: u32 = parts[0].parse().unwrap_or(0);
+                let before: u32 = if parts.len() > 1 { parts[1].parse().unwrap_or(0) } else { 0 };
+                driver.patchable_function_entry = Some((total, before));
+            }
             arg if arg.starts_with("-f") => {
                 // Other -f flags ignored for now
             }

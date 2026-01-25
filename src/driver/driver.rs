@@ -60,6 +60,14 @@ pub struct Driver {
     pub function_return_thunk: bool,
     /// Whether to replace indirect calls/jumps with retpoline thunks (-mindirect-branch=thunk-extern)
     pub indirect_branch_thunk: bool,
+    /// Patchable function entry: (total_nops, nops_before_entry).
+    /// Set by -fpatchable-function-entry=N[,M] where N is total NOPs and M is
+    /// how many go before the entry point (the rest go after).
+    /// Used by the Linux kernel for ftrace and static call patching.
+    pub patchable_function_entry: Option<(u32, u32)>,
+    /// Whether to emit endbr64 at function entry points (-fcf-protection=branch).
+    /// Required by the Linux kernel for Intel CET/IBT (Indirect Branch Tracking).
+    pub cf_protection_branch: bool,
 }
 
 impl Driver {
@@ -85,6 +93,8 @@ impl Driver {
             force_includes: Vec::new(),
             function_return_thunk: false,
             indirect_branch_thunk: false,
+            patchable_function_entry: None,
+            cf_protection_branch: false,
         }
     }
 
@@ -511,6 +521,8 @@ impl Driver {
             pic: self.pic || self.shared_lib,
             function_return_thunk: self.function_return_thunk,
             indirect_branch_thunk: self.indirect_branch_thunk,
+            patchable_function_entry: self.patchable_function_entry,
+            cf_protection_branch: self.cf_protection_branch,
         };
         let asm = self.target.generate_assembly_with_opts(&module, &opts);
         if time_phases { eprintln!("[TIME] codegen: {:.3}s ({} bytes asm)", t8.elapsed().as_secs_f64(), asm.len()); }

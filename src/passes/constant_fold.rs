@@ -210,22 +210,33 @@ fn fold_cmp(op: IrCmpOp, lhs: i64, rhs: i64) -> bool {
 }
 
 /// Evaluate a type cast on a constant.
+///
+/// For signed source types, we sign-extend to get the correct i64 representation.
+/// For unsigned source types, we zero-extend (mask to type width).
+/// Same logic applies to the target type.
 fn fold_cast(val: i64, from_ty: crate::common::types::IrType, to_ty: crate::common::types::IrType) -> i64 {
     use crate::common::types::IrType;
 
-    // First truncate/sign-extend to source type width
+    // First, normalize the value to the source type's width and signedness.
+    // Signed types sign-extend; unsigned types zero-extend.
     let src_val = match from_ty {
         IrType::I8 => val as i8 as i64,
+        IrType::U8 => val as u8 as i64,
         IrType::I16 => val as i16 as i64,
+        IrType::U16 => val as u16 as i64,
         IrType::I32 => val as i32 as i64,
+        IrType::U32 => val as u32 as i64,
         _ => val,
     };
 
-    // Then convert to target type
+    // Then convert to target type width and signedness.
     match to_ty {
         IrType::I8 => src_val as i8 as i64,
+        IrType::U8 => src_val as u8 as i64,
         IrType::I16 => src_val as i16 as i64,
+        IrType::U16 => src_val as u16 as i64,
         IrType::I32 => src_val as i32 as i64,
+        IrType::U32 => src_val as u32 as i64,
         _ => src_val,
     }
 }
@@ -305,9 +316,47 @@ mod tests {
     fn test_fold_cast() {
         // Sign-extend i8 to i32
         assert_eq!(fold_cast(-1, IrType::I8, IrType::I32), -1);
-        // Truncate i32 to i8
+        // Truncate i32 to i8 (signed)
         assert_eq!(fold_cast(256, IrType::I32, IrType::I8), 0);
         assert_eq!(fold_cast(255, IrType::I32, IrType::I8), -1);
+    }
+
+    #[test]
+    fn test_fold_cast_unsigned_source() {
+        // Zero-extend U8 to I32: 0xFF as u8 = 255, zero-extended to 255
+        assert_eq!(fold_cast(-1, IrType::U8, IrType::I32), 255);
+        // Zero-extend U8 to I64
+        assert_eq!(fold_cast(-1, IrType::U8, IrType::I64), 255);
+        // Zero-extend U16 to I32: 0xFFFF as u16 = 65535
+        assert_eq!(fold_cast(-1, IrType::U16, IrType::I32), 65535);
+        // Zero-extend U16 to I64
+        assert_eq!(fold_cast(-1, IrType::U16, IrType::I64), 65535);
+        // Zero-extend U32 to I64: 0xFFFFFFFF as u32 = 4294967295
+        assert_eq!(fold_cast(-1, IrType::U32, IrType::I64), 4294967295);
+    }
+
+    #[test]
+    fn test_fold_cast_unsigned_target() {
+        // Truncate I32 to U8: 0x1FF & 0xFF = 0xFF = 255
+        assert_eq!(fold_cast(0x1FF, IrType::I32, IrType::U8), 255);
+        // Truncate I32 to U8: -1 & 0xFF = 255
+        assert_eq!(fold_cast(-1, IrType::I32, IrType::U8), 255);
+        // Truncate I32 to U16: 0x1FFFF & 0xFFFF = 65535
+        assert_eq!(fold_cast(0x1FFFF, IrType::I32, IrType::U16), 65535);
+        // Truncate I64 to U32: 0x1FFFFFFFF & 0xFFFFFFFF = 4294967295
+        assert_eq!(fold_cast(0x1FFFFFFFF_i64, IrType::I64, IrType::U32), 4294967295);
+        // Truncate I64 to U32: -1 & 0xFFFFFFFF = 4294967295
+        assert_eq!(fold_cast(-1, IrType::I64, IrType::U32), 4294967295);
+    }
+
+    #[test]
+    fn test_fold_cast_unsigned_to_unsigned() {
+        // U8 255 to U16: zero-extend to 255
+        assert_eq!(fold_cast(255, IrType::U8, IrType::U16), 255);
+        // U16 to U8: truncate 0x1FF to 0xFF = 255
+        assert_eq!(fold_cast(0x1FF, IrType::U16, IrType::U8), 255);
+        // U32 to U8: truncate 0x1FF to 0xFF = 255
+        assert_eq!(fold_cast(0x1FF, IrType::U32, IrType::U8), 255);
     }
 
     #[test]

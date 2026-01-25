@@ -100,6 +100,16 @@ impl X86Codegen {
         self.state.indirect_branch_thunk = enabled;
     }
 
+    /// Set patchable function entry configuration (-fpatchable-function-entry=N,M).
+    pub fn set_patchable_function_entry(&mut self, entry: Option<(u32, u32)>) {
+        self.state.patchable_function_entry = entry;
+    }
+
+    /// Enable CF protection branch (-fcf-protection=branch) to emit endbr64.
+    pub fn set_cf_protection_branch(&mut self, enabled: bool) {
+        self.state.cf_protection_branch = enabled;
+    }
+
     pub fn generate(mut self, module: &IrModule) -> String {
         let raw = generate_module(&mut self, module);
         super::peephole::peephole_optimize(raw)
@@ -991,6 +1001,14 @@ impl ArchCodegen for X86Codegen {
 
     fn emit_prologue(&mut self, func: &IrFunction, frame_size: i64) {
         self.current_return_type = func.return_type;
+        // Emit endbr64 for CET/IBT (-fcf-protection=branch).
+        // This must be the first instruction at the function entry point.
+        // When -fpatchable-function-entry=N,M is also active, the NOP padding
+        // is placed before the function label by generation.rs, so endbr64
+        // remains the first instruction at the actual entry address.
+        if self.state.cf_protection_branch {
+            self.state.emit("    endbr64");
+        }
         self.state.emit("    pushq %rbp");
         self.state.emit("    movq %rsp, %rbp");
         if frame_size > 0 {

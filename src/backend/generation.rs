@@ -348,8 +348,49 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
             _ => {} // "default" or unknown: no directive needed
         }
     }
+
+    // Emit patchable function entry NOP padding (-fpatchable-function-entry=N,M).
+    // This is used by the Linux kernel for ftrace and static call patching.
+    // Format: M NOPs before the entry point, (N-M) NOPs after, plus a
+    // __patchable_function_entries section pointing to the NOP area.
+    if let Some((total, before)) = cg.state().patchable_function_entry {
+        if total > 0 {
+            let pfe_id = cg.state().next_label_id();
+            let pfe_label = format!(".LPFE{}", pfe_id);
+
+            // Emit __patchable_function_entries section with a pointer to the NOP area
+            cg.state().emit_fmt(format_args!(
+                ".section __patchable_function_entries,\"awo\",@progbits,{}",
+                pfe_label
+            ));
+            cg.state().emit(".align 8");
+            cg.state().emit_fmt(format_args!(".quad {}", pfe_label));
+
+            // Switch back to the function's section (custom or .text)
+            if let Some(ref sect) = func.section {
+                cg.state().emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
+            } else {
+                cg.state().emit(".text");
+            }
+
+            // Emit the LPFE label and M NOPs before the function entry point
+            cg.state().emit_fmt(format_args!("{}:", pfe_label));
+            for _ in 0..before {
+                cg.state().emit("nop");
+            }
+        }
+    }
+
     cg.state().emit_fmt(format_args!(".type {}, {}", func.name, type_dir));
     cg.state().emit_fmt(format_args!("{}:", func.name));
+
+    // Emit (N-M) NOPs after the function entry point for patchable function entry
+    if let Some((total, before)) = cg.state().patchable_function_entry {
+        let after = total.saturating_sub(before);
+        for _ in 0..after {
+            cg.state().emit("nop");
+        }
+    }
 
     // Pre-scan for DynAlloca: if present, the epilogue must restore SP from
     // the frame pointer instead of adding back the compile-time frame size.
