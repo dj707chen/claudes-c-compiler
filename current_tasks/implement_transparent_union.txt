@@ -1,0 +1,28 @@
+Task: Implement __attribute__((transparent_union)) support
+
+Problem:
+The bind() EFAULT issue in redis and postgres is caused by ccc ignoring
+__attribute__((transparent_union)). When glibc defines bind() with a
+transparent union parameter (under _GNU_SOURCE), ccc treats the union
+as a regular struct-by-value argument, causing an extra dereference.
+
+Root cause chain:
+1. glibc's sys/socket.h defines __CONST_SOCKADDR_ARG as a transparent_union
+2. bind()'s 2nd param is typed as this union
+3. ccc classifies it as StructByValReg in param_struct_sizes
+4. emit_call does movq (%rax), %rsi instead of movq %rax, %rsi
+5. Kernel gets garbage pointer -> EFAULT
+
+Fix plan:
+1. Parse transparent_union attribute on union type definitions
+2. Store the attribute on CType::Union
+3. When building param_struct_sizes, treat transparent_union params as
+   their first member type (a pointer), returning None instead of Some(size)
+4. When converting arguments at call sites, allow implicit conversion from
+   any member type to the transparent union type
+5. Add regression test
+
+This is distinct from fix_postgres_bind_efault.txt which describes the
+symptom but hasn't identified this root cause.
+
+Status: LOCKED
