@@ -1125,9 +1125,15 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
             None => { i += 1; continue; }
         };
 
-        // Scan for testq %rax, %rax pattern
+        // Scan for testq %rax, %rax pattern.
+        // Track StoreRbp offsets so we can bail out if any store's slot is
+        // potentially read by another basic block (no matching load nearby).
         let mut test_idx = None;
-        let mut has_store = false;
+        // At most 2 stores can appear between setCC and testq in practice
+        // (the Cmp result store + possibly a sign-extension store).  Use 4
+        // as a comfortable limit; if exceeded, conservatively bail out.
+        let mut store_offsets: [i32; 4] = [0; 4];
+        let mut store_count = 0usize;
         let mut scan = 2;
         while scan < seq_count {
             let si = seq_indices[scan];
@@ -1138,9 +1144,17 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
                 scan += 1;
                 continue;
             }
-            // Skip store/load to rbp (pre-parsed fast check)
-            if matches!(infos[si].kind, LineKind::StoreRbp { .. }) {
-                has_store = true;
+            // Skip store/load to rbp (pre-parsed fast check).
+            // Track store offsets to detect unmatched cross-block stores.
+            if let LineKind::StoreRbp { offset, .. } = infos[si].kind {
+                if store_count < 4 {
+                    store_offsets[store_count] = offset;
+                    store_count += 1;
+                } else {
+                    // Too many stores to track — conservatively bail out
+                    store_count = usize::MAX;
+                    break;
+                }
                 scan += 1;
                 continue;
             }
@@ -1161,19 +1175,52 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
             break;
         }
 
-        // If the sequence includes a store to the stack, the comparison result
-        // is being materialized for use by other blocks.  The codegen-level
-        // fusion already decided NOT to fuse (because the Cmp result has
-        // multiple uses), so the peephole must not undo that decision.
-        if has_store {
-            i += 1;
-            continue;
-        }
-
         let test_scan = match test_idx {
             Some(t) => t,
             None => { i += 1; continue; }
         };
+
+        // If there are stores in the sequence, verify each has a matching
+        // load nearby (including NOP'd lines from earlier local passes).
+        // A store without a matching load means the Cmp result is live
+        // beyond this branch (read by another basic block).  Fusion would
+        // delete the setCC+movzbq that materialise the boolean, leaving
+        // the slot uninitialised or written with the wrong value.
+        if store_count == usize::MAX {
+            // Overflow: too many stores to track, conservatively skip fusion
+            i += 1;
+            continue;
+        }
+        if store_count > 0 {
+            let range_start = seq_indices[1];
+            let range_end = seq_indices[test_scan];
+            let mut load_offsets: [i32; 4] = [0; 4];
+            let mut load_count = 0usize;
+            for ri in range_start..=range_end {
+                let off = match infos[ri].kind {
+                    LineKind::LoadRbp { offset, .. } => Some(offset),
+                    LineKind::Nop => {
+                        // Re-classify the original text to recover NOP'd loads
+                        let orig = classify_line(store.get(ri));
+                        match orig.kind {
+                            LineKind::LoadRbp { offset, .. } => Some(offset),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(o) = off {
+                    if load_count < 4 { load_offsets[load_count] = o; load_count += 1; }
+                }
+            }
+            let has_unmatched_store = (0..store_count).any(|si| {
+                !(0..load_count).any(|li| load_offsets[li] == store_offsets[si])
+            });
+            if has_unmatched_store {
+                i += 1;
+                continue;
+            }
+        }
 
         if test_scan + 1 >= seq_count {
             i += 1;
@@ -1192,19 +1239,6 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
 
         let fused_cc = if is_jne { cc } else { invert_cc(cc) };
         let fused_jcc = format!("    j{} {}", fused_cc, branch_target);
-
-        // Check if there is a StoreRbp in the sequence between setCC and
-        // testq. If so, the comparison result is stored to a stack slot
-        // that may be read by another basic block (e.g., after GVN replaces
-        // a redundant comparison with a reference to this one). In that
-        // case, skip fusion to avoid leaving the stack slot uninitialized.
-        let has_store = (1..=test_scan).any(|s|
-            matches!(infos[seq_indices[s]].kind, LineKind::StoreRbp { .. })
-        );
-        if has_store {
-            i += 1;
-            continue;
-        }
 
         // NOP out everything from setCC through testq
         for s in 1..=test_scan {
@@ -2225,11 +2259,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compare_branch_fusion_with_store_preserved() {
-        // When the sequence includes a store to a stack slot, the comparison
-        // result is being materialized for use by other blocks.  The peephole
-        // must NOT fuse in this case, because the store may be the only write
-        // to a slot that another block reads.
+    fn test_compare_branch_fusion_with_matched_store_load() {
+        // When the sequence includes a store + matching load at the same
+        // offset, the store-load pair is just a codegen roundtrip.  Fusion
+        // IS safe because no other block reads the slot (the load is right
+        // here in the same sequence).
         let asm = [
             "    cmpq %rcx, %rax",
             "    setl %al",
@@ -2242,9 +2276,9 @@ mod tests {
         ].join("\n") + "\n";
         let result = peephole_optimize(asm);
         assert!(result.contains("cmpq %rcx, %rax"), "should keep the cmp");
-        // The store must be preserved because another block may read -24(%rbp)
-        assert!(result.contains("-24(%rbp)"), "should keep the store: {}", result);
-        assert!(result.contains("setl"), "should keep setl when store present: {}", result);
+        // Matched store+load pair → fusion is safe
+        assert!(result.contains("jl .L2"), "should fuse to jl: {}", result);
+        assert!(!result.contains("setl"), "should eliminate setl");
     }
 
     #[test]
@@ -2415,30 +2449,6 @@ mod tests {
             "should forward callee-saved reg across call: {}", result);
     }
 
-    #[test]
-    fn test_compare_branch_fusion_store_preserved() {
-        // When there is a store-to-rbp between setCC and testq but NO
-        // corresponding load in the same basic block, the store is needed
-        // by another block. Fusion must be skipped entirely so the
-        // setCC+movzbq+store sequence is preserved.
-        let asm = [
-            "    cmpq $0, %rbx",
-            "    sete %al",
-            "    movzbq %al, %rax",
-            "    movq %rax, -40(%rbp)",
-            "    testq %rax, %rax",
-            "    jne .L309",
-            "    jmp .L311",
-        ].join("\n") + "\n";
-        let result = peephole_optimize(asm);
-        assert!(result.contains("sete %al"), "must preserve sete: {}", result);
-        assert!(result.contains("movzbq %al,"), "must preserve movzbq: {}", result);
-        assert!(result.contains("-40(%rbp)"), "must preserve store to stack slot: {}", result);
-        assert!(result.contains("testq %rax, %rax"), "must preserve testq: {}", result);
-        // Fusion would replace the sequence with a direct conditional jump
-        // after the cmpq, eliminating testq. Since testq is preserved, fusion
-        // did not fire.
-    }
 
     #[test]
     fn test_classify_line() {
@@ -2472,5 +2482,30 @@ mod tests {
         assert_eq!(parse_rbp_offset("movq -8(%rbp), -16(%rbp)"), RBP_OFFSET_NONE);
         // Two identical rbp offsets -> that offset
         assert_eq!(parse_rbp_offset("addq -8(%rbp), -8(%rbp)"), -8);
+    }
+
+    #[test]
+    fn test_compare_branch_fusion_no_fuse_cross_block_store() {
+        // When the Cmp result is stored to a stack slot that is NOT loaded back
+        // in the same sequence (i.e. it's read by a different basic block),
+        // fusion must be suppressed.  Otherwise the setCC+movzbq that compute
+        // the boolean value are deleted and the store either disappears or
+        // writes the wrong data, leaving the cross-block read uninitialised.
+        let asm = [
+            "    cmpq $0, %rbx",
+            "    sete %al",
+            "    movzbq %al, %rax",
+            "    movq %rax, -40(%rbp)",   // store for cross-block use (no matching load)
+            "    testq %rax, %rax",
+            "    jne .L8",
+            "    jmp .L10",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // The store must survive: another block reads -40(%rbp).
+        assert!(result.contains("-40(%rbp)"),
+            "must preserve cross-block store: {}", result);
+        // setCC and movzbq must also survive since the store needs the boolean value.
+        assert!(result.contains("sete"),
+            "must preserve sete for cross-block store: {}", result);
     }
 }
