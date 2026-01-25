@@ -16,6 +16,7 @@ pub mod complex;
 pub mod global_init;
 pub mod global_init_bytes;
 pub mod global_init_compound;
+pub(crate) mod global_init_helpers;
 pub mod const_eval;
 pub mod expr_types;
 mod pointer_analysis;

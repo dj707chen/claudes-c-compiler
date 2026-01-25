@@ -1,0 +1,115 @@
+//! Shared helper functions for global initialization.
+//!
+//! This module extracts common patterns that were duplicated across
+//! `global_init.rs`, `global_init_bytes.rs`, and `global_init_compound.rs`.
+//! These include designator inspection, field resolution, and init item
+//! classification utilities.
+
+use crate::frontend::parser::ast::*;
+use crate::common::types::{CType, StructLayoutProvider};
+
+/// Extract the field name from the first designator of an initializer item.
+/// Returns `None` if the item has no designators or the first is not a Field.
+pub(super) fn first_field_designator(item: &InitializerItem) -> Option<&str> {
+    match item.designators.first() {
+        Some(Designator::Field(ref name)) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+/// Check if an initializer item has a nested field designator
+/// (i.e., has 2+ designators with the first being a Field).
+/// Used to detect patterns like `.field.subfield = val`.
+pub(super) fn has_nested_field_designator(item: &InitializerItem) -> bool {
+    item.designators.len() > 1
+        && matches!(item.designators.first(), Some(Designator::Field(_)))
+}
+
+/// Check if a field is an anonymous struct/union member being targeted by a
+/// field designator. This detects the case where a designator like `.x` resolves
+/// to an anonymous member (empty name) that is itself a struct/union.
+pub(super) fn is_anon_member_designator(
+    desig_name: Option<&str>,
+    field_name: &str,
+    field_ty: &CType,
+) -> bool {
+    desig_name.is_some()
+        && field_name.is_empty()
+        && matches!(field_ty, CType::Struct(_) | CType::Union(_))
+}
+
+/// Check if any initializer items use the `[N].field` designator pattern
+/// (e.g., `[0].name = "hello", [0].value = 42`).
+pub(super) fn has_array_field_designators(items: &[InitializerItem]) -> bool {
+    items.iter().any(|item| {
+        item.designators.len() >= 2
+            && matches!(item.designators[0], Designator::Index(_))
+            && matches!(item.designators[1], Designator::Field(_))
+    })
+}
+
+/// Check if an expression contains a string literal anywhere,
+/// including through binary operations and casts (e.g., `"str" + N`).
+pub(super) fn expr_contains_string_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _) => true,
+        Expr::BinaryOp(_, lhs, rhs, _) => {
+            expr_contains_string_literal(lhs) || expr_contains_string_literal(rhs)
+        }
+        Expr::Cast(_, inner, _) => expr_contains_string_literal(inner),
+        _ => false,
+    }
+}
+
+/// Check if an initializer item contains a string literal anywhere
+/// (including nested lists).
+pub(super) fn init_contains_string_literal(item: &InitializerItem) -> bool {
+    match &item.init {
+        Initializer::Expr(expr) => expr_contains_string_literal(expr),
+        Initializer::List(sub_items) => {
+            sub_items.iter().any(|sub| init_contains_string_literal(sub))
+        }
+    }
+}
+
+/// Check if an initializer item contains an address expression or string literal.
+/// Used when `is_multidim_char_array` is true to suppress treating string
+/// literals as address expressions for multi-dim char arrays.
+pub(super) fn init_contains_addr_expr(item: &InitializerItem, is_multidim_char_array: bool) -> bool {
+    match &item.init {
+        Initializer::Expr(expr) => {
+            if matches!(expr, Expr::StringLiteral(_, _)) {
+                !is_multidim_char_array
+            } else {
+                false
+            }
+        }
+        Initializer::List(sub_items) => {
+            sub_items.iter().any(|sub| init_contains_addr_expr(sub, is_multidim_char_array))
+        }
+    }
+}
+
+/// Check if a CType contains pointer elements (directly or through arrays/structs).
+pub(super) fn type_has_pointer_elements(ty: &CType, ctx: &dyn StructLayoutProvider) -> bool {
+    match ty {
+        CType::Pointer(_) | CType::Function(_) => true,
+        CType::Array(inner, _) => type_has_pointer_elements(inner, ctx),
+        CType::Struct(key) | CType::Union(key) => {
+            if let Some(layout) = ctx.get_struct_layout(key) {
+                layout.fields.iter().any(|f| type_has_pointer_elements(&f.ty, ctx))
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Append `count` zero bytes as `GlobalInit::Scalar(IrConst::I8(0))` to `elements`.
+/// Used throughout global initialization for padding and zero-fill.
+pub(super) fn push_zero_bytes(elements: &mut Vec<crate::ir::ir::GlobalInit>, count: usize) {
+    for _ in 0..count {
+        elements.push(crate::ir::ir::GlobalInit::Scalar(crate::ir::ir::IrConst::I8(0)));
+    }
+}

@@ -13,7 +13,8 @@ use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, StructLayout, CType, InitFieldResolution};
 use super::lowering::Lowerer;
-use super::global_init_bytes::push_zero_bytes;
+use super::global_init_helpers as h;
+use h::push_zero_bytes;
 
 impl Lowerer {
     /// Lower a struct global init that contains address expressions.
@@ -42,11 +43,7 @@ impl Lowerer {
         while item_idx < items.len() {
             let item = &items[item_idx];
 
-            // Use resolve_init_field for anonymous member awareness
-            let designator_name = match item.designators.first() {
-                Some(Designator::Field(ref name)) => Some(name.as_str()),
-                _ => None,
-            };
+            let designator_name = h::first_field_designator(item);
             let resolution = layout.resolve_init_field(designator_name, current_field_idx, &self.types);
 
             let field_idx = match &resolution {
@@ -134,19 +131,11 @@ impl Lowerer {
                 let inits = &field_inits[fi];
                 if inits.len() == 1 {
                     let item = inits[0];
-                    let has_nested_designator = item.designators.len() > 1
-                        && matches!(item.designators.first(), Some(Designator::Field(_)));
+                    let desig_name = h::first_field_designator(item);
+                    let is_anon = h::is_anon_member_designator(
+                        desig_name, &layout.fields[fi].name, &layout.fields[fi].ty);
 
-                    // Check if this is a designator targeting a field inside an anonymous member
-                    let desig_name = match item.designators.first() {
-                        Some(Designator::Field(ref name)) => Some(name.as_str()),
-                        _ => None,
-                    };
-                    let is_anon_member_designator = desig_name.is_some()
-                        && layout.fields[fi].name.is_empty()
-                        && matches!(&layout.fields[fi].ty, CType::Struct(_) | CType::Union(_));
-
-                    if is_anon_member_designator {
+                    if is_anon {
                         let sub_item = InitializerItem {
                             designators: item.designators.clone(),
                             init: item.init.clone(),
@@ -155,7 +144,7 @@ impl Lowerer {
                             .unwrap_or_else(StructLayout::empty);
                         let sub_items = vec![sub_item];
                         self.emit_sub_struct_to_compound(&mut elements, &sub_items, &sub_layout, field_size);
-                    } else if has_nested_designator {
+                    } else if h::has_nested_field_designator(item) {
                         self.emit_compound_nested_designator_init(
                             &mut elements, item, &layout.fields[fi].ty, field_size);
                     } else {
@@ -286,27 +275,11 @@ impl Lowerer {
                 push_zero_bytes(&mut elements, field_size);
             } else if inits.len() == 1 {
                 let item = inits[0];
+                let desig_name = h::first_field_designator(item);
+                let is_anon = h::is_anon_member_designator(
+                    desig_name, &layout.fields[fi].name, &layout.fields[fi].ty);
 
-                // Check for multi-level designators targeting a sub-field within this
-                // struct/union field (e.g., .u.keyword={"hello", -5} or .bs.keyword = {"STORE", -1}).
-                // The first designator resolved to this field; remaining designators
-                // target a sub-field within.
-                let has_nested_field_designator = item.designators.len() > 1
-                    && matches!(item.designators.first(), Some(Designator::Field(_)));
-
-                // Check if this is a designator targeting a field inside an anonymous
-                // struct/union member (e.g., .x = 10 where x is inside an anonymous struct).
-                // The designator resolved to the anonymous member's index; we need to
-                // recurse into the anonymous member with the full designators.
-                let desig_name = match item.designators.first() {
-                    Some(Designator::Field(ref name)) => Some(name.as_str()),
-                    _ => None,
-                };
-                let is_anon_member_designator = desig_name.is_some()
-                    && layout.fields[fi].name.is_empty()
-                    && matches!(&layout.fields[fi].ty, CType::Struct(_) | CType::Union(_));
-
-                if is_anon_member_designator {
+                if is_anon {
                     // Recurse into the anonymous member with the full designators
                     let sub_item = InitializerItem {
                         designators: item.designators.clone(),
@@ -316,16 +289,14 @@ impl Lowerer {
                         .unwrap_or_else(StructLayout::empty);
                     let sub_items = vec![sub_item];
                     self.emit_sub_struct_to_compound(&mut elements, &sub_items, &sub_layout, field_size);
-                } else if has_nested_field_designator {
+                } else if h::has_nested_field_designator(item) {
                     self.emit_compound_nested_designator_field(
                         &mut elements, item, &layout.fields[fi].ty, field_size);
                 } else {
-                    // Check if this is a designated init for an array-of-pointer field
-                    // e.g., .a[1] = "abc" where a is char *a[3]
                     let has_array_idx_designator = item.designators.iter().any(|d| matches!(d, Designator::Index(_)));
                     if has_array_idx_designator {
                         if let CType::Array(elem_ty, Some(arr_size)) = &layout.fields[fi].ty {
-                            if Self::type_has_pointer_elements_ctx(elem_ty, &self.types) {
+                            if h::type_has_pointer_elements(elem_ty, &self.types) {
                                 // Designated init for pointer array element
                                 self.emit_compound_ptr_array_designated_init(
                                     &mut elements, &[item], elem_ty, *arr_size);
@@ -505,7 +476,7 @@ impl Lowerer {
             Initializer::List(nested_items) => {
                 // Check if this is an array whose elements contain pointers
                 if let CType::Array(elem_ty, Some(arr_size)) = field_ty {
-                    if Self::type_has_pointer_elements_ctx(elem_ty, &self.types) {
+                    if h::type_has_pointer_elements(elem_ty, &self.types) {
                         // Distinguish: direct pointer array vs struct-with-pointer-fields array
                         if matches!(elem_ty.as_ref(), CType::Pointer(_) | CType::Function(_)) {
                             // Array of direct pointers: emit each element as a GlobalAddr or zero
@@ -806,7 +777,7 @@ impl Lowerer {
             }
         };
 
-        let elem_is_pointer = Self::type_has_pointer_elements_ctx(elem_ty, &self.types);
+        let elem_is_pointer = h::type_has_pointer_elements(elem_ty, &self.types);
         let elem_size = self.resolve_ctype_size(elem_ty);
         let ptr_size = 8; // 64-bit
 
@@ -847,11 +818,8 @@ impl Lowerer {
         layout: &StructLayout,
         current_field_idx: usize,
     ) -> usize {
-        let designator_name = match item.designators.first() {
-            Some(Designator::Field(ref name)) => Some(name.as_str()),
-            _ => None,
-        };
-        layout.resolve_init_field_idx(designator_name, current_field_idx, &self.types)
+        let desig_name = h::first_field_designator(item);
+        layout.resolve_init_field_idx(desig_name, current_field_idx, &self.types)
             .unwrap_or(current_field_idx)
     }
 
@@ -992,62 +960,10 @@ impl Lowerer {
 
         let num_elems = if this_stride > 0 { region_size / this_stride } else { 0 };
 
-        // Check for [N].field designator pattern
-        let has_array_field_designators = items.iter().any(|item| {
-            item.designators.len() >= 2
-                && matches!(item.designators[0], Designator::Index(_))
-                && matches!(item.designators[1], Designator::Field(_))
-        });
-
-        if has_array_field_designators && this_stride == struct_size {
-            // [N].field pattern at the innermost dimension
-            let mut current_elem_idx = 0usize;
-            let mut current_field_idx = 0usize;
-            for item in items {
-                let mut elem_idx = current_elem_idx;
-                let mut remaining_desigs_start = 0;
-
-                if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
-                    if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
-                        if idx != current_elem_idx { current_field_idx = 0; }
-                        elem_idx = idx;
-                    }
-                    remaining_desigs_start = 1;
-                }
-
-                let mut field_desig: Option<&str> = None;
-                if let Some(Designator::Field(ref name)) = item.designators.get(remaining_desigs_start) {
-                    field_desig = Some(name.as_str());
-                    remaining_desigs_start += 1;
-                }
-
-                if elem_idx >= num_elems { current_elem_idx = elem_idx + 1; continue; }
-
-                let elem_base = base_offset + elem_idx * struct_size;
-                let field_idx = match layout.resolve_init_field_idx(field_desig, current_field_idx, &self.types) {
-                    Some(idx) => idx,
-                    None => { current_elem_idx = elem_idx; continue; }
-                };
-                let field = &layout.fields[field_idx];
-                let field_offset = elem_base + field.offset;
-
-                if remaining_desigs_start < item.designators.len() {
-                    let remaining_item = InitializerItem {
-                        designators: item.designators[remaining_desigs_start..].to_vec(),
-                        init: item.init.clone(),
-                    };
-                    self.fill_nested_designator_with_ptrs(
-                        &remaining_item, &field.ty, field_offset, bytes, ptr_ranges,
-                    );
-                } else {
-                    self.emit_struct_field_init_compound(
-                        item, field, field_offset, bytes, ptr_ranges,
-                    );
-                }
-
-                current_elem_idx = elem_idx;
-                current_field_idx = field_idx + 1;
-            }
+        if h::has_array_field_designators(items) && this_stride == struct_size {
+            self.fill_array_field_designator_items(
+                items, layout, struct_size, num_elems, base_offset, bytes, ptr_ranges,
+            );
         } else {
             // Sequential items: each item maps to one element at this_stride
             let mut current_idx = 0usize;
@@ -1114,80 +1030,11 @@ impl Lowerer {
         let mut bytes = vec![0u8; total_size];
         let mut ptr_ranges: Vec<(usize, GlobalInit)> = Vec::new();
 
-        // Check if items use [N].field designated initializer pattern.
-        // In this pattern, each item has designators like [Index(N), Field("name")]
-        // and multiple items can target the same array element but different fields.
-        let has_array_field_designators = items.iter().any(|item| {
-            item.designators.len() >= 2
-                && matches!(item.designators[0], Designator::Index(_))
-                && matches!(item.designators[1], Designator::Field(_))
-        });
-
-        if has_array_field_designators {
+        if h::has_array_field_designators(items) {
             // Handle [N].field = value pattern (e.g., postgres mcxt_methods[]).
-            // Items are individual field assignments with explicit array index + field
-            // designators. We must group them by target array index and process each
-            // field within the target struct element.
-            let mut current_elem_idx = 0usize;
-            let mut current_field_idx = 0usize;
-            for item in items {
-                // Determine the target array element index
-                let mut elem_idx = current_elem_idx;
-                let mut field_desig: Option<&str> = None;
-                let mut remaining_desigs_start = 0;
-
-                if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
-                    if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
-                        if idx != current_elem_idx {
-                            current_field_idx = 0;
-                        }
-                        elem_idx = idx;
-                    }
-                    remaining_desigs_start = 1;
-                }
-
-                // Extract field designator
-                if let Some(Designator::Field(ref name)) = item.designators.get(remaining_desigs_start) {
-                    field_desig = Some(name.as_str());
-                    remaining_desigs_start += 1;
-                }
-
-                if elem_idx >= num_elems {
-                    current_elem_idx = elem_idx + 1;
-                    continue;
-                }
-
-                let base_offset = elem_idx * struct_size;
-                let field_idx = match layout.resolve_init_field_idx(field_desig, current_field_idx, &self.types) {
-                    Some(idx) => idx,
-                    None => { current_elem_idx = elem_idx; continue; }
-                };
-                let field = &layout.fields[field_idx];
-                let field_offset = base_offset + field.offset;
-
-                // Check for further nested designators beyond [N].field
-                // e.g., [N].field.subfield or [N].field[idx]
-                if remaining_desigs_start < item.designators.len() {
-                    // Build a synthetic item with remaining designators for nested handling
-                    let remaining_item = InitializerItem {
-                        designators: item.designators[remaining_desigs_start..].to_vec(),
-                        init: item.init.clone(),
-                    };
-                    self.fill_nested_designator_with_ptrs(
-                        &remaining_item, &field.ty, field_offset,
-                        &mut bytes, &mut ptr_ranges,
-                    );
-                } else {
-                    // Direct field assignment
-                    self.emit_struct_field_init_compound(
-                        item, field, field_offset,
-                        &mut bytes, &mut ptr_ranges,
-                    );
-                }
-
-                current_elem_idx = elem_idx;
-                current_field_idx = field_idx + 1;
-            }
+            self.fill_array_field_designator_items(
+                items, layout, struct_size, num_elems, 0, &mut bytes, &mut ptr_ranges,
+            );
         } else {
             // Original path: items correspond 1-to-1 to array elements (no [N].field designators).
             // Each item is either a braced list for one struct element or a single expression.
@@ -1285,10 +1132,7 @@ impl Lowerer {
                     Initializer::List(sub_items) => {
                         let mut current_field_idx = 0usize;
                         for sub_item in sub_items {
-                            let desig_name = match sub_item.designators.first() {
-                                Some(Designator::Field(ref name)) => Some(name.as_str()),
-                                _ => None,
-                            };
+                            let desig_name = h::first_field_designator(sub_item);
                             let field_idx = match layout.resolve_init_field_idx(desig_name, current_field_idx, &self.types) {
                                 Some(idx) => idx,
                                 None => break,
@@ -1296,11 +1140,7 @@ impl Lowerer {
                             let field = &layout.fields[field_idx];
                             let field_offset = base_offset + field.offset;
 
-                            // Handle multi-level designators (e.g., .bs.keyword={"GET", -1})
-                            let has_nested_field_designator = sub_item.designators.len() > 1
-                                && matches!(sub_item.designators.first(), Some(Designator::Field(_)));
-
-                            if has_nested_field_designator {
+                            if h::has_nested_field_designator(sub_item) {
                                 self.fill_nested_designator_with_ptrs(
                                     sub_item, &field.ty, field_offset,
                                     bytes, ptr_ranges,
@@ -1331,6 +1171,70 @@ impl Lowerer {
                 }
             }
             current_idx += 1;
+        }
+    }
+
+    /// Process `[N].field = value` designated initializer items for a struct array.
+    /// This is the consolidated loop that handles the `[Index(N), Field("name")]`
+    /// designator pattern used by both `fill_multidim_struct_array_with_ptrs` and
+    /// `lower_struct_array_with_ptrs`. Each item targets a specific array element and
+    /// field within it.
+    fn fill_array_field_designator_items(
+        &mut self,
+        items: &[InitializerItem],
+        layout: &StructLayout,
+        struct_size: usize,
+        num_elems: usize,
+        array_base_offset: usize,
+        bytes: &mut [u8],
+        ptr_ranges: &mut Vec<(usize, GlobalInit)>,
+    ) {
+        let mut current_elem_idx = 0usize;
+        let mut current_field_idx = 0usize;
+        for item in items {
+            let mut elem_idx = current_elem_idx;
+            let mut remaining_desigs_start = 0;
+
+            if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
+                if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
+                    if idx != current_elem_idx { current_field_idx = 0; }
+                    elem_idx = idx;
+                }
+                remaining_desigs_start = 1;
+            }
+
+            let mut field_desig: Option<&str> = None;
+            if let Some(Designator::Field(ref name)) = item.designators.get(remaining_desigs_start) {
+                field_desig = Some(name.as_str());
+                remaining_desigs_start += 1;
+            }
+
+            if elem_idx >= num_elems { current_elem_idx = elem_idx + 1; continue; }
+
+            let elem_base = array_base_offset + elem_idx * struct_size;
+            let field_idx = match layout.resolve_init_field_idx(field_desig, current_field_idx, &self.types) {
+                Some(idx) => idx,
+                None => { current_elem_idx = elem_idx; continue; }
+            };
+            let field = &layout.fields[field_idx];
+            let field_offset = elem_base + field.offset;
+
+            if remaining_desigs_start < item.designators.len() {
+                let remaining_item = InitializerItem {
+                    designators: item.designators[remaining_desigs_start..].to_vec(),
+                    init: item.init.clone(),
+                };
+                self.fill_nested_designator_with_ptrs(
+                    &remaining_item, &field.ty, field_offset, bytes, ptr_ranges,
+                );
+            } else {
+                self.emit_struct_field_init_compound(
+                    item, field, field_offset, bytes, ptr_ranges,
+                );
+            }
+
+            current_elem_idx = elem_idx;
+            current_field_idx = field_idx + 1;
         }
     }
 
@@ -1383,10 +1287,7 @@ impl Lowerer {
     ) {
         let mut current_field_idx = 0usize;
         for inner_item in inner_items {
-            let desig_name = match inner_item.designators.first() {
-                Some(Designator::Field(ref name)) => Some(name.as_str()),
-                _ => None,
-            };
+            let desig_name = h::first_field_designator(inner_item);
             let resolution = sub_layout.resolve_init_field(desig_name, current_field_idx, &self.types);
             let field_idx = match &resolution {
                 Some(InitFieldResolution::Direct(idx)) => *idx,
@@ -1409,9 +1310,7 @@ impl Lowerer {
             };
 
             // Handle multi-level designators within the nested struct (e.g., .config.i = &val)
-            if inner_item.designators.len() > 1
-                && matches!(inner_item.designators.first(), Some(Designator::Field(_)))
-            {
+            if h::has_nested_field_designator(inner_item) {
                 if field_idx < sub_layout.fields.len() {
                     let field = &sub_layout.fields[field_idx];
                     let field_abs_offset = base_offset + field.offset;
@@ -1542,7 +1441,7 @@ impl Lowerer {
                 for (ai, item) in items.iter().enumerate() {
                     let elem_offset = offset + ai * elem_size;
                     if let Initializer::Expr(ref expr) = item.init {
-                        if Self::type_has_pointer_elements_ctx(elem_ty, &self.types) {
+                        if h::type_has_pointer_elements(elem_ty, &self.types) {
                             self.write_expr_to_bytes_or_ptrs(
                                 expr, elem_ty, elem_offset, None, None, bytes, ptr_ranges,
                             );

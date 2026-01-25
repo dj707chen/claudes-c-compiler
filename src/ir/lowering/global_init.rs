@@ -10,6 +10,7 @@ use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, StructLayout, CType};
 use super::lowering::Lowerer;
+use super::global_init_helpers as h;
 
 impl Lowerer {
     /// Lower a global initializer to a GlobalInit value.
@@ -265,9 +266,9 @@ impl Lowerer {
                             }
                         }
                         // Also recurse into nested lists for string literals (double-brace init)
-                        Self::init_contains_addr_expr(item, is_multidim_char_array)
+                        h::init_contains_addr_expr(item, is_multidim_char_array)
                     }) || (is_ptr_array && !is_multidim_char_array && items.iter().any(|item| {
-                        Self::init_contains_string_literal(item)
+                        h::init_contains_string_literal(item)
                     }));
 
                     if has_addr_exprs {
@@ -540,32 +541,13 @@ impl Lowerer {
         if is_long_double { IrConst::LongDouble(0.0) } else { self.zero_const(base_ty) }
     }
 
-    /// Lower a struct initializer list to a GlobalInit::Array of field values.
-    /// Emits each field's value at its appropriate position, with padding bytes as zeros.
-    /// Supports designated initializers like {.b = 2, .a = 1}.
-    /// Check if a type contains pointer elements (either directly or as array elements)
-    pub(super) fn type_has_pointer_elements_ctx(ty: &CType, ctx: &dyn crate::common::types::StructLayoutProvider) -> bool {
-        match ty {
-            CType::Pointer(_) | CType::Function(_) => true,
-            CType::Array(inner, _) => Self::type_has_pointer_elements_ctx(inner, ctx),
-            CType::Struct(key) | CType::Union(key) => {
-                if let Some(layout) = ctx.get_struct_layout(key) {
-                    layout.fields.iter().any(|f| Self::type_has_pointer_elements_ctx(&f.ty, ctx))
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        }
-    }
-
     /// Check if an initializer (possibly nested) contains expressions that require
     /// address relocations (string literals, address-of expressions, etc.)
     fn init_has_addr_exprs(&self, init: &Initializer) -> bool {
         match init {
             Initializer::Expr(expr) => {
                 // String literal or expression containing one (e.g., "str" + N)
-                if Self::expr_contains_string_literal(expr) {
+                if h::expr_contains_string_literal(expr) {
                     return true;
                 }
                 // &(compound_literal) at file scope
@@ -655,23 +637,13 @@ impl Lowerer {
             let field_idx = self.resolve_struct_init_field_idx(item, layout, current_field_idx);
 
             if field_idx >= layout.fields.len() {
-                // Could be flat init filling into an array field; check if previous field
-                // was an array of pointers
                 item_idx += 1;
                 continue;
             }
 
             let field_ty = &layout.fields[field_idx].ty;
 
-            // Handle multi-level designators (e.g., .u.keyword={"hello", -5} or
-            // .bs.keyword = {"STORE", -1}). When designators.len() > 1 and the first
-            // resolves to a struct/union, we need to drill into the nested type to
-            // check for address fields.
-            let has_nested_designator = item.designators.len() > 1
-                && matches!(item.designators.first(), Some(Designator::Field(_)));
-
-            if has_nested_designator {
-                // Drill through nested designators to find the actual target type
+            if h::has_nested_field_designator(item) {
                 if self.nested_designator_has_addr_fields(item, field_ty) {
                     return true;
                 }
@@ -682,26 +654,21 @@ impl Lowerer {
 
             match &item.init {
                 Initializer::Expr(expr) => {
-                    // Direct string literal or expression containing one (e.g., "str" + N)
-                    if Self::expr_contains_string_literal(expr) {
-                        // Check if field is a pointer or array of pointers
-                        if Self::type_has_pointer_elements_ctx(field_ty, &self.types) {
+                    if h::expr_contains_string_literal(expr) {
+                        if h::type_has_pointer_elements(field_ty, &self.types) {
                             return true;
                         }
                     }
                     if self.eval_const_expr(expr).is_none() && self.eval_global_addr_expr(expr).is_some() {
                         return true;
                     }
-                    // &(compound_literal) at file scope: address of anonymous global
                     if let Expr::AddressOf(inner, _) = expr {
                         if matches!(inner.as_ref(), Expr::CompoundLiteral(..)) {
                             return true;
                         }
                     }
-                    // For flat array-of-pointer init, consume remaining items for this field
                     if let CType::Array(elem_ty, Some(arr_size)) = field_ty {
-                        if Self::type_has_pointer_elements_ctx(elem_ty, &self.types) {
-                            // Check if any of the remaining items for this array have addr exprs
+                        if h::type_has_pointer_elements(elem_ty, &self.types) {
                             for i in 1..*arr_size {
                                 let next = item_idx + i;
                                 if next >= items.len() { break; }
@@ -714,14 +681,11 @@ impl Lowerer {
                     }
                 }
                 Initializer::List(nested_items) => {
-                    // Check if the nested list contains addr expressions and the field
-                    // is or contains pointer types
-                    if Self::type_has_pointer_elements_ctx(field_ty, &self.types) {
+                    if h::type_has_pointer_elements(field_ty, &self.types) {
                         if self.init_has_addr_exprs(&item.init) {
                             return true;
                         }
                     }
-                    // Also check for nested structs containing pointer fields
                     if let Some(nested_layout) = self.get_struct_layout_for_ctype(field_ty) {
                         if self.struct_init_has_addr_fields(nested_items, &nested_layout) {
                             return true;
@@ -740,19 +704,16 @@ impl Lowerer {
     /// contains address fields by drilling through the designator chain to find the
     /// actual target type.
     fn nested_designator_has_addr_fields(&self, item: &InitializerItem, outer_ty: &CType) -> bool {
-        // Drill through designators starting from the second one (first already resolved)
         let drill = match self.drill_designators(&item.designators[1..], outer_ty) {
             Some(d) => d,
             None => return false,
         };
         let current_ty = drill.target_ty;
 
-        // Check if the target type itself is a pointer
         if matches!(&current_ty, CType::Pointer(_) | CType::Function(_)) {
             return self.init_has_addr_exprs(&item.init);
         }
 
-        // If target is a struct/union, check its fields for pointers
         if let Some(target_layout) = self.get_struct_layout_for_ctype(&current_ty) {
             if target_layout.has_pointer_fields(&self.types) && self.init_has_addr_exprs(&item.init) {
                 return true;
@@ -764,9 +725,8 @@ impl Lowerer {
             }
         }
 
-        // For arrays, check element type
         if let CType::Array(elem_ty, _) = &current_ty {
-            if Self::type_has_pointer_elements_ctx(elem_ty, &self.types) {
+            if h::type_has_pointer_elements(elem_ty, &self.types) {
                 return self.init_has_addr_exprs(&item.init);
             }
         }
@@ -987,49 +947,6 @@ impl Lowerer {
             flat_idx += idx * elems_per_entry;
         }
         flat_idx
-    }
-
-    /// Check if an initializer item contains an address expression or string literal,
-    /// recursing into nested Initializer::List items (for double-brace init like {{"str"}}).
-    fn init_contains_addr_expr(item: &InitializerItem, is_multidim_char_array: bool) -> bool {
-        match &item.init {
-            Initializer::Expr(expr) => {
-                if matches!(expr, Expr::StringLiteral(_, _)) {
-                    !is_multidim_char_array
-                } else {
-                    // Cannot call self methods in a static context, so conservatively
-                    // return false for non-string expressions; the caller handles
-                    // address expressions via eval_global_addr_expr separately.
-                    false
-                }
-            }
-            Initializer::List(sub_items) => {
-                sub_items.iter().any(|sub| Self::init_contains_addr_expr(sub, is_multidim_char_array))
-            }
-        }
-    }
-
-    /// Check if an initializer item contains a string literal anywhere (including nested lists).
-    fn init_contains_string_literal(item: &InitializerItem) -> bool {
-        match &item.init {
-            Initializer::Expr(expr) => Self::expr_contains_string_literal(expr),
-            Initializer::List(sub_items) => {
-                sub_items.iter().any(|sub| Self::init_contains_string_literal(sub))
-            }
-        }
-    }
-
-    /// Check if an expression contains a string literal, recursing into
-    /// binary operations and casts (for patterns like "str" + N).
-    fn expr_contains_string_literal(expr: &Expr) -> bool {
-        match expr {
-            Expr::StringLiteral(_, _) | Expr::WideStringLiteral(_, _) => true,
-            Expr::BinaryOp(_, lhs, rhs, _) => {
-                Self::expr_contains_string_literal(lhs) || Self::expr_contains_string_literal(rhs)
-            }
-            Expr::Cast(_, inner, _) => Self::expr_contains_string_literal(inner),
-            _ => false,
-        }
     }
 
     /// Collect a single compound initializer element, handling nested lists (double-brace init).

@@ -8,14 +8,7 @@ use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{IrType, StructLayout, CType};
 use super::lowering::Lowerer;
-
-/// Append `count` zero bytes (as `GlobalInit::Scalar(IrConst::I8(0))`) to `elements`.
-/// Used throughout global initialization to emit padding and zero-fill.
-pub(super) fn push_zero_bytes(elements: &mut Vec<GlobalInit>, count: usize) {
-    for _ in 0..count {
-        elements.push(GlobalInit::Scalar(IrConst::I8(0)));
-    }
-}
+use super::global_init_helpers as h;
 
 /// Result of filling an array/FAM field in fill_struct_global_bytes,
 /// indicating how to advance the item index.
@@ -52,10 +45,7 @@ impl Lowerer {
         while item_idx < items.len() {
             let item = &items[item_idx];
 
-            let designator_name = match item.designators.first() {
-                Some(Designator::Field(ref name)) => Some(name.as_str()),
-                _ => None,
-            };
+            let designator_name = h::first_field_designator(item);
             let array_start_idx = self.extract_index_designator(item, designator_name.is_some());
             let resolution = layout.resolve_init_field(designator_name, current_field_idx, &self.types);
             let field_idx = match &resolution {
@@ -91,19 +81,15 @@ impl Lowerer {
             let field_layout = &layout.fields[field_idx];
             let field_offset = base_offset + field_layout.offset;
 
-            // Check if designator targets a field inside an anonymous struct/union member
-            let is_anon_member_designator = designator_name.is_some()
-                && field_layout.name.is_empty()
-                && matches!(&field_layout.ty, CType::Struct(_) | CType::Union(_));
-
-            let has_nested_designator = item.designators.len() > 1
-                && matches!(item.designators.first(), Some(Designator::Field(_)));
+            let is_anon = h::is_anon_member_designator(
+                designator_name, &field_layout.name, &field_layout.ty);
+            let has_nested = h::has_nested_field_designator(item);
 
             match &field_layout.ty {
                 // Nested designator or anonymous member designator into struct/union
-                CType::Struct(key) | CType::Union(key) if has_nested_designator || is_anon_member_designator => {
+                CType::Struct(key) | CType::Union(key) if has_nested || is_anon => {
                     if let Some(sub_layout) = self.types.struct_layouts.get(&**key).cloned() {
-                        let sub_item = if is_anon_member_designator && !has_nested_designator {
+                        let sub_item = if is_anon && !has_nested {
                             // Pass all designators through for anonymous member field lookup
                             item.clone()
                         } else {
@@ -119,7 +105,7 @@ impl Lowerer {
                 // Nested designator into array: .field[idx] = val
                 // After the designated element, continue consuming non-designated
                 // items for subsequent array positions (C11 6.7.9p17).
-                CType::Array(elem_ty, Some(arr_size)) if has_nested_designator => {
+                CType::Array(elem_ty, Some(arr_size)) if has_nested => {
                     let arr_size = *arr_size;
                     let desig_idx = self.fill_nested_designator_array(item, elem_ty, arr_size, bytes, field_offset);
                     item_idx += 1;

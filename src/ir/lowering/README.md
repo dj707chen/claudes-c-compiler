@@ -26,6 +26,7 @@ handles every C language construct. The `mem2reg` pass later promotes allocas to
 | `global_init.rs` | Global initializer dispatch: routes to byte or compound path based on pointer content |
 | `global_init_bytes.rs` | Byte-level global init serialization; shared `drill_designators` for nested designator resolution |
 | `global_init_compound.rs` | Relocation-aware global init for structs/arrays containing pointer fields |
+| `global_init_helpers.rs` | Shared utilities for the global init subsystem (designator inspection, field resolution, init classification) |
 | `const_eval.rs` | Compile-time constant expression evaluation |
 | `pointer_analysis.rs` | Tracks expressions producing struct addresses vs packed data |
 | `ref_collection.rs` | Pre-pass to collect referenced static/extern symbols |
@@ -97,11 +98,22 @@ global_init.rs: lower_struct_global_init()
 (e.g., `const char *s = "hello"` needs a `.quad .L.str` directive). Non-pointer structs can
 be fully serialized to a `Vec<u8>` byte buffer, which is simpler and more efficient.
 
-**Shared helpers** (in `global_init_bytes.rs`):
+**Shared designator/init helpers** (in `global_init_helpers.rs`):
+The bytes and compound paths share many patterns for inspecting initializer items and
+designator chains. These are extracted into free functions to avoid duplication:
+- `first_field_designator(item)` — Extracts field name from first designator
+- `has_nested_field_designator(item)` — Checks for multi-level `.field.subfield` patterns
+- `is_anon_member_designator(name, field_name, field_ty)` — Detects anonymous struct/union members
+- `has_array_field_designators(items)` — Detects `[N].field` designated init patterns
+- `expr_contains_string_literal(expr)` — Recursive check for string literals in expressions
+- `init_contains_string_literal/addr_expr(item)` — Recursive init-level checks
+- `type_has_pointer_elements(ty, ctx)` — Recursive pointer content check
+- `push_zero_bytes(elements, count)` — Zero-fill for compound element lists
+
+**Shared data helpers** (in `global_init_bytes.rs`):
 - `drill_designators(designators, start_ty)` — Walks a chain of field/index designators
   to resolve the target type and byte offset. Used by both paths for nested designators
-  like `.u.keyword` or `[3].field.subfield`. This is the single implementation point for
-  designator chain resolution, avoiding duplication across the byte and compound paths.
+  like `.u.keyword` or `[3].field.subfield`.
 - `resolve_struct_init_field_idx()` — Maps a positional or designated initializer to its
   target struct field index.
 - `write_const_to_bytes()`, `write_bitfield_to_bytes()` — Low-level byte buffer operations.
