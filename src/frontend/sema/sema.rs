@@ -830,7 +830,9 @@ impl SemanticAnalyzer {
         }
     }
 
-    /// Rough sizeof for a type specifier, used in constant expression evaluation.
+    /// Compute sizeof for a type specifier, used in constant expression evaluation.
+    /// This must accurately handle struct/union types by looking up their cached layouts,
+    /// since array dimensions in struct fields may reference sizeof(struct_type).
     fn sizeof_type_spec(&self, spec: &TypeSpecifier) -> usize {
         match spec {
             TypeSpecifier::Void => 0,
@@ -843,7 +845,11 @@ impl SemanticAnalyzer {
             TypeSpecifier::Double => 8,
             TypeSpecifier::LongDouble => 16,
             TypeSpecifier::Bool => 1,
+            TypeSpecifier::ComplexFloat => 8,
+            TypeSpecifier::ComplexDouble => 16,
+            TypeSpecifier::ComplexLongDouble => 32,
             TypeSpecifier::Pointer(_) => 8,
+            TypeSpecifier::FunctionPointer(_, _, _) => 8,
             TypeSpecifier::Array(elem, Some(size)) => {
                 let elem_size = self.sizeof_type_spec(elem);
                 if let Some(n) = self.eval_const_expr(size) {
@@ -853,11 +859,85 @@ impl SemanticAnalyzer {
                 }
             }
             TypeSpecifier::Array(_, None) => 8, // incomplete array
-            _ => 8, // default for structs, enums, etc.
+            TypeSpecifier::Struct(tag, fields, is_packed, pragma_pack, struct_aligned) => {
+                // Look up cached layout for tagged structs
+                if let Some(tag) = tag {
+                    let key = format!("struct.{}", tag);
+                    if let Some(layout) = self.result.type_context.struct_layouts.get(&key) {
+                        return layout.size;
+                    }
+                }
+                // For inline struct definitions, compute from fields
+                if let Some(fields) = fields {
+                    let struct_fields = self.convert_struct_fields(fields);
+                    if !struct_fields.is_empty() {
+                        let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
+                        let mut layout = StructLayout::for_struct_with_packing(
+                            &struct_fields, max_field_align, &self.result.type_context.struct_layouts
+                        );
+                        if let Some(a) = struct_aligned {
+                            if *a > layout.align {
+                                layout.align = *a;
+                                let mask = layout.align - 1;
+                                layout.size = (layout.size + mask) & !mask;
+                            }
+                        }
+                        return layout.size;
+                    }
+                }
+                0 // incomplete struct
+            }
+            TypeSpecifier::Union(tag, fields, is_packed, pragma_pack, struct_aligned) => {
+                // Look up cached layout for tagged unions
+                if let Some(tag) = tag {
+                    let key = format!("union.{}", tag);
+                    if let Some(layout) = self.result.type_context.struct_layouts.get(&key) {
+                        return layout.size;
+                    }
+                }
+                // For inline union definitions, compute from fields
+                if let Some(fields) = fields {
+                    let union_fields = self.convert_struct_fields(fields);
+                    if !union_fields.is_empty() {
+                        let mut layout = StructLayout::for_union(&union_fields, &self.result.type_context.struct_layouts);
+                        if *is_packed {
+                            layout.align = 1;
+                            layout.size = layout.fields.iter().map(|f| f.ty.size_ctx(&self.result.type_context.struct_layouts)).max().unwrap_or(0);
+                        } else if let Some(pack) = pragma_pack {
+                            if *pack < layout.align {
+                                layout.align = *pack;
+                                let mask = layout.align - 1;
+                                layout.size = (layout.size + mask) & !mask;
+                            }
+                        }
+                        if let Some(a) = struct_aligned {
+                            if *a > layout.align {
+                                layout.align = *a;
+                                let mask = layout.align - 1;
+                                layout.size = (layout.size + mask) & !mask;
+                            }
+                        }
+                        return layout.size;
+                    }
+                }
+                0 // incomplete union
+            }
+            TypeSpecifier::Enum(_, _) => 4, // enums are int-sized
+            TypeSpecifier::TypedefName(name) => {
+                // Resolve typedef and compute size from the resolved CType
+                if let Some(ctype) = self.result.type_context.typedefs.get(name) {
+                    ctype.size_ctx(&self.result.type_context.struct_layouts)
+                } else {
+                    8 // fallback for unknown typedef
+                }
+            }
+            TypeSpecifier::TypeofType(inner) => self.sizeof_type_spec(inner),
+            _ => 8, // fallback for remaining cases (Typeof expr, etc.)
         }
     }
 
-    /// Rough alignof for a type specifier.
+    /// Compute alignof for a type specifier, used in constant expression evaluation.
+    /// Must accurately handle struct/union types by looking up their cached layouts.
     fn alignof_type_spec(&self, spec: &TypeSpecifier) -> usize {
         match spec {
             TypeSpecifier::Void | TypeSpecifier::Bool => 1,
@@ -868,9 +948,75 @@ impl SemanticAnalyzer {
             TypeSpecifier::Int128 | TypeSpecifier::UnsignedInt128 => 16,
             TypeSpecifier::Float => 4,
             TypeSpecifier::Double => 8,
-            TypeSpecifier::Pointer(_) => 8,
+            TypeSpecifier::LongDouble => 16,
+            TypeSpecifier::ComplexFloat => 4,
+            TypeSpecifier::ComplexDouble => 8,
+            TypeSpecifier::ComplexLongDouble => 16,
+            TypeSpecifier::Pointer(_) | TypeSpecifier::FunctionPointer(_, _, _) => 8,
             TypeSpecifier::Array(elem, _) => self.alignof_type_spec(elem),
-            _ => 8, // default for structs, enums, etc.
+            TypeSpecifier::Struct(tag, fields, is_packed, pragma_pack, struct_aligned) => {
+                // Look up cached layout for tagged structs
+                if let Some(tag) = tag {
+                    let key = format!("struct.{}", tag);
+                    if let Some(layout) = self.result.type_context.struct_layouts.get(&key) {
+                        return layout.align;
+                    }
+                }
+                // For inline struct definitions, compute from fields
+                if let Some(fields) = fields {
+                    let struct_fields = self.convert_struct_fields(fields);
+                    if !struct_fields.is_empty() {
+                        let max_field_align = if *is_packed { Some(1) } else { *pragma_pack };
+                        let mut layout = StructLayout::for_struct_with_packing(
+                            &struct_fields, max_field_align, &self.result.type_context.struct_layouts
+                        );
+                        if let Some(a) = struct_aligned {
+                            if *a > layout.align {
+                                layout.align = *a;
+                            }
+                        }
+                        return layout.align;
+                    }
+                }
+                1 // incomplete struct
+            }
+            TypeSpecifier::Union(tag, fields, is_packed, _pragma_pack, struct_aligned) => {
+                // Look up cached layout for tagged unions
+                if let Some(tag) = tag {
+                    let key = format!("union.{}", tag);
+                    if let Some(layout) = self.result.type_context.struct_layouts.get(&key) {
+                        return layout.align;
+                    }
+                }
+                // For inline union definitions, compute from fields
+                if let Some(fields) = fields {
+                    let union_fields = self.convert_struct_fields(fields);
+                    if !union_fields.is_empty() {
+                        let mut layout = StructLayout::for_union(&union_fields, &self.result.type_context.struct_layouts);
+                        if *is_packed {
+                            layout.align = 1;
+                        }
+                        if let Some(a) = struct_aligned {
+                            if *a > layout.align {
+                                layout.align = *a;
+                            }
+                        }
+                        return layout.align;
+                    }
+                }
+                1 // incomplete union
+            }
+            TypeSpecifier::Enum(_, _) => 4, // enums are int-aligned
+            TypeSpecifier::TypedefName(name) => {
+                // Resolve typedef and compute alignment from the resolved CType
+                if let Some(ctype) = self.result.type_context.typedefs.get(name) {
+                    ctype.align_ctx(&self.result.type_context.struct_layouts)
+                } else {
+                    8 // fallback for unknown typedef
+                }
+            }
+            TypeSpecifier::TypeofType(inner) => self.alignof_type_spec(inner),
+            _ => 8, // fallback for remaining cases
         }
     }
 

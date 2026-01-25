@@ -969,7 +969,11 @@ impl Lowerer {
         // Check for known function names (e.g., *add where add is a function)
         match inner {
             Expr::Identifier(name, _) => {
-                if self.known_functions.contains(name.as_str()) {
+                // Only treat as a function name dereference if there is no local variable
+                // with the same name. Local variables shadow function names, so if a local
+                // variable called "link" exists, *link should dereference the variable,
+                // not be treated as a no-op function pointer dereference.
+                if self.known_functions.contains(name.as_str()) && self.lookup_var_info(name).is_none() {
                     return true;
                 }
                 // Check if this variable is a function pointer (deref is no-op).
