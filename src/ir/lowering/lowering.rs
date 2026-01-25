@@ -1029,6 +1029,7 @@ impl Lowerer {
             blocks: std::mem::take(&mut self.func_mut().blocks),
             is_variadic: func.variadic, is_declaration: false, is_static, stack_size: 0,
             next_value_id: next_val,
+            section: func.section.clone(),
         };
         self.module.functions.push(ir_func);
         self.pop_scope();
@@ -1315,6 +1316,7 @@ impl Lowerer {
                 is_static,
                 is_extern: is_extern_decl,
                 is_common: decl.is_common,
+                section: declarator.section.clone(),
             });
         }
     }

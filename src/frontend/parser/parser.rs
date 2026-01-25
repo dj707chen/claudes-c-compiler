@@ -43,6 +43,8 @@ pub struct Parser {
     pub(super) parsing_alias_target: Option<String>,
     /// Set when __attribute__((visibility("..."))) is encountered; holds the visibility string.
     pub(super) parsing_visibility: Option<String>,
+    /// Set when __attribute__((section("..."))) is encountered; holds the section name.
+    pub(super) parsing_section: Option<String>,
     /// Set when parse_type_specifier or consume_post_type_qualifiers encounters _Alignas(N).
     /// Consumed and reset by callers that need it (e.g., struct field parsing).
     pub(super) parsed_alignas: Option<usize>,
@@ -73,6 +75,7 @@ impl Parser {
             parsing_weak: false,
             parsing_alias_target: None,
             parsing_visibility: None,
+            parsing_section: None,
             parsed_alignas: None,
             pragma_pack_stack: Vec::new(),
             pragma_pack_align: None,
@@ -362,6 +365,20 @@ impl Parser {
                                             self.advance(); // consume (
                                             if let TokenKind::StringLiteral(vis) = self.peek() {
                                                 self.parsing_visibility = Some(vis.clone());
+                                                self.advance();
+                                            }
+                                            if matches!(self.peek(), TokenKind::RParen) {
+                                                self.advance();
+                                            }
+                                        }
+                                    }
+                                    TokenKind::Identifier(name) if name == "section" || name == "__section__" => {
+                                        self.advance();
+                                        // Parse section("name")
+                                        if matches!(self.peek(), TokenKind::LParen) {
+                                            self.advance(); // consume (
+                                            if let TokenKind::StringLiteral(sect) = self.peek() {
+                                                self.parsing_section = Some(sect.clone());
                                                 self.advance();
                                             }
                                             if matches!(self.peek(), TokenKind::RParen) {

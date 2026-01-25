@@ -57,6 +57,8 @@ pub struct IrGlobal {
     pub is_extern: bool,
     /// Whether this has __attribute__((common)) - use COMMON linkage.
     pub is_common: bool,
+    /// __attribute__((section("..."))) - place in specific ELF section.
+    pub section: Option<String>,
 }
 
 /// Initializer for a global variable.
@@ -113,6 +115,8 @@ pub struct IrFunction {
     /// Set by lowering/mem2reg/phi_eliminate to avoid expensive full-IR scans.
     /// A value of 0 means "not yet computed" (will fall back to scanning).
     pub next_value_id: u32,
+    /// __attribute__((section("..."))) - place in specific ELF section.
+    pub section: Option<String>,
 }
 
 /// A function parameter.
@@ -957,6 +961,7 @@ impl IrFunction {
             is_static: false,
             stack_size: 0,
             next_value_id: 0,
+            section: None,
         }
     }
 

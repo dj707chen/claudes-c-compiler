@@ -25,6 +25,7 @@ impl Parser {
         self.parsing_weak = false;
         self.parsing_alias_target = None;
         self.parsing_visibility = None;
+        self.parsing_section = None;
 
         self.skip_gcc_extensions();
 
@@ -117,10 +118,11 @@ impl Parser {
         // Merge all sources of constructor/destructor: type-level attrs, declarator-level attrs, post-declarator attrs
         let is_constructor = type_level_ctor || self.parsing_constructor || post_ctor;
         let is_destructor = type_level_dtor || self.parsing_destructor || post_dtor;
-        // Capture alias/weak/visibility attributes
+        // Capture alias/weak/visibility/section attributes
         let is_weak = self.parsing_weak;
         let alias_target = self.parsing_alias_target.take();
         let visibility = self.parsing_visibility.take();
+        let section = self.parsing_section.take();
 
         // Apply __attribute__((mode(TI))): transform type to 128-bit
         let type_spec = if mode_ti {
@@ -135,9 +137,9 @@ impl Parser {
             && (matches!(self.peek(), TokenKind::LBrace) || self.is_type_specifier());
 
         if is_funcdef {
-            self.parse_function_def(type_spec, name, derived, start, is_constructor, is_destructor)
+            self.parse_function_def(type_spec, name, derived, start, is_constructor, is_destructor, section)
         } else {
-            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common, merged_alignment, is_weak, alias_target, visibility)
+            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common, merged_alignment, is_weak, alias_target, visibility, section)
         }
     }
 
@@ -150,6 +152,7 @@ impl Parser {
         start: crate::common::source::Span,
         is_constructor: bool,
         is_destructor: bool,
+        section: Option<String>,
     ) -> Option<ExternalDecl> {
         self.parsing_typedef = false; // function defs are never typedefs
         let (params, variadic) = if let Some(DerivedDeclarator::Function(p, v)) = derived.last() {
@@ -195,6 +198,7 @@ impl Parser {
             is_kr: is_kr_style,
             is_constructor,
             is_destructor,
+            section,
             span: start,
         }))
     }
@@ -337,6 +341,7 @@ impl Parser {
         is_weak: bool,
         alias_target: Option<String>,
         visibility: Option<String>,
+        section: Option<String>,
     ) -> Option<ExternalDecl> {
         let mut declarators = Vec::new();
         let init = if self.consume_if(&TokenKind::Assign) {
@@ -353,6 +358,7 @@ impl Parser {
             is_weak,
             alias_target,
             visibility,
+            section: section.clone(),
             span: start,
         });
 
@@ -373,9 +379,13 @@ impl Parser {
         if let Some(ref vis) = self.parsing_visibility {
             declarators.last_mut().unwrap().visibility = Some(vis.clone());
         }
+        if let Some(ref sect) = self.parsing_section {
+            declarators.last_mut().unwrap().section = Some(sect.clone());
+        }
         self.parsing_weak = false;
         self.parsing_alias_target = None;
         self.parsing_visibility = None;
+        self.parsing_section = None;
         is_common = is_common || extra_common;
         if let Some(a) = extra_aligned {
             alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
@@ -389,6 +399,7 @@ impl Parser {
             let d_weak = self.parsing_weak;
             let d_alias = self.parsing_alias_target.take();
             let d_vis = self.parsing_visibility.take();
+            let d_section = self.parsing_section.take();
             self.parsing_weak = false;
             let dinit = if self.consume_if(&TokenKind::Assign) {
                 Some(self.parse_initializer())
@@ -404,6 +415,7 @@ impl Parser {
                 is_weak: d_weak,
                 alias_target: d_alias,
                 visibility: d_vis,
+                section: d_section,
                 span: start,
             });
             let (_, skip_aligned) = self.skip_asm_and_attributes();
@@ -479,6 +491,7 @@ impl Parser {
                 is_weak: false,
                 alias_target: None,
                 visibility: None,
+                section: None,
                 span: start,
             });
             let (_, post_init_aligned) = self.skip_asm_and_attributes();

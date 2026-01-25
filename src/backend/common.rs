@@ -219,10 +219,38 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
     let mut has_data = false;
     let mut has_bss = false;
 
-    // Initialized globals -> .data
+    // Globals with custom section attributes -> emit in their custom section first
+    for g in globals {
+        if g.is_extern || g.section.is_none() {
+            continue;
+        }
+        let sect = g.section.as_ref().unwrap();
+        let is_zero_init = matches!(g.init, GlobalInit::Zero);
+        // Determine section flags: "aw" for writable, "a" for read-only
+        let flags = if sect.contains("rodata") { "a" } else { "aw" };
+        out.emit_fmt(format_args!(".section {},\"{}\",@progbits", sect, flags));
+        if is_zero_init || g.size == 0 {
+            if !g.is_static {
+                out.emit_fmt(format_args!(".globl {}", g.name));
+            }
+            out.emit_fmt(format_args!(".align {}", effective_align(g)));
+            out.emit_fmt(format_args!(".type {}, @object", g.name));
+            out.emit_fmt(format_args!(".size {}, {}", g.name, g.size));
+            out.emit_fmt(format_args!("{}:", g.name));
+            out.emit_fmt(format_args!("    .zero {}", g.size));
+        } else {
+            emit_global_def(out, g, ptr_dir);
+        }
+        out.emit("");
+    }
+
+    // Initialized globals -> .data (skip those with custom sections)
     for g in globals {
         if g.is_extern {
             continue; // extern declarations have no storage
+        }
+        if g.section.is_some() {
+            continue; // already emitted in custom section
         }
         if matches!(g.init, GlobalInit::Zero) {
             continue;
@@ -247,18 +275,24 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
         if g.is_extern {
             continue;
         }
+        if g.section.is_some() {
+            continue; // already emitted in custom section
+        }
         if !g.is_common || !matches!(g.init, GlobalInit::Zero) {
             continue;
         }
         out.emit_fmt(format_args!(".comm {},{},{}", g.name, g.size, effective_align(g)));
     }
 
-    // Zero-initialized globals -> .bss
+    // Zero-initialized globals -> .bss (skip those with custom sections)
     // Also includes zero-size globals with empty initializers (e.g., `Type arr[0] = {}`)
     // which were skipped from .data to avoid address overlap.
     for g in globals {
         if g.is_extern {
             continue; // extern declarations have no storage
+        }
+        if g.section.is_some() {
+            continue; // already emitted in custom section
         }
         let is_zero_init = matches!(g.init, GlobalInit::Zero);
         let is_zero_size_with_init = g.size == 0 && !is_zero_init;

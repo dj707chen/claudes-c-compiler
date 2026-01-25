@@ -28,6 +28,8 @@ pub struct FunctionDef {
     pub is_kr: bool,
     pub is_constructor: bool,
     pub is_destructor: bool,
+    /// __attribute__((section("..."))) - place in specific ELF section
+    pub section: Option<String>,
     pub span: Span,
 }
 
@@ -91,6 +93,8 @@ pub struct InitDeclarator {
     pub alias_target: Option<String>,
     /// __attribute__((visibility("hidden"))) etc.
     pub visibility: Option<String>,
+    /// __attribute__((section("..."))) - place in specific ELF section
+    pub section: Option<String>,
     pub span: Span,
 }
 

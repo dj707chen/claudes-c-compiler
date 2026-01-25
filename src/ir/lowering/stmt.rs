@@ -260,6 +260,7 @@ impl Lowerer {
             is_static: true,
             is_extern: false,
             is_common: false,
+            section: None,
         });
 
         // Track as a global for access via GlobalAddr

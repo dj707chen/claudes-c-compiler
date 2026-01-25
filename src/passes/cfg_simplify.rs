@@ -59,6 +59,96 @@ fn simplify_redundant_cond_branches(func: &mut IrFunction) -> usize {
     count
 }
 
+/// Check if threading a CondBranch's two edges to the same final target would
+/// create a phi conflict. This happens when the final target block has a phi
+/// node that carries different values from the two paths.
+///
+/// Example: Block A CondBranch(true: B, false: C), B is empty forwarding to C.
+/// C has Phi with (val_from_A, A) and (val_from_B, B) where the values differ.
+/// Threading B out would merge both edges to C, and the subsequent redundant-
+/// branch simplification converts CondBranch(true:C, false:C) to Branch(C).
+/// Dead block removal then deletes B, removing (val_from_B, B) from the phi,
+/// losing the true-path value.
+///
+/// For multi-hop chains (B -> C -> D), the phi in D references C (the last hop),
+/// not B (the start). We must use the last hop for phi lookups.
+///
+/// Parameters:
+/// - `block_label`: the predecessor block (A) with the CondBranch
+/// - `true_label`: the true target (B, which may forward to the final target)
+/// - `false_label`: the false target (C, which may forward or be the final target)
+/// - `target`: the final target block both paths would reach
+/// - `resolved`: the forwarding resolution map (block -> (final_target, phi_lookup_block))
+fn would_create_phi_conflict(
+    func: &IrFunction,
+    block_label: BlockId,
+    true_label: BlockId,
+    false_label: BlockId,
+    target: BlockId,
+    resolved: &FxHashMap<BlockId, (BlockId, BlockId)>,
+) -> bool {
+    // Find the target block
+    let target_block = match func.blocks.iter().find(|b| b.label == target) {
+        Some(b) => b,
+        None => return false,
+    };
+
+    // Determine the phi-lookup label for each path.
+    // For a path through an intermediate chain, the phi references the immediate
+    // predecessor of target (the phi_lookup_block from resolved), not the first
+    // intermediate. For a direct path (not resolved), the phi references block_label.
+    let true_phi_label = if let Some(&(_, phi_block)) = resolved.get(&true_label) {
+        phi_block
+    } else {
+        block_label
+    };
+    let false_phi_label = if let Some(&(_, phi_block)) = resolved.get(&false_label) {
+        phi_block
+    } else {
+        block_label
+    };
+
+    // If both paths use the same phi label, there's no way they carry different values
+    if true_phi_label == false_phi_label {
+        return false;
+    }
+
+    // Check each phi in the target block
+    for inst in &target_block.instructions {
+        if let Instruction::Phi { incoming, .. } = inst {
+            let mut true_value = None;
+            let mut false_value = None;
+
+            for (val, label) in incoming {
+                if *label == true_phi_label {
+                    true_value = Some(val);
+                }
+                if *label == false_phi_label {
+                    false_value = Some(val);
+                }
+            }
+
+            // If both paths have entries and they differ, this is a conflict
+            if let (Some(tv), Some(fv)) = (true_value, false_value) {
+                if !operands_equal(tv, fv) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Compare two operands for structural equality.
+fn operands_equal(a: &Operand, b: &Operand) -> bool {
+    match (a, b) {
+        (Operand::Value(v1), Operand::Value(v2)) => v1.0 == v2.0,
+        (Operand::Const(c1), Operand::Const(c2)) => c1.to_hash_key() == c2.to_hash_key(),
+        _ => false,
+    }
+}
+
 /// Thread jump chains: if a block branches to an empty forwarding block
 /// (no instructions, terminates with unconditional Branch), redirect to
 /// skip the intermediate block.
@@ -70,6 +160,12 @@ fn simplify_redundant_cond_branches(func: &mut IrFunction) -> usize {
 /// After threading, we update phi nodes in the target block to replace
 /// references to the intermediate block with references to the redirected
 /// predecessor.
+///
+/// Special care: when threading would cause a CondBranch's true and false
+/// targets to become the same block (both edges merge), AND the target has
+/// phi nodes that carry different values from the two paths, we must NOT
+/// thread. Otherwise the merge block's phi loses the ability to distinguish
+/// the two control flow paths, causing miscompilation.
 fn thread_jump_chains(func: &mut IrFunction) -> usize {
     // Build a map of block_id -> forwarding target for empty blocks.
     // An "empty forwarding block" has no instructions (including no phis)
@@ -131,6 +227,7 @@ fn thread_jump_chains(func: &mut IrFunction) -> usize {
 
     for block_idx in 0..func.blocks.len() {
         let mut edge_changes = Vec::new();
+        let block_label = func.blocks[block_idx].label;
 
         match &func.blocks[block_idx].terminator {
             Terminator::Branch(target) => {
@@ -139,13 +236,42 @@ fn thread_jump_chains(func: &mut IrFunction) -> usize {
                 }
             }
             Terminator::CondBranch { true_label, false_label, .. } => {
-                if let Some(&(rt, rt_phi)) = resolved.get(true_label) {
-                    edge_changes.push((*true_label, rt, rt_phi));
-                }
-                if let Some(&(rf, rf_phi)) = resolved.get(false_label) {
-                    // Avoid duplicate if both targets resolve to same change
-                    if !edge_changes.iter().any(|(old, new, _)| *old == *false_label && *new == rf) {
-                        edge_changes.push((*false_label, rf, rf_phi));
+                let true_resolved = resolved.get(true_label).copied();
+                let false_resolved = resolved.get(false_label).copied();
+
+                // Determine the final targets after potential threading
+                let true_final = true_resolved.map(|(t, _)| t).unwrap_or(*true_label);
+                let false_final = false_resolved.map(|(t, _)| t).unwrap_or(*false_label);
+
+                if true_final == false_final && true_label != false_label {
+                    // Threading would make both branches go to the same block.
+                    // This is dangerous when the target has phi nodes: the phi
+                    // entries from the two intermediates carry path-specific
+                    // values, and merging both edges into one would lose this
+                    // distinction. Check for phi conflict.
+                    if would_create_phi_conflict(func, block_label, *true_label,
+                                                  *false_label, true_final, &resolved) {
+                        // Phi conflict: don't thread either edge
+                    } else {
+                        // No phi conflict - safe to thread both edges
+                        if let Some((rt, rt_phi)) = true_resolved {
+                            edge_changes.push((*true_label, rt, rt_phi));
+                        }
+                        if let Some((rf, rf_phi)) = false_resolved {
+                            if !edge_changes.iter().any(|(old, new, _)| *old == *false_label && *new == rf) {
+                                edge_changes.push((*false_label, rf, rf_phi));
+                            }
+                        }
+                    }
+                } else if true_final != false_final {
+                    // Different final targets - safe to thread
+                    if let Some((rt, rt_phi)) = true_resolved {
+                        edge_changes.push((*true_label, rt, rt_phi));
+                    }
+                    if let Some((rf, rf_phi)) = false_resolved {
+                        if !edge_changes.iter().any(|(old, new, _)| *old == *false_label && *new == rf) {
+                            edge_changes.push((*false_label, rf, rf_phi));
+                        }
                     }
                 }
             }
@@ -537,5 +663,92 @@ mod tests {
         // After threading, Block 0 should go directly to Block 3 for both targets
         // Then redundant cond branch converts to Branch(3)
         assert!(matches!(func.blocks[0].terminator, Terminator::Branch(BlockId(3))));
+    }
+
+    #[test]
+    fn test_no_thread_when_phi_conflict() {
+        // This tests the bug where threading both branches of a conditional
+        // through empty forwarding blocks to the same target would lose phi
+        // node distinctions.
+        //
+        // Block 0: CondBranch(cond, true:.L1, false:.L3)
+        // Block 1 (.L1): empty, Branch(.L3)
+        // Block 3 (.L3): Phi(dest=%8, [(Value(2), .L0), (Const(1), .L1)])
+        //
+        // The phi distinguishes between the true path (constant 1, via .L1)
+        // and the false path (value 2, direct from .L0).
+        //
+        // Bug: threading .L1 to .L3 would make .L0 go directly to .L3 for
+        // both branches, then simplify to unconditional Branch(.L3), losing
+        // the Const(1) phi incoming.
+        let mut func = IrFunction::new("test".to_string(), IrType::I64, vec![], false);
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![
+                Instruction::Cmp {
+                    dest: Value(5),
+                    op: IrCmpOp::Eq,
+                    lhs: Operand::Value(Value(2)),
+                    rhs: Operand::Const(IrConst::I64(0)),
+                    ty: IrType::I64,
+                },
+            ],
+            terminator: Terminator::CondBranch {
+                cond: Operand::Value(Value(5)),
+                true_label: BlockId(1),
+                false_label: BlockId(3),
+            },
+        });
+        func.blocks.push(BasicBlock {
+            label: BlockId(1),
+            instructions: vec![],
+            terminator: Terminator::Branch(BlockId(3)),
+        });
+        func.blocks.push(BasicBlock {
+            label: BlockId(3),
+            instructions: vec![
+                Instruction::Phi {
+                    dest: Value(8),
+                    ty: IrType::I64,
+                    incoming: vec![
+                        (Operand::Value(Value(2)), BlockId(0)),
+                        (Operand::Const(IrConst::I64(1)), BlockId(1)),
+                    ],
+                },
+            ],
+            terminator: Terminator::Return(Some(Operand::Value(Value(8)))),
+        });
+
+        simplify_cfg(&mut func);
+
+        // The CondBranch must NOT be simplified to an unconditional Branch.
+        // The phi must still have two distinct incoming values.
+        match &func.blocks[0].terminator {
+            Terminator::CondBranch { true_label, false_label, .. } => {
+                // The true branch should still go through .L1 (not threaded)
+                // to preserve the phi distinction
+                assert!(
+                    *true_label == BlockId(1) || *false_label != *true_label,
+                    "Should not thread both branches to same target when phi has different values"
+                );
+            }
+            Terminator::Branch(_) => {
+                panic!("CondBranch was incorrectly simplified to unconditional Branch, losing phi distinction");
+            }
+            _ => panic!("Unexpected terminator"),
+        }
+
+        // Verify the phi still has distinct entries
+        let merge_block = func.blocks.iter().find(|b| b.label == BlockId(3)).unwrap();
+        if let Instruction::Phi { incoming, .. } = &merge_block.instructions[0] {
+            assert!(incoming.len() >= 2, "Phi must retain at least 2 incoming edges");
+            // Find the constant 1 entry - it must still be present
+            let has_const_1 = incoming.iter().any(|(val, _)| {
+                matches!(val, Operand::Const(IrConst::I64(1)))
+            });
+            assert!(has_const_1, "Phi must still have the Const(1) incoming value");
+        } else {
+            panic!("Expected Phi instruction in merge block");
+        }
     }
 }
