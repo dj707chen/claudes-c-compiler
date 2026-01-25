@@ -330,9 +330,14 @@ impl Lowerer {
                         }
                         None
                     }
-                    // &s.field or &s.a.b.c -> GlobalAddrOffset("s", total_field_offset)
+                    // &s.field or &s.a.b.c or &arr[i].field -> GlobalAddrOffset
                     Expr::MemberAccess(_, _, _) => {
                         self.resolve_chained_member_access(inner)
+                    }
+                    // &(base->field) where base is pointer arithmetic on a global array
+                    // e.g., &((Upgrade_items + 1)->uaattrid)
+                    Expr::PointerMemberAccess(base, field, _) => {
+                        self.resolve_pointer_member_access_addr(base, field)
                     }
                     _ => None,
                 }
@@ -449,6 +454,7 @@ impl Lowerer {
 
     /// Resolve a chained member access expression like `s.a.b.c` to a global address.
     /// Walks the chain from the root identifier, accumulating field offsets.
+    /// Also handles `arr[i].field` and `(arr + i)->field` patterns.
     fn resolve_chained_member_access(&self, expr: &Expr) -> Option<GlobalInit> {
         // Collect the chain of field names from innermost to outermost
         let mut fields = Vec::new();
@@ -462,38 +468,90 @@ impl Lowerer {
                 Expr::Identifier(name, _) => {
                     let global_name = self.resolve_to_global_name(name)?;
                     let ginfo = self.globals.get(&global_name)?;
-                    // Walk from the root struct through the field chain
-                    let mut total_offset: i64 = 0;
-                    let mut current_layout = ginfo.struct_layout.clone()?;
-                    // fields are in reverse order (outermost field last)
-                    for field_name in fields.iter().rev() {
-                        let mut found = false;
-                        for f in &current_layout.fields {
-                            if f.name == *field_name {
-                                total_offset += f.offset as i64;
-                                // Try to get the layout of this field for further chaining
-                                current_layout = match &f.ty {
-                                    CType::Struct(key) | CType::Union(key) => {
-                                        self.types.struct_layouts.get(&**key).cloned()
-                                            .unwrap_or_else(StructLayout::empty_rc)
-                                    }
-                                    _ => StructLayout::empty_rc(),
-                                };
-                                found = true;
-                                break;
-                            }
-                        }
-                        if !found {
-                            return None;
+                    let base_offset: i64 = 0;
+                    let start_layout = ginfo.struct_layout.clone()?;
+                    return self.apply_field_chain_offsets(&global_name, base_offset, &start_layout, &fields);
+                }
+                // Handle &arr[i].field - ArraySubscript as base of member chain
+                Expr::ArraySubscript(base, index, _) => {
+                    if let Expr::Identifier(name, _) = base.as_ref() {
+                        let global_name = self.resolve_to_global_name(name)?;
+                        let ginfo = self.globals.get(&global_name)?;
+                        if ginfo.is_array {
+                            let idx_val = self.eval_const_expr(index)?;
+                            let idx = self.const_to_i64(&idx_val)?;
+                            let base_offset = idx * ginfo.elem_size as i64;
+                            // The element type should be a struct for member access
+                            let start_layout = ginfo.struct_layout.clone()?;
+                            return self.apply_field_chain_offsets(&global_name, base_offset, &start_layout, &fields);
                         }
                     }
-                    if total_offset == 0 {
-                        return Some(GlobalInit::GlobalAddr(global_name));
-                    }
-                    return Some(GlobalInit::GlobalAddrOffset(global_name, total_offset));
+                    return None;
                 }
                 _ => return None,
             }
+        }
+    }
+
+    /// Apply a chain of field names to a base global+offset, accumulating field offsets.
+    /// `fields` are in reverse order (outermost field last, innermost first).
+    fn apply_field_chain_offsets(
+        &self,
+        global_name: &str,
+        base_offset: i64,
+        start_layout: &std::rc::Rc<StructLayout>,
+        fields: &[String],
+    ) -> Option<GlobalInit> {
+        let mut total_offset = base_offset;
+        let mut current_layout = start_layout.clone();
+        // fields are in reverse order (outermost field last)
+        for field_name in fields.iter().rev() {
+            let mut found = false;
+            // Try field_offset which handles anonymous structs/unions
+            if let Some((foff, fty)) = current_layout.field_offset(field_name, &self.types) {
+                total_offset += foff as i64;
+                current_layout = match &fty {
+                    CType::Struct(key) | CType::Union(key) => {
+                        self.types.struct_layouts.get(&**key).cloned()
+                            .unwrap_or_else(StructLayout::empty_rc)
+                    }
+                    _ => StructLayout::empty_rc(),
+                };
+                found = true;
+            }
+            if !found {
+                return None;
+            }
+        }
+        if total_offset == 0 {
+            Some(GlobalInit::GlobalAddr(global_name.to_string()))
+        } else {
+            Some(GlobalInit::GlobalAddrOffset(global_name.to_string(), total_offset))
+        }
+    }
+
+    /// Resolve &(base->field) where base is a constant pointer expression
+    /// involving a global array (e.g., &((Upgrade_items + 1)->uaattrid)).
+    /// The base must resolve to a global address (possibly with offset).
+    fn resolve_pointer_member_access_addr(&self, base: &Expr, field: &str) -> Option<GlobalInit> {
+        // The base expression should be a pointer to a global (array element).
+        // Try to evaluate it as a global address expression.
+        let base_init = self.eval_global_addr_expr(base)?;
+        let (global_name, base_offset) = match &base_init {
+            GlobalInit::GlobalAddr(name) => (name.clone(), 0i64),
+            GlobalInit::GlobalAddrOffset(name, off) => (name.clone(), *off),
+            _ => return None,
+        };
+        // Get the struct layout for the element type.
+        // The global should be an array of structs.
+        let ginfo = self.globals.get(&global_name)?;
+        let layout = ginfo.struct_layout.clone()?;
+        let (field_offset, _field_ty) = layout.field_offset(field, &self.types)?;
+        let total_offset = base_offset + field_offset as i64;
+        if total_offset == 0 {
+            Some(GlobalInit::GlobalAddr(global_name))
+        } else {
+            Some(GlobalInit::GlobalAddrOffset(global_name, total_offset))
         }
     }
 

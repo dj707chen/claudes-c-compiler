@@ -1284,7 +1284,19 @@ impl Lowerer {
             self.globals.insert(declarator.name.clone(), GlobalInfo::from_analysis(&da));
 
             let init = if let Some(ref initializer) = declarator.init {
-                self.lower_global_init(initializer, &decl.type_spec, da.base_ty, da.is_array, da.elem_size, da.actual_alloc_size, &da.struct_layout, &da.array_dim_strides)
+                // For pointer globals (char *p = ...) and pointer arrays (char *a[] = ...),
+                // use Ptr as the base type for initializer coercion, not the pointee type.
+                // base_ty is the pointee type (e.g., I8 for char*), but the stored value
+                // is always pointer-sized. For non-pointer scalars and non-pointer arrays,
+                // base_ty is correct.
+                let init_base_ty = if da.is_pointer && !da.is_array {
+                    da.var_ty  // scalar pointer: var_ty = Ptr
+                } else if da.is_array_of_pointers || da.is_array_of_func_ptrs {
+                    IrType::Ptr  // pointer array: each element is Ptr
+                } else {
+                    da.base_ty
+                };
+                self.lower_global_init(initializer, &decl.type_spec, init_base_ty, da.is_array, da.elem_size, da.actual_alloc_size, &da.struct_layout, &da.array_dim_strides)
             } else {
                 GlobalInit::Zero
             };
