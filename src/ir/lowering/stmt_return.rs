@@ -135,6 +135,13 @@ impl Lowerer {
 
     /// Try two-register struct return (9-16 bytes packed into I128).
     fn try_two_reg_struct_return(&mut self, e: &Expr) -> Option<Operand> {
+        // Complex types are handled by try_complex_return, not struct return paths.
+        // Packed complex float params have is_struct=true but must not be treated as
+        // struct returns -- they need proper complex-to-scalar conversion.
+        let expr_ct = self.expr_ctype(e);
+        if expr_ct.is_complex() {
+            return None;
+        }
         // Get the struct size. struct_value_size may return Some(0) for expressions
         // where CType::size() returns 0 (Struct/Union types without resolved size).
         // In that case, fall back to the function's own two_reg_ret_size from sig
@@ -177,6 +184,13 @@ impl Lowerer {
 
     /// Try small struct return (<= 8 bytes loaded as I64).
     fn try_small_struct_return(&mut self, e: &Expr) -> Option<Operand> {
+        // Complex types are handled by try_complex_return, not struct return paths.
+        // Packed complex float params have is_struct=true but must not be treated as
+        // struct returns -- they need proper complex-to-scalar conversion.
+        let expr_ct = self.expr_ctype(e);
+        if expr_ct.is_complex() {
+            return None;
+        }
         let struct_size = self.struct_value_size(e)?;
         // struct_value_size returns Some(0) for FunctionCall/Conditional expressions
         // where CType::size() returns 0 for Struct/Union types. Don't handle those here;

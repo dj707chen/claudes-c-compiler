@@ -431,6 +431,22 @@ impl Lowerer {
                         }
                         return CType::ComplexDouble;
                     }
+                    // conj/conjf/conjl are lowered as builtins that preserve the
+                    // argument's complex type.  The registered function signature
+                    // always says "returns ComplexDouble" (the C prototype for
+                    // conj()), but the builtin implementation produces a result
+                    // whose type matches the argument.  Derive the return type
+                    // from the argument so that subsequent arithmetic sees the
+                    // correct width.
+                    if matches!(name.as_str(), "conj" | "conjf" | "conjl"
+                        | "__builtin_conj" | "__builtin_conjf" | "__builtin_conjl") {
+                        if let Some(first_arg) = args.first() {
+                            let arg_ct = self.expr_ctype(first_arg);
+                            if arg_ct.is_complex() {
+                                return arg_ct;
+                            }
+                        }
+                    }
                     self.get_function_return_ctype(name)
                 } else {
                     CType::Int
