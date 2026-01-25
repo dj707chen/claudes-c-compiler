@@ -39,6 +39,7 @@ impl Lowerer {
     pub(super) fn complex_zero(comp_ty: IrType) -> Operand {
         match comp_ty {
             IrType::F32 => Operand::Const(IrConst::F32(0.0)),
+            IrType::F128 => Operand::Const(IrConst::LongDouble(0.0)),
             _ => Operand::Const(IrConst::F64(0.0)),
         }
     }

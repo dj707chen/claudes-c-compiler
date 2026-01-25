@@ -1306,6 +1306,115 @@ impl ArchCodegen for X86Codegen {
         crate::backend::traits::emit_load_default(self, dest, ptr, ty);
     }
 
+    /// Override emit_load_with_const_offset to handle F128 (long double) via x87.
+    /// The default implementation uses movq which is wrong for F128 - we need fldt.
+    fn emit_load_with_const_offset(&mut self, dest: &Value, base: &Value, offset: i64, ty: IrType) {
+        use crate::backend::state::SlotAddr;
+        if ty == IrType::F128 {
+            let addr = self.state.resolve_slot_addr(base.0);
+            if let Some(addr) = addr {
+                match addr {
+                    SlotAddr::Direct(slot) => {
+                        let folded = slot.0 + offset;
+                        self.state.emit_fmt(format_args!("    fldt {}(%rbp)", folded));
+                    }
+                    SlotAddr::OverAligned(slot, id) => {
+                        self.emit_alloca_aligned_addr(slot, id);
+                        if offset != 0 {
+                            self.state.emit_fmt(format_args!("    addq ${}, %rcx", offset));
+                        }
+                        self.state.emit("    fldt (%rcx)");
+                    }
+                    SlotAddr::Indirect(_) => {
+                        unreachable!("emit_load_with_const_offset called for non-alloca base");
+                    }
+                }
+                self.state.emit("    subq $8, %rsp");
+                self.state.emit("    fstpl (%rsp)");
+                self.state.emit("    popq %rax");
+                self.emit_store_result(dest);
+            }
+            return;
+        }
+        // Non-F128: use the default GEP fold logic.
+        let addr = self.state.resolve_slot_addr(base.0);
+        if let Some(addr) = addr {
+            let load_instr = self.load_instr_for_type(ty);
+            match addr {
+                SlotAddr::OverAligned(slot, id) => {
+                    self.emit_alloca_aligned_addr(slot, id);
+                    self.emit_add_offset_to_addr_reg(offset);
+                    self.emit_typed_load_indirect(load_instr);
+                }
+                SlotAddr::Direct(slot) => {
+                    let folded_slot = StackSlot(slot.0 + offset);
+                    self.emit_typed_load_from_slot(load_instr, folded_slot);
+                }
+                SlotAddr::Indirect(_) => {
+                    unreachable!("emit_load_with_const_offset called for non-alloca base");
+                }
+            }
+            self.emit_store_result(dest);
+        }
+    }
+
+    /// Override emit_store_with_const_offset to handle F128 (long double) via x87.
+    /// The default implementation uses movq which is wrong for F128 - we need fstpt.
+    fn emit_store_with_const_offset(&mut self, val: &Operand, base: &Value, offset: i64, ty: IrType) {
+        use crate::backend::state::SlotAddr;
+        if ty == IrType::F128 {
+            self.emit_load_operand(val);
+            let addr = self.state.resolve_slot_addr(base.0);
+            if let Some(addr) = addr {
+                match addr {
+                    SlotAddr::Direct(slot) => {
+                        let folded = slot.0 + offset;
+                        self.state.emit("    pushq %rax");
+                        self.state.emit("    fldl (%rsp)");
+                        self.state.emit("    addq $8, %rsp");
+                        self.state.emit_fmt(format_args!("    fstpt {}(%rbp)", folded));
+                    }
+                    SlotAddr::OverAligned(slot, id) => {
+                        self.state.emit("    movq %rax, %rdx");
+                        self.emit_alloca_aligned_addr(slot, id);
+                        if offset != 0 {
+                            self.state.emit_fmt(format_args!("    addq ${}, %rcx", offset));
+                        }
+                        self.state.emit("    pushq %rdx");
+                        self.state.emit("    fldl (%rsp)");
+                        self.state.emit("    addq $8, %rsp");
+                        self.state.emit("    fstpt (%rcx)");
+                    }
+                    SlotAddr::Indirect(_) => {
+                        unreachable!("emit_store_with_const_offset called for non-alloca base");
+                    }
+                }
+            }
+            return;
+        }
+        // Non-F128: use the default GEP fold logic.
+        self.emit_load_operand(val);
+        let addr = self.state.resolve_slot_addr(base.0);
+        if let Some(addr) = addr {
+            let store_instr = self.store_instr_for_type(ty);
+            match addr {
+                SlotAddr::OverAligned(slot, id) => {
+                    self.emit_save_acc();
+                    self.emit_alloca_aligned_addr(slot, id);
+                    self.emit_add_offset_to_addr_reg(offset);
+                    self.emit_typed_store_indirect(store_instr, ty);
+                }
+                SlotAddr::Direct(slot) => {
+                    let folded_slot = StackSlot(slot.0 + offset);
+                    self.emit_typed_store_to_slot(store_instr, ty, folded_slot);
+                }
+                SlotAddr::Indirect(_) => {
+                    unreachable!("emit_store_with_const_offset called for non-alloca base");
+                }
+            }
+        }
+    }
+
     fn emit_typed_store_to_slot(&mut self, instr: &'static str, ty: IrType, slot: StackSlot) {
         let reg = Self::reg_for_type("rax", ty);
         self.state.emit_fmt(format_args!("    {} %{}, {}(%rbp)", instr, reg, slot.0));
