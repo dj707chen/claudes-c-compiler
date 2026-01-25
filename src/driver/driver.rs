@@ -56,6 +56,10 @@ pub struct Driver {
     pub pic: bool,
     /// Files to force-include before the main source (-include flag)
     pub force_includes: Vec<String>,
+    /// Whether to replace `ret` with `jmp __x86_return_thunk` (-mfunction-return=thunk-extern)
+    pub function_return_thunk: bool,
+    /// Whether to replace indirect calls/jumps with retpoline thunks (-mindirect-branch=thunk-extern)
+    pub indirect_branch_thunk: bool,
 }
 
 impl Driver {
@@ -79,6 +83,8 @@ impl Driver {
             nostdlib: false,
             pic: false,
             force_includes: Vec::new(),
+            function_return_thunk: false,
+            indirect_branch_thunk: false,
         }
     }
 
@@ -500,10 +506,13 @@ impl Driver {
         if time_phases { eprintln!("[TIME] phi elimination: {:.3}s", t7.elapsed().as_secs_f64()); }
 
         // Generate assembly using target-specific codegen
-        // PIC mode: enabled by -fPIC/-fpic flag or implicitly when building shared libraries
         let t8 = std::time::Instant::now();
-        let pic = self.pic || self.shared_lib;
-        let asm = self.target.generate_assembly_with_options(&module, pic);
+        let opts = crate::backend::CodegenOptions {
+            pic: self.pic || self.shared_lib,
+            function_return_thunk: self.function_return_thunk,
+            indirect_branch_thunk: self.indirect_branch_thunk,
+        };
+        let asm = self.target.generate_assembly_with_opts(&module, &opts);
         if time_phases { eprintln!("[TIME] codegen: {:.3}s ({} bytes asm)", t8.elapsed().as_secs_f64(), asm.len()); }
 
         if time_phases { eprintln!("[TIME] total compile {}: {:.3}s", input_file, t0.elapsed().as_secs_f64()); }

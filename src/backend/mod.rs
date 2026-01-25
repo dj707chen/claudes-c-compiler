@@ -20,6 +20,17 @@ pub mod riscv;
 
 use crate::ir::ir::IrModule;
 
+/// Options that control code generation, parsed from CLI flags.
+#[derive(Debug, Clone, Default)]
+pub struct CodegenOptions {
+    /// Whether to generate position-independent code (-fPIC/-fpic)
+    pub pic: bool,
+    /// Whether to replace `ret` with `jmp __x86_return_thunk` (-mfunction-return=thunk-extern)
+    pub function_return_thunk: bool,
+    /// Whether to replace indirect calls/jumps with retpoline thunks (-mindirect-branch=thunk-extern)
+    pub indirect_branch_thunk: bool,
+}
+
 /// Target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -77,15 +88,23 @@ impl Target {
 
     /// Generate assembly for an IR module using this target's code generator.
     pub fn generate_assembly(&self, module: &IrModule) -> String {
-        self.generate_assembly_with_options(module, false)
+        self.generate_assembly_with_opts(module, &CodegenOptions::default())
     }
 
     /// Generate assembly with PIC (position-independent code) option.
     pub fn generate_assembly_with_options(&self, module: &IrModule, pic: bool) -> String {
+        let opts = CodegenOptions { pic, ..Default::default() };
+        self.generate_assembly_with_opts(module, &opts)
+    }
+
+    /// Generate assembly with full codegen options.
+    pub fn generate_assembly_with_opts(&self, module: &IrModule, opts: &CodegenOptions) -> String {
         match self {
             Target::X86_64 => {
                 let mut cg = x86::X86Codegen::new();
-                cg.set_pic(pic);
+                cg.set_pic(opts.pic);
+                cg.set_function_return_thunk(opts.function_return_thunk);
+                cg.set_indirect_branch_thunk(opts.indirect_branch_thunk);
                 cg.generate(module)
             }
             Target::Aarch64 => arm::ArmCodegen::new().generate(module),

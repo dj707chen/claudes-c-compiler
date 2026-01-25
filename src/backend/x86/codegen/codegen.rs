@@ -90,6 +90,16 @@ impl X86Codegen {
         self.state.pic_mode = pic;
     }
 
+    /// Enable function return thunk (-mfunction-return=thunk-extern).
+    pub fn set_function_return_thunk(&mut self, enabled: bool) {
+        self.state.function_return_thunk = enabled;
+    }
+
+    /// Enable indirect branch thunk (-mindirect-branch=thunk-extern).
+    pub fn set_indirect_branch_thunk(&mut self, enabled: bool) {
+        self.state.indirect_branch_thunk = enabled;
+    }
+
     pub fn generate(mut self, module: &IrModule) -> String {
         let raw = generate_module(&mut self, module);
         super::peephole::peephole_optimize(raw)
@@ -900,7 +910,11 @@ impl ArchCodegen for X86Codegen {
     }
 
     fn emit_jump_indirect(&mut self) {
-        self.state.emit("    jmpq *%rax");
+        if self.state.indirect_branch_thunk {
+            self.state.emit("    jmp __x86_indirect_thunk_rax");
+        } else {
+            self.state.emit("    jmpq *%rax");
+        }
     }
 
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
@@ -1195,7 +1209,11 @@ impl ArchCodegen for X86Codegen {
 
     fn emit_epilogue_and_ret(&mut self, frame_size: i64) {
         self.emit_epilogue(frame_size);
-        self.state.emit("    ret");
+        if self.state.function_return_thunk {
+            self.state.emit("    jmp __x86_return_thunk");
+        } else {
+            self.state.emit("    ret");
+        }
     }
 
     fn store_instr_for_type(&self, ty: IrType) -> &'static str {
@@ -2289,7 +2307,11 @@ impl ArchCodegen for X86Codegen {
             self.operand_to_rax(ptr);
             self.state.emit("    movq %rax, %r10");
             self.state.emit("    popq %rax"); // restore AL
-            self.state.emit("    call *%r10");
+            if self.state.indirect_branch_thunk {
+                self.state.emit("    call __x86_indirect_thunk_r10");
+            } else {
+                self.state.emit("    call *%r10");
+            }
         }
         // Call clobbers rax (return value will be stored by emit_call_store_result)
         self.state.reg_cache.invalidate_all();

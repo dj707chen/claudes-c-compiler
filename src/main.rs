@@ -194,9 +194,15 @@ fn real_main() {
                 // TODO: handle standard version selection (c99, c11, c17, c2x)
             }
 
-            // Machine/target flags (ignored for now)
+            // Machine/target flags
+            "-mfunction-return=thunk-extern" => {
+                driver.function_return_thunk = true;
+            }
+            "-mindirect-branch=thunk-extern" => {
+                driver.indirect_branch_thunk = true;
+            }
             arg if arg.starts_with("-m") => {
-                // -m32, -m64, -march=, -mtune=, etc.
+                // -m32, -m64, -march=, -mtune=, etc. (ignored for now)
             }
 
             // Feature flags

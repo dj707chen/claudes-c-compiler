@@ -102,6 +102,12 @@ pub struct CodegenState {
     /// Register value cache: tracks which IR values are in the accumulator and
     /// secondary registers to skip redundant loads.
     pub reg_cache: RegCache,
+    /// Whether to replace `ret` with `jmp __x86_return_thunk` (-mfunction-return=thunk-extern).
+    /// Used by the Linux kernel for Spectre v2 (retbleed) mitigation.
+    pub function_return_thunk: bool,
+    /// Whether to replace indirect calls/jumps with retpoline thunks (-mindirect-branch=thunk-extern).
+    /// Used by the Linux kernel for Spectre v2 (retpoline) mitigation.
+    pub indirect_branch_thunk: bool,
 }
 
 impl CodegenState {
@@ -119,6 +125,8 @@ impl CodegenState {
             local_symbols: FxHashSet::default(),
             has_dyn_alloca: false,
             reg_cache: RegCache::default(),
+            function_return_thunk: false,
+            indirect_branch_thunk: false,
         }
     }
 

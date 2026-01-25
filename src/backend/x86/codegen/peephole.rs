@@ -1644,6 +1644,30 @@ fn invalidate_all_mappings(slot_entries: &mut Vec<SlotEntry>, reg_offsets: &mut 
     }
 }
 
+/// Check if a LoadRbp at position `pos` is part of the function epilogue.
+/// The epilogue pattern is: callee-save restores, then `movq %rbp, %rsp; popq %rbp; ret/jmp`.
+/// We look forward from `pos` for a Ret or Jmp (for __x86_return_thunk) within a small window,
+/// only allowing other LoadRbp or Pop or Other (for stack teardown) instructions between.
+fn is_near_epilogue(infos: &[LineInfo], pos: usize) -> bool {
+    let limit = (pos + 20).min(infos.len());
+    for j in (pos + 1)..limit {
+        if infos[j].is_nop() {
+            continue;
+        }
+        match infos[j].kind {
+            // More callee-save restores or stack teardown moves are expected
+            LineKind::LoadRbp { .. } | LineKind::Pop { .. } | LineKind::SelfMove => continue,
+            // Stack pointer restoration (movq %rbp, %rsp) is classified as Other
+            LineKind::Other { .. } => continue,
+            // Found the return instruction - this is an epilogue
+            LineKind::Ret | LineKind::Jmp => return true,
+            // Any other instruction type means we're not in the epilogue
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn global_store_forwarding(store: &mut LineStore, infos: &mut [LineInfo]) -> bool {
     let len = store.len();
     if len == 0 {
@@ -1763,11 +1787,18 @@ fn global_store_forwarding(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
                     .map(|e| e.mapping);
                 if let Some(mapping) = mapping {
                     if mapping.size == load_size && mapping.reg_id != REG_NONE {
-                        if load_reg == mapping.reg_id {
+                        // Don't eliminate callee-save register restores in the epilogue.
+                        // objtool (Linux kernel) validates that all callee-save registers
+                        // saved in the prologue are properly restored before return.
+                        // Removing these "redundant" restores breaks objtool validation.
+                        let is_epilogue_restore = matches!(load_reg, 3 | 12 | 13 | 14 | 15)
+                            && load_offset < 0
+                            && is_near_epilogue(&infos, i);
+                        if load_reg == mapping.reg_id && !is_epilogue_restore {
                             // Same register: load is redundant
                             mark_nop(&mut infos[i]);
                             changed = true;
-                        } else if load_reg != REG_NONE {
+                        } else if load_reg != REG_NONE && load_reg != mapping.reg_id {
                             // Different register: replace with reg-to-reg move
                             // Use reg_id_to_name to avoid re-parsing the store line
                             let store_reg_str = reg_id_to_name(mapping.reg_id, load_size);
