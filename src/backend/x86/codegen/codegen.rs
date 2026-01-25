@@ -27,6 +27,14 @@ fn callee_saved_name(reg: PhysReg) -> &'static str {
     }
 }
 
+/// Map a PhysReg index to its x86-64 32-bit sub-register name.
+fn callee_saved_name_32(reg: PhysReg) -> &'static str {
+    match reg.0 {
+        1 => "ebx", 2 => "r12d", 3 => "r13d", 4 => "r14d", 5 => "r15d",
+        _ => unreachable!("invalid x86 callee-saved register index"),
+    }
+}
+
 /// x86-64 code generator. Implements the ArchCodegen trait for the shared framework.
 /// Uses System V AMD64 ABI with linear scan register allocation for callee-saved registers.
 pub struct X86Codegen {
@@ -88,6 +96,64 @@ impl X86Codegen {
     }
 
     // --- x86 helper methods ---
+
+    /// Get the callee-saved register assigned to an operand, if any.
+    fn operand_reg(&self, op: &Operand) -> Option<PhysReg> {
+        match op {
+            Operand::Value(v) => self.reg_assignments.get(&v.0).copied(),
+            _ => None,
+        }
+    }
+
+    /// Get the callee-saved register assigned to a destination value, if any.
+    fn dest_reg(&self, dest: &Value) -> Option<PhysReg> {
+        self.reg_assignments.get(&dest.0).copied()
+    }
+
+    /// Load an operand into a specific callee-saved register.
+    /// Handles constants, register-allocated values, and stack values.
+    fn operand_to_callee_reg(&mut self, op: &Operand, target: PhysReg) {
+        let target_name = callee_saved_name(target);
+        match op {
+            Operand::Const(c) => {
+                match c {
+                    IrConst::I8(v) => self.state.emit_fmt(format_args!("    movq ${}, %{}", *v as i64, target_name)),
+                    IrConst::I16(v) => self.state.emit_fmt(format_args!("    movq ${}, %{}", *v as i64, target_name)),
+                    IrConst::I32(v) => self.state.emit_fmt(format_args!("    movq ${}, %{}", *v as i64, target_name)),
+                    IrConst::I64(v) => {
+                        if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
+                            self.state.emit_fmt(format_args!("    movq ${}, %{}", v, target_name));
+                        } else {
+                            self.state.emit_fmt(format_args!("    movabsq ${}, %{}", v, target_name));
+                        }
+                    }
+                    IrConst::Zero => self.state.emit_fmt(format_args!("    xorq %{}, %{}", target_name, target_name)),
+                    _ => {
+                        // For float/i128 constants, fall back to loading to rax and moving
+                        self.operand_to_rax(op);
+                        self.state.emit_fmt(format_args!("    movq %rax, %{}", target_name));
+                    }
+                }
+            }
+            Operand::Value(v) => {
+                if let Some(&reg) = self.reg_assignments.get(&v.0) {
+                    if reg.0 != target.0 {
+                        let src_name = callee_saved_name(reg);
+                        self.state.emit_fmt(format_args!("    movq %{}, %{}", src_name, target_name));
+                    }
+                    // If same register, nothing to do
+                } else if let Some(slot) = self.state.get_slot(v.0) {
+                    if self.state.is_alloca(v.0) {
+                        self.state.emit_fmt(format_args!("    leaq {}(%rbp), %{}", slot.0, target_name));
+                    } else {
+                        self.state.emit_fmt(format_args!("    movq {}(%rbp), %{}", slot.0, target_name));
+                    }
+                } else {
+                    self.state.emit_fmt(format_args!("    xorq %{}, %{}", target_name, target_name));
+                }
+            }
+        }
+    }
 
     /// Load an operand into %rax. Uses the register cache to skip the load
     /// if the value is already in %rax.
@@ -1335,6 +1401,40 @@ impl ArchCodegen for X86Codegen {
         self.store_rax_to(dest);
     }
 
+    /// Override copy to emit direct register-to-register moves when possible,
+    /// avoiding the accumulator roundtrip (movq %rbx, %rax; movq %rax, %r12
+    /// becomes movq %rbx, %r12).
+    fn emit_copy_value(&mut self, dest: &Value, src: &Operand) {
+        let dest_phys = self.dest_reg(dest);
+        let src_phys = self.operand_reg(src);
+
+        match (dest_phys, src_phys) {
+            (Some(d), Some(s)) => {
+                if d.0 != s.0 {
+                    let d_name = callee_saved_name(d);
+                    let s_name = callee_saved_name(s);
+                    self.state.emit_fmt(format_args!("    movq %{}, %{}", s_name, d_name));
+                }
+                // Same register = no-op
+                self.state.reg_cache.invalidate_acc();
+            }
+            (Some(d), None) => {
+                // Dest in callee-saved register, src on stack or constant.
+                // Load src into rax first (preserving reg_cache semantics),
+                // then move to dest register.
+                self.operand_to_rax(src);
+                let d_name = callee_saved_name(d);
+                self.state.emit_fmt(format_args!("    movq %rax, %{}", d_name));
+                self.state.reg_cache.invalidate_acc();
+            }
+            _ => {
+                // Src in callee-saved or neither: use accumulator path
+                self.operand_to_rax(src);
+                self.store_rax_to(dest);
+            }
+        }
+    }
+
     // emit_binop uses the shared default implementation (handles i128/float/int dispatch).
     // emit_float_binop is overridden below to avoid push/pop (loads lhs->xmm0, rhs->xmm1 directly).
 
@@ -1342,15 +1442,200 @@ impl ArchCodegen for X86Codegen {
         let use_32bit = ty == IrType::I32 || ty == IrType::U32;
         let is_unsigned = ty.is_unsigned();
 
+        // Register-to-register optimization: for simple ALU ops where the destination
+        // is in a callee-saved register, operate directly on that register instead of
+        // going through %rax. This eliminates 1-3 mov instructions per operation.
+        let is_simple_alu = matches!(op, IrBinOp::Add | IrBinOp::Sub | IrBinOp::And
+            | IrBinOp::Or | IrBinOp::Xor | IrBinOp::Mul);
+        if is_simple_alu {
+            if let Some(dest_phys) = self.dest_reg(dest) {
+                // Fast path: operate directly on callee-saved destination register.
+                // For I32/U32 add/sub we need sign-extension, which complicates the
+                // register-direct path. Only use 64-bit ops here (which are correct
+                // for all integer types since we store full 64-bit values in registers).
+                let dest_name = callee_saved_name(dest_phys);
+                let dest_name_32 = callee_saved_name_32(dest_phys);
+
+                // Immediate form: op $imm, %dest_reg
+                if let Some(imm) = Self::const_as_imm32(rhs) {
+                    // Load LHS into dest register
+                    self.operand_to_callee_reg(lhs, dest_phys);
+                    let mnemonic = match op {
+                        IrBinOp::Add => "add",
+                        IrBinOp::Sub => "sub",
+                        IrBinOp::And => "and",
+                        IrBinOp::Or => "or",
+                        IrBinOp::Xor => "xor",
+                        IrBinOp::Mul => {
+                            // imul has 3-operand immediate form: imulq $imm, %src, %dst
+                            if use_32bit {
+                                self.state.emit_fmt(format_args!("    imull ${}, %{}, %{}", imm, dest_name_32, dest_name_32));
+                                if !is_unsigned {
+                                    self.state.emit_fmt(format_args!("    movslq %{}, %{}", dest_name_32, dest_name));
+                                }
+                            } else {
+                                self.state.emit_fmt(format_args!("    imulq ${}, %{}, %{}", imm, dest_name, dest_name));
+                            }
+                            self.state.reg_cache.invalidate_acc();
+                            return;
+                        }
+                        _ => unreachable!(),
+                    };
+                    if use_32bit && matches!(op, IrBinOp::Add | IrBinOp::Sub) {
+                        self.state.emit_fmt(format_args!("    {}{} ${}, %{}", mnemonic, "l", imm, dest_name_32));
+                        if !is_unsigned {
+                            self.state.emit_fmt(format_args!("    movslq %{}, %{}", dest_name_32, dest_name));
+                        }
+                    } else {
+                        self.state.emit_fmt(format_args!("    {}{} ${}, %{}", mnemonic, "q", imm, dest_name));
+                    }
+                    self.state.reg_cache.invalidate_acc();
+                    return;
+                }
+
+                // Register-register form: load LHS to dest, then op RHS into dest.
+                // IMPORTANT: If RHS is in the same register as dest, we must load
+                // RHS to a scratch register BEFORE overwriting dest with LHS.
+                let rhs_phys = self.operand_reg(rhs);
+                let rhs_conflicts = rhs_phys.map_or(false, |r| r.0 == dest_phys.0);
+
+                let rhs_reg_name: String;
+                let rhs_reg_name_32: String;
+                if rhs_conflicts {
+                    // RHS is in the same register as dest: load RHS to rax first
+                    self.operand_to_rax(rhs);
+                    self.operand_to_callee_reg(lhs, dest_phys);
+                    rhs_reg_name = "rax".to_string();
+                    rhs_reg_name_32 = "eax".to_string();
+                } else {
+                    // No conflict: load LHS to dest first, then get RHS
+                    self.operand_to_callee_reg(lhs, dest_phys);
+                    if let Some(rhs_phys) = rhs_phys {
+                        rhs_reg_name = callee_saved_name(rhs_phys).to_string();
+                        rhs_reg_name_32 = callee_saved_name_32(rhs_phys).to_string();
+                    } else {
+                        // Load RHS into %rax as scratch
+                        self.operand_to_rax(rhs);
+                        rhs_reg_name = "rax".to_string();
+                        rhs_reg_name_32 = "eax".to_string();
+                    }
+                }
+
+                match op {
+                    IrBinOp::Mul => {
+                        if use_32bit {
+                            self.state.emit_fmt(format_args!("    imull %{}, %{}", rhs_reg_name_32, dest_name_32));
+                            if !is_unsigned {
+                                self.state.emit_fmt(format_args!("    movslq %{}, %{}", dest_name_32, dest_name));
+                            }
+                        } else {
+                            self.state.emit_fmt(format_args!("    imulq %{}, %{}", rhs_reg_name, dest_name));
+                        }
+                    }
+                    _ => {
+                        let mnemonic = match op {
+                            IrBinOp::Add => "add",
+                            IrBinOp::Sub => "sub",
+                            IrBinOp::And => "and",
+                            IrBinOp::Or => "or",
+                            IrBinOp::Xor => "xor",
+                            _ => unreachable!(),
+                        };
+                        if use_32bit && matches!(op, IrBinOp::Add | IrBinOp::Sub) {
+                            self.state.emit_fmt(format_args!("    {}{} %{}, %{}", mnemonic, "l", rhs_reg_name_32, dest_name_32));
+                            if !is_unsigned {
+                                self.state.emit_fmt(format_args!("    movslq %{}, %{}", dest_name_32, dest_name));
+                            }
+                        } else {
+                            self.state.emit_fmt(format_args!("    {}{} %{}, %{}", mnemonic, "q", rhs_reg_name, dest_name));
+                        }
+                    }
+                }
+                self.state.reg_cache.invalidate_acc();
+                return;
+            }
+        }
+
+        // Shift operations with register destination: operate directly on the
+        // callee-saved register. Shift amount goes in %cl, result in dest reg.
+        if matches!(op, IrBinOp::Shl | IrBinOp::AShr | IrBinOp::LShr) {
+            if let Some(dest_phys) = self.dest_reg(dest) {
+                let dest_name = callee_saved_name(dest_phys);
+                let dest_name_32 = callee_saved_name_32(dest_phys);
+
+                // Immediate shift amount
+                if let Some(imm) = Self::const_as_imm32(rhs) {
+                    self.operand_to_callee_reg(lhs, dest_phys);
+                    if use_32bit {
+                        let shift_amount = (imm as u32) & 31;
+                        let mnemonic = match op {
+                            IrBinOp::Shl => "shll",
+                            IrBinOp::AShr => "sarl",
+                            IrBinOp::LShr => "shrl",
+                            _ => unreachable!(),
+                        };
+                        self.state.emit_fmt(format_args!("    {} ${}, %{}", mnemonic, shift_amount, dest_name_32));
+                        if !is_unsigned && matches!(op, IrBinOp::Shl | IrBinOp::AShr) {
+                            self.state.emit_fmt(format_args!("    movslq %{}, %{}", dest_name_32, dest_name));
+                        }
+                    } else {
+                        let shift_amount = (imm as u64) & 63;
+                        let mnemonic = match op {
+                            IrBinOp::Shl => "shlq",
+                            IrBinOp::AShr => "sarq",
+                            IrBinOp::LShr => "shrq",
+                            _ => unreachable!(),
+                        };
+                        self.state.emit_fmt(format_args!("    {} ${}, %{}", mnemonic, shift_amount, dest_name));
+                    }
+                    self.state.reg_cache.invalidate_acc();
+                    return;
+                }
+
+                // Variable shift: load shift amount into %rcx/%cl
+                // Check for conflict: if rhs is in the same callee-saved register
+                // as dest, load rhs to rcx BEFORE overwriting dest with lhs.
+                let rhs_conflicts_shift = self.operand_reg(rhs).map_or(false, |r| r.0 == dest_phys.0);
+                if rhs_conflicts_shift {
+                    self.operand_to_rcx(rhs);
+                    self.operand_to_callee_reg(lhs, dest_phys);
+                } else {
+                    self.operand_to_callee_reg(lhs, dest_phys);
+                    self.operand_to_rcx(rhs);
+                }
+                if use_32bit {
+                    let mnemonic = match op {
+                        IrBinOp::Shl => "shll",
+                        IrBinOp::AShr => "sarl",
+                        IrBinOp::LShr => "shrl",
+                        _ => unreachable!(),
+                    };
+                    self.state.emit_fmt(format_args!("    {} %cl, %{}", mnemonic, dest_name_32));
+                    if !is_unsigned && matches!(op, IrBinOp::Shl | IrBinOp::AShr) {
+                        self.state.emit_fmt(format_args!("    movslq %{}, %{}", dest_name_32, dest_name));
+                    }
+                } else {
+                    let mnemonic = match op {
+                        IrBinOp::Shl => "shlq",
+                        IrBinOp::AShr => "sarq",
+                        IrBinOp::LShr => "shrq",
+                        _ => unreachable!(),
+                    };
+                    self.state.emit_fmt(format_args!("    {} %cl, %{}", mnemonic, dest_name));
+                }
+                self.state.reg_cache.invalidate_acc();
+                return;
+            }
+        }
+
+        // --- Fallback: accumulator-based path (for non-register-allocated dests,
+        //     div/rem, or when no register optimization applies) ---
+
         // Try to use immediate operands for common operations with small constants.
-        // Division and remainder cannot use immediate form on x86.
         let use_imm = matches!(op, IrBinOp::Add | IrBinOp::Sub | IrBinOp::And | IrBinOp::Or | IrBinOp::Xor);
         if use_imm {
             if let Some(imm) = Self::const_as_imm32(rhs) {
                 self.operand_to_rax(lhs);
-                // Add/Sub use 32-bit ops for I32/U32 to match register-based codegen
-                // behavior; And/Or/Xor always use 64-bit ops (matching the register
-                // fallback which uses andq/orq/xorq regardless of type).
                 let (suffix, dst_reg) = if use_32bit && matches!(op, IrBinOp::Add | IrBinOp::Sub) {
                     ("l", "%eax")
                 } else {
@@ -1425,10 +1710,6 @@ impl ArchCodegen for X86Codegen {
         // General case: load lhs to rax, rhs directly to rcx (no push/pop).
         self.operand_to_rax(lhs);
         self.operand_to_rcx(rhs);
-        // rax has lhs, rcx has rhs. operand_to_rcx does not touch rax.
-        // However, the cache may claim acc=lhs but operand_to_rcx doesn't clobber it,
-        // so the cache is still valid. We'll invalidate after the operation since
-        // rax will contain the result, not any IR value yet.
 
         match op {
             IrBinOp::Add => {
@@ -1594,12 +1875,36 @@ impl ArchCodegen for X86Codegen {
             return;
         }
 
-        // Integer comparison: try immediate operand for constant rhs
-        if let Some(imm) = Self::const_as_imm32(rhs) {
+        // Integer comparison: try register-direct compare between callee-saved regs
+        // to avoid unnecessary loads to rax/rcx.
+        let lhs_phys = self.operand_reg(lhs);
+        let rhs_phys = self.operand_reg(rhs);
+        if let (Some(lhs_r), Some(rhs_r)) = (lhs_phys, rhs_phys) {
+            // Both operands in callee-saved registers: compare directly
+            let lhs_name = callee_saved_name(lhs_r);
+            let rhs_name = callee_saved_name(rhs_r);
+            self.state.emit_fmt(format_args!("    cmpq %{}, %{}", rhs_name, lhs_name));
+        } else if let Some(imm) = Self::const_as_imm32(rhs) {
+            if let Some(lhs_r) = lhs_phys {
+                // LHS in callee-saved register, RHS is immediate
+                let lhs_name = callee_saved_name(lhs_r);
+                self.state.emit_fmt(format_args!("    cmpq ${}, %{}", imm, lhs_name));
+            } else {
+                self.operand_to_rax(lhs);
+                self.state.emit_fmt(format_args!("    cmpq ${}, %rax", imm));
+            }
+        } else if let Some(lhs_r) = lhs_phys {
+            // LHS in callee-saved register, RHS needs loading to rcx
+            let lhs_name = callee_saved_name(lhs_r);
+            self.operand_to_rcx(rhs);
+            self.state.emit_fmt(format_args!("    cmpq %rcx, %{}", lhs_name));
+        } else if let Some(rhs_r) = rhs_phys {
+            // RHS in callee-saved register, LHS needs loading to rax
+            let rhs_name = callee_saved_name(rhs_r);
             self.operand_to_rax(lhs);
-            self.state.emit_fmt(format_args!("    cmpq ${}, %rax", imm));
+            self.state.emit_fmt(format_args!("    cmpq %{}, %rax", rhs_name));
         } else {
-            // Load lhs to rax, rhs directly to rcx (no push/pop)
+            // Neither in callee-saved registers: fallback
             self.operand_to_rax(lhs);
             self.operand_to_rcx(rhs);
             self.state.emit("    cmpq %rcx, %rax");

@@ -49,6 +49,14 @@ pub trait ArchCodegen {
     /// Store the primary accumulator to a value's stack slot.
     fn emit_store_result(&mut self, dest: &Value);
 
+    /// Copy a value from src to dest. Default implementation loads through the
+    /// accumulator. Backends with register allocation can override this to emit
+    /// direct register-to-register copies, avoiding the accumulator roundtrip.
+    fn emit_copy_value(&mut self, dest: &Value, src: &Operand) {
+        self.emit_load_operand(src);
+        self.emit_store_result(dest);
+    }
+
     /// Compute the runtime-aligned address of an over-aligned alloca into the
     /// pointer register (same register used by emit_load_ptr_from_slot: rcx on x86).
     fn emit_alloca_aligned_addr(&mut self, slot: StackSlot, val_id: u32);

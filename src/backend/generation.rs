@@ -222,11 +222,9 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction) {
                 cg.emit_copy_i128(dest, src);
                 cg.state().reg_cache.invalidate_all();
             } else {
-                // Copy: load src to acc, store to dest. The cache survives
-                // because no intermediate code touches the accumulator.
-                cg.emit_load_operand(src);
-                cg.emit_store_result(dest);
-                // acc now holds dest's value; store_result already set the cache.
+                // Copy: use emit_copy_value which may emit a direct register-to-register
+                // copy if the backend supports it, avoiding the accumulator roundtrip.
+                cg.emit_copy_value(dest, src);
             }
         }
 
