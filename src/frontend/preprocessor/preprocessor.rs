@@ -590,7 +590,28 @@ impl Preprocessor {
                 self.define_simple_macro("__aarch64__", "1");
                 self.define_simple_macro("__ARM_64BIT_STATE", "1");
                 self.define_simple_macro("__ARM_ARCH", "8");
+                self.define_simple_macro("__ARM_ARCH_8A", "1");
                 self.define_simple_macro("__ARM_ARCH_ISA_A64", "1");
+                self.define_simple_macro("__ARM_ARCH_PROFILE", "65"); // 'A'
+                // Floating-point and SIMD
+                self.define_simple_macro("__ARM_FP", "14"); // 0b1110: half+single+double precision
+                self.define_simple_macro("__ARM_NEON", "1");
+                self.define_simple_macro("__ARM_FP16_ARGS", "1");
+                self.define_simple_macro("__ARM_FP16_FORMAT_IEEE", "1");
+                // ABI
+                self.define_simple_macro("__ARM_PCS_AAPCS64", "1");
+                self.define_simple_macro("__ARM_SIZEOF_MINIMAL_ENUM", "4");
+                self.define_simple_macro("__ARM_SIZEOF_WCHAR_T", "4");
+                // Features
+                self.define_simple_macro("__ARM_FEATURE_CLZ", "1");
+                self.define_simple_macro("__ARM_FEATURE_FMA", "1");
+                self.define_simple_macro("__ARM_FEATURE_IDIV", "1");
+                self.define_simple_macro("__ARM_FEATURE_NUMERIC_MAXMIN", "1");
+                self.define_simple_macro("__ARM_FEATURE_UNALIGNED", "1");
+                self.define_simple_macro("__ARM_ALIGN_MAX_PWR", "28");
+                self.define_simple_macro("__ARM_ALIGN_MAX_STACK_PWR", "16");
+                self.define_simple_macro("__AARCH64EL__", "1");
+                self.define_simple_macro("__AARCH64_CMODEL_SMALL__", "1");
                 // Replace x86 include paths with aarch64 paths
                 self.system_include_paths.retain(|p| {
                     let s = p.to_string_lossy();
@@ -620,6 +641,28 @@ impl Preprocessor {
                 // Define riscv64 macros
                 self.define_simple_macro("__riscv", "1");
                 self.define_simple_macro("__riscv_xlen", "64");
+                // Floating-point: double-precision (D extension)
+                self.define_simple_macro("__riscv_flen", "64");
+                self.define_simple_macro("__riscv_float_abi_double", "1");
+                self.define_simple_macro("__riscv_fdiv", "1");
+                self.define_simple_macro("__riscv_fsqrt", "1");
+                // ISA extensions (RV64GC = IMAFDCZicsr_Zifencei)
+                self.define_simple_macro("__riscv_atomic", "1");
+                self.define_simple_macro("__riscv_mul", "1");
+                self.define_simple_macro("__riscv_muldiv", "1");
+                self.define_simple_macro("__riscv_div", "1");
+                self.define_simple_macro("__riscv_compressed", "1");
+                // Extension version macros (XYYYZZZZ format: e.g. 2001000 = v2.1.0)
+                self.define_simple_macro("__riscv_i", "2001000");
+                self.define_simple_macro("__riscv_m", "2000000");
+                self.define_simple_macro("__riscv_a", "2001000");
+                self.define_simple_macro("__riscv_f", "2002000");
+                self.define_simple_macro("__riscv_d", "2002000");
+                self.define_simple_macro("__riscv_c", "2000000");
+                self.define_simple_macro("__riscv_zicsr", "2000000");
+                self.define_simple_macro("__riscv_zifencei", "2000000");
+                self.define_simple_macro("__riscv_arch_test", "1");
+                self.define_simple_macro("__riscv_cmodel_medany", "1");
                 // Replace x86 include paths with riscv64 paths
                 self.system_include_paths.retain(|p| {
                     let s = p.to_string_lossy();
