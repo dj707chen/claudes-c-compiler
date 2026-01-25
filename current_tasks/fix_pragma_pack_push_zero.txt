@@ -1,0 +1,13 @@
+Fix: #pragma pack(push, 0) should reset to default alignment
+
+Bug: #pragma pack(push, 0) is treated the same as #pragma pack(push) (push without
+changing alignment), but in GCC pack(push, 0) means "push current and reset to default
+(natural) alignment".
+
+The root cause is that the preprocessor emits __ccc_pack_push_0 for both pack(push) and
+pack(push, 0), and the parser treats push_0 as "push without change".
+
+Fix approach:
+1. Preprocessor: use a distinct synthetic token for pack(push) without a value argument
+2. Lexer: recognize the new token
+3. Parser: handle push-only vs push-with-zero differently
