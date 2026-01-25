@@ -597,6 +597,8 @@ impl IrConst {
 
     /// Convert to bytes in little-endian format, pushing onto a byte buffer.
     /// Writes `size` bytes for integer types, or full float representation for floats.
+    /// For long double, emits f64 bit pattern + zero padding (ARM64/RISC-V format).
+    /// Use `push_le_bytes_x86` for x86 targets that need x87 80-bit extended precision.
     pub fn push_le_bytes(&self, out: &mut Vec<u8>, size: usize) {
         match self {
             IrConst::F32(v) => {
@@ -606,9 +608,9 @@ impl IrConst {
                 out.extend_from_slice(&v.to_bits().to_le_bytes());
             }
             IrConst::LongDouble(v) => {
-                // Store as f64 bits in low 8 bytes + 8 zero padding bytes.
-                // All backends (x86-64, AArch64, RISC-V) use this 16-byte layout
-                // for long double in global data emission.
+                // Default: store as f64 bits in low 8 bytes + 8 zero padding bytes.
+                // This is correct for ARM64/RISC-V where long double is IEEE quad
+                // (computation done at f64 precision, ABI conversion via __extenddftf2).
                 out.extend_from_slice(&v.to_bits().to_le_bytes());
                 out.extend_from_slice(&[0u8; 8]);
             }
@@ -626,6 +628,22 @@ impl IrConst {
                     out.extend_from_slice(&vec![0u8; size - 8]);
                 }
             }
+        }
+    }
+
+    /// Convert to bytes for x86-64 targets, using x87 80-bit extended precision
+    /// for long doubles. This ensures correct memory representation when code
+    /// type-puns long doubles through unions or integer arrays (e.g., TCC's CValue).
+    pub fn push_le_bytes_x86(&self, out: &mut Vec<u8>, size: usize) {
+        match self {
+            IrConst::LongDouble(v) => {
+                // x86-64: emit x87 80-bit extended precision (10 bytes) + 6 zero padding bytes.
+                // This is the correct memory format for long double on x86-64.
+                let x87_bytes = f64_to_x87_bytes(*v);
+                out.extend_from_slice(&x87_bytes);
+                out.extend_from_slice(&[0u8; 6]); // pad to 16 bytes
+            }
+            _ => self.push_le_bytes(out, size),
         }
     }
 

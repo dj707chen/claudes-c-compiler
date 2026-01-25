@@ -1150,7 +1150,11 @@ impl Lowerer {
     /// Push a constant value as individual bytes into a compound init element list.
     pub(super) fn push_const_as_bytes(&self, elements: &mut Vec<GlobalInit>, val: &IrConst, size: usize) {
         let mut bytes = Vec::with_capacity(size);
-        val.push_le_bytes(&mut bytes, size);
+        if self.is_x86() {
+            val.push_le_bytes_x86(&mut bytes, size);
+        } else {
+            val.push_le_bytes(&mut bytes, size);
+        }
         for b in bytes {
             elements.push(GlobalInit::Scalar(IrConst::I8(b as i8)));
         }
@@ -1161,7 +1165,11 @@ impl Lowerer {
         let coerced = val.coerce_to(ty);
         let size = ty.size();
         let mut le_buf = Vec::with_capacity(size);
-        coerced.push_le_bytes(&mut le_buf, size);
+        if self.is_x86() {
+            coerced.push_le_bytes_x86(&mut le_buf, size);
+        } else {
+            coerced.push_le_bytes(&mut le_buf, size);
+        }
         for (i, &b) in le_buf.iter().enumerate() {
             if offset + i < bytes.len() {
                 bytes[offset + i] = b;

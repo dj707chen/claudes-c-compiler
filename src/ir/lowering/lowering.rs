@@ -129,6 +129,12 @@ impl Lowerer {
         self.func_state.as_mut().expect("not inside a function")
     }
 
+    /// Returns true if the target is x86-64.
+    /// Used to select x87 80-bit extended precision format for long double memory layout.
+    pub(super) fn is_x86(&self) -> bool {
+        self.target == Target::X86_64
+    }
+
     /// Returns true if the target uses x86-64 style packed _Complex float ABI
     /// (two F32s packed into a single F64/xmm register).
     /// Returns false for ARM/RISC-V which pass _Complex float as two separate F32 registers.

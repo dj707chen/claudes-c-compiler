@@ -179,6 +179,12 @@ impl PtrDirective {
         }
     }
 
+    /// Returns true if this is the x86-64 target directive.
+    /// Used to select x87 80-bit extended precision format for long double constants.
+    pub fn is_x86(self) -> bool {
+        matches!(self, PtrDirective::Quad)
+    }
+
     /// Convert a byte alignment value to the correct `.align` argument for this target.
     /// On x86-64, `.align N` means N bytes. On ARM and RISC-V, `.align N` means 2^N bytes,
     /// so we must emit log2(N) instead.
@@ -495,12 +501,27 @@ pub fn emit_const_data(out: &mut AsmOutput, c: &IrConst, ty: IrType, ptr_dir: Pt
             out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), v.to_bits()));
         }
         IrConst::LongDouble(v) => {
-            // Store as f64 bit pattern in the lower 8 bytes, with 8 bytes zero padding.
-            // The ARM64/RISC-V codegen loads long doubles as f64 values (F128 is treated
-            // as F64 at computation level), so the data must match the load format.
-            // For function call arguments, f64->f128 conversion is handled by __extenddftf2.
-            out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), v.to_bits()));
-            out.emit_fmt(format_args!("    {} 0", ptr_dir.as_str()));
+            if ptr_dir.is_x86() {
+                // x86-64: emit x87 80-bit extended precision format (10 bytes + 6 padding).
+                // This ensures correct memory representation when code reads the bytes
+                // through unions or integer arrays (e.g., TCC's CValue.tab[]).
+                let x87_bytes = crate::ir::ir::f64_to_x87_bytes(*v);
+                // Emit as two .quad values (16 bytes total, little-endian)
+                let lo = u64::from_le_bytes([
+                    x87_bytes[0], x87_bytes[1], x87_bytes[2], x87_bytes[3],
+                    x87_bytes[4], x87_bytes[5], x87_bytes[6], x87_bytes[7],
+                ]);
+                let hi = u64::from_le_bytes([
+                    x87_bytes[8], x87_bytes[9], 0, 0, 0, 0, 0, 0,
+                ]);
+                out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), lo as i64));
+                out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), hi as i64));
+            } else {
+                // ARM64/RISC-V: store as f64 bit pattern in the lower 8 bytes + 8 zero padding.
+                // Codegen loads long doubles as f64 values; ABI conversion via __extenddftf2.
+                out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), v.to_bits()));
+                out.emit_fmt(format_args!("    {} 0", ptr_dir.as_str()));
+            }
         }
         IrConst::I128(v) => {
             // Emit as two 64-bit values (little-endian: low quad first)

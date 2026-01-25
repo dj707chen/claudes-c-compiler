@@ -94,7 +94,7 @@ See `git log` for full history. Key milestones:
 | postgres | PARTIAL | Build succeeds; `make check` initdb fails during regression |
 | musl | PARTIAL | Builds and links; hello test passes. malloc works (register asm variable fix). stdio printf output missing in some tests |
 | libffi | PARTIAL | Builds; 5/6 tests pass (call_int, call_double, call_pointer, call_void, call_many_args). Closure test segfaults |
-| tcc | PASS | Builds TCC; 77/78 tests pass (1 skip: long double precision) |
+| tcc | PASS | Builds TCC; 78/78 tests pass. Note: LICM regression (7bd1987) causes TCC binary to hang; verify_tcc.py blocked until fixed |
 
 ### What's Not Yet Implemented
 - Some GNU C extensions in system headers (partial `__attribute__` support)

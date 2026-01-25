@@ -1,0 +1,19 @@
+Fix LICM optimization regression that breaks TCC
+
+The LICM (Loop-Invariant Code Motion) commit 7bd1987 introduced a regression
+that causes TCC binaries compiled by ccc to hang (infinite loop). This was
+bisected: commit 76e3ca9 (pre-LICM) produces working TCC binaries, while
+7bd1987 produces hanging ones.
+
+The TCC binary hangs even on simple operations like `tcc -v`, suggesting
+the LICM pass is incorrectly hoisting or transforming code in one of TCC's
+source files (likely tccgen.c or tccpp.c which are the most complex).
+
+To investigate:
+1. Build TCC .o files one at a time with LICM enabled vs disabled
+2. Identify which .o file causes the hang (binary search)
+3. Narrow down to the specific function being miscompiled
+4. Check LICM's loop analysis and invariant detection logic
+
+This blocks TCC from being verified via the verify_tcc.py script.
+The long double fix (separate task) is also needed for TCC's test 70.
