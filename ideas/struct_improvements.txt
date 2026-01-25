@@ -26,3 +26,7 @@ Struct/union feature improvements needed:
 
 8. Array members in structs (e.g., struct { int arr[10]; }).
    Need proper layout and GEP for arr[i] within the struct.
+
+9. Struct layout scoping: FIXED. Local struct definitions are properly scoped;
+   a local struct with the same tag name as a global struct shadows the global
+   layout within its scope, and the global layout is restored when the scope exits.
