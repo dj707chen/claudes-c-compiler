@@ -500,9 +500,16 @@ fn parse_dest_reg_fast(s: &str) -> RegId {
         let trimmed = after_comma.trim();
         return register_family(trimmed).unwrap_or(REG_NONE);
     }
-    // Single-operand instructions (inc, dec, not, neg, pop)
-    if b.len() >= 4 && (b[0] == b'i' || b[0] == b'd' || b[0] == b'n') {
-        if s.starts_with("inc") || s.starts_with("dec") || s.starts_with("not") || s.starts_with("neg") {
+    // Single-operand instructions that modify their operand in-place:
+    //   inc, dec, not, neg    (arithmetic/logic)
+    //   bswapl, bswapq        (byte swap)
+    //   popcntl, popcntq      (popcount, though these usually have 2 operands with comma)
+    if b.len() >= 4 {
+        let is_single_op_modifier =
+            (b[0] == b'i' || b[0] == b'd' || b[0] == b'n') &&
+            (s.starts_with("inc") || s.starts_with("dec") || s.starts_with("not") || s.starts_with("neg"))
+            || b[0] == b'b' && (s.starts_with("bswapl") || s.starts_with("bswapq"));
+        if is_single_op_modifier {
             if let Some(space_pos) = s.find(' ') {
                 let operand = s[space_pos + 1..].trim();
                 return register_family(operand).unwrap_or(REG_NONE);

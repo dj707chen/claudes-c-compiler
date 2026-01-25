@@ -4,7 +4,7 @@ Project Verification Triage
 Status of all 16 verification targets as of 2026-01-25.
 Failures are based on running verify_*.py scripts.
 
-PASSING (13):
+PASSING (14):
   - zlib:          PASS (all backends)
   - lua:           PASS (all backends)
   - libsodium:     PASS (all backends — fixed GEP fold i128 bug)
@@ -18,20 +18,7 @@ PASSING (13):
   - musl:          PASS (all backends)
   - tcc:           PASS (all backends)
   - jq:            PASS (all backends — fixed exponential const eval hang)
-
-PARTIAL:
-  mbedtls:
-    Status: PARTIAL (6/7 tests pass; ARIA-ECB-128 encryption fails)
-    Notes: md5, sha256, sha512, aes, rsa, ecp all pass now.
-           Fixed inline asm callee-saved register preservation which
-           was corrupting rbx across bn_mul.h multiply-accumulate calls.
-           Remaining failure: ARIA-ECB-128 (enc) in selftest suite.
-           Root cause: ARIA_P1 macro double-evaluates __builtin_bswap32,
-           and after GVN merges the two calls, the register allocator
-           assigns overlapping live intervals to the same register,
-           causing the second bswap to undo the first.
-    Action: Fix register allocator liveness analysis for bswap/callee-saved
-            register conflicts. See ideas/fix_aria_bswap_regalloc.txt.
+  - mbedtls:       PASS (all 7 tests — fixed peephole bswap store forwarding bug)
 
 FAILING:
   liburing:
@@ -48,6 +35,5 @@ FAILING:
     Action: Debug initdb crash. Compare with GCC-compiled initdb.
 
 PRIORITY ORDER for fixing:
-  1. Fix mbedtls ARIA regalloc issue (6/7 passing, one remaining failure)
-  2. Fix postgres initdb (complex, low priority)
-  3. Verify liburing is an environment issue
+  1. Fix postgres initdb (complex)
+  2. Verify liburing is an environment issue
