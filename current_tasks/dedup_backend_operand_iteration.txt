@@ -1,0 +1,13 @@
+Deduplicate backend instruction/terminator operand iteration
+
+The pattern of exhaustively matching all Instruction/Terminator variants to extract
+operand uses appears in 5+ places across liveness.rs, generation.rs, and regalloc.rs.
+
+Plan:
+1. Make for_each_operand_in_instruction and for_each_value_use_in_instruction from
+   liveness.rs pub(super) and move to a shared ir_iterators.rs module
+2. Add for_each_operand_in_terminator shared iterator
+3. Refactor generation.rs (count_value_uses, build_gep_fold_map) to use shared iterators
+4. Refactor regalloc.rs (count_operand_uses, count_terminator_uses) to use shared iterators
+5. Fix duplicated CallAbiConfig construction in ARM/RISC-V backends
+6. Clean up x86 emit_store/emit_load F128 override duplication
