@@ -1554,7 +1554,11 @@ impl ArchCodegen for RiscvCodegen {
                         let n_dwords = (size + 7) / 8;
                         match arg {
                             Operand::Value(v) => {
-                                if let Some(slot) = self.state.get_slot(v.0) {
+                                if let Some(&reg) = self.reg_assignments.get(&v.0) {
+                                    // Value is register-allocated: move from callee-saved reg to t0
+                                    let reg_name = callee_saved_name(reg);
+                                    self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
+                                } else if let Some(slot) = self.state.get_slot(v.0) {
                                     if self.state.is_alloca(v.0) {
                                         self.emit_addi_s0("t0", slot.0);
                                     } else {
@@ -1750,7 +1754,11 @@ impl ArchCodegen for RiscvCodegen {
                 let regs_needed = if size <= 8 { 1 } else { 2 };
                 match arg {
                     Operand::Value(v) => {
-                        if let Some(slot) = self.state.get_slot(v.0) {
+                        if let Some(&reg) = self.reg_assignments.get(&v.0) {
+                            // Value is register-allocated: move from callee-saved reg to t0
+                            let reg_name = callee_saved_name(reg);
+                            self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
+                        } else if let Some(slot) = self.state.get_slot(v.0) {
                             if self.state.is_alloca(v.0) {
                                 self.emit_addi_s0("t0", slot.0);
                             } else {
