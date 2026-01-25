@@ -947,7 +947,7 @@ impl type_builder::TypeConvertContext for SemanticAnalyzer {
             };
             self.result.type_context.insert_struct_layout_from_ref(&key, layout);
         }
-        if is_union { CType::Union(key) } else { CType::Struct(key) }
+        if is_union { CType::Union(key.into()) } else { CType::Struct(key.into()) }
     }
 
     fn resolve_enum(&self, name: &Option<String>, _variants: &Option<Vec<EnumVariant>>) -> CType {

@@ -649,7 +649,7 @@ impl Lowerer {
         // GCC extension: cast to union type, e.g. (union convert)x
         // Creates a temporary union, stores the value into the first matching member at offset 0.
         if let CType::Union(ref key) = target_ctype {
-            let union_size = self.types.struct_layouts.get(key).map(|l| l.size).unwrap_or(0);
+            let union_size = self.types.struct_layouts.get(&**key).map(|l| l.size).unwrap_or(0);
             let src = self.lower_expr(inner);
             let from_ty = self.get_expr_type(inner);
 
@@ -814,7 +814,7 @@ impl Lowerer {
                     // Handle list initializers for array elements (e.g., struct or nested array)
                     match &elem_ctype {
                         Some(CType::Struct(key)) | Some(CType::Union(key)) => {
-                            if let Some(sub_layout) = self.types.struct_layouts.get(key).cloned() {
+                            if let Some(sub_layout) = self.types.struct_layouts.get(&**key).cloned() {
                                 // Zero-init the element region first for partial initialization
                                 self.zero_init_region(alloca, elem_offset, elem_size);
                                 self.emit_struct_init(sub_items, alloca, &sub_layout, elem_offset);

@@ -474,7 +474,7 @@ impl Lowerer {
                                 // Try to get the layout of this field for further chaining
                                 current_layout = match &f.ty {
                                     CType::Struct(key) | CType::Union(key) => {
-                                        self.types.struct_layouts.get(key).cloned()
+                                        self.types.struct_layouts.get(&**key).cloned()
                                             .unwrap_or_else(StructLayout::empty)
                                     }
                                     _ => StructLayout::empty(),
@@ -596,7 +596,7 @@ impl Lowerer {
                 0
             }
             CType::Struct(key) | CType::Union(key) => {
-                if let Some(layout) = self.types.struct_layouts.get(key) {
+                if let Some(layout) = self.types.struct_layouts.get(&**key) {
                     self.flat_scalar_count_for_layout(layout)
                 } else {
                     1

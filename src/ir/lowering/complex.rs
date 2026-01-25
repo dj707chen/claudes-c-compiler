@@ -587,7 +587,7 @@ impl Lowerer {
     fn resolve_field_type(&self, struct_type: &CType, field: &str) -> CType {
         match struct_type {
             CType::Struct(key) | CType::Union(key) => {
-                if let Some(layout) = self.types.struct_layouts.get(key) {
+                if let Some(layout) = self.types.struct_layouts.get(&**key) {
                     for f in &layout.fields {
                         if f.name == field {
                             return f.ty.clone();
@@ -732,7 +732,7 @@ impl Lowerer {
                 // Get base struct address and add field offset
                 let base_ct = self.expr_ctype(base);
                 if let CType::Struct(ref key) | CType::Union(ref key) = base_ct {
-                    if let Some(layout) = self.types.struct_layouts.get(key) {
+                    if let Some(layout) = self.types.struct_layouts.get(&**key) {
                         if let Some((offset, _)) = layout.field_offset(field, &self.types) {
                             let base_ptr = self.lower_complex_lvalue(base);
                             if offset == 0 {
@@ -758,7 +758,7 @@ impl Lowerer {
                 let base_ct = self.expr_ctype(base);
                 if let CType::Pointer(ref inner) = base_ct {
                     if let CType::Struct(ref key) | CType::Union(ref key) = **inner {
-                        if let Some(layout) = self.types.struct_layouts.get(key) {
+                        if let Some(layout) = self.types.struct_layouts.get(&**key) {
                             if let Some((offset, _)) = layout.field_offset(field, &self.types) {
                                 if offset == 0 {
                                     return base_ptr;

@@ -372,7 +372,7 @@ impl Lowerer {
                     // drill into it and consume multiple init items for inner fields.
                     if desig_name.is_none() && f.name.is_empty() && f.bit_width.is_none() {
                         if let CType::Struct(key) | CType::Union(key) = &f.ty {
-                            if let Some(sub_layout) = self.types.struct_layouts.get(key).cloned() {
+                            if let Some(sub_layout) = self.types.struct_layouts.get(&**key).cloned() {
                                 let anon_offset = f.offset;
                                 let sub_base = self.emit_gep_offset(base, anon_offset, IrType::Ptr);
                                 let anon_field_count = sub_layout.fields.iter()
@@ -394,7 +394,7 @@ impl Lowerer {
                     let anon_offset = anon_field.offset;
                     let sub_layout = match &anon_field.ty {
                         CType::Struct(key) | CType::Union(key) => {
-                            match self.types.struct_layouts.get(key) {
+                            match self.types.struct_layouts.get(&**key) {
                                 Some(l) => l.clone(),
                                 None => { current_field_idx = *anon_field_idx + 1; item_idx += 1; continue; }
                             }
@@ -553,7 +553,7 @@ impl Lowerer {
     ) {
         match field_ctype {
             CType::Struct(key) | CType::Union(key) => {
-                if let Some(sub_layout) = self.types.struct_layouts.get(key).cloned() {
+                if let Some(sub_layout) = self.types.struct_layouts.get(&**key).cloned() {
                     self.lower_local_struct_init(items, base, &sub_layout);
                 }
             }
@@ -1358,7 +1358,7 @@ impl Lowerer {
                     // drill into it and consume multiple init items for inner fields.
                     if desig_name.is_none() && f.name.is_empty() && f.bit_width.is_none() {
                         if let CType::Struct(key) | CType::Union(key) = &f.ty {
-                            if let Some(sub_layout) = self.types.struct_layouts.get(key).cloned() {
+                            if let Some(sub_layout) = self.types.struct_layouts.get(&**key).cloned() {
                                 let anon_offset = base_offset + f.offset;
                                 let anon_field_count = sub_layout.fields.iter()
                                     .filter(|ff| !ff.name.is_empty() || ff.bit_width.is_none())
@@ -1380,7 +1380,7 @@ impl Lowerer {
                     let anon_offset = base_offset + anon_field.offset;
                     let sub_layout = match &anon_field.ty {
                         CType::Struct(key) | CType::Union(key) => {
-                            match self.types.struct_layouts.get(key) {
+                            match self.types.struct_layouts.get(&**key) {
                                 Some(l) => l.clone(),
                                 None => { item_idx += 1; current_field_idx = *anon_field_idx + 1; continue; }
                             }
@@ -1413,7 +1413,7 @@ impl Lowerer {
 
             match &field.ty {
                 CType::Struct(key) | CType::Union(key) if has_nested_designator || is_anon_member_designator => {
-                    if let Some(sub_layout) = self.types.struct_layouts.get(key).cloned() {
+                    if let Some(sub_layout) = self.types.struct_layouts.get(&**key).cloned() {
                         let sub_designators = if is_anon_member_designator && !has_nested_designator {
                             // Designator targets a field inside the anonymous struct/union:
                             // pass all designators through to the sub-struct init
@@ -1464,7 +1464,7 @@ impl Lowerer {
                         if !remaining_field_desigs.is_empty() {
                             // .a[idx].b = val - drill into struct element
                             if let CType::Struct(ref key) | CType::Union(ref key) = elem_ty.as_ref() {
-                                if let Some(sub_layout) = self.types.struct_layouts.get(key).cloned() {
+                                if let Some(sub_layout) = self.types.struct_layouts.get(&**key).cloned() {
                                     // Include any remaining index designators for nested arrays
                                     let sub_desigs: Vec<_> = after_first_idx.iter().cloned().collect();
                                     let sub_item = InitializerItem {
@@ -1531,7 +1531,7 @@ impl Lowerer {
                                     }
                                 }
                                 CType::Struct(ref key) | CType::Union(ref key) => {
-                                    if let Some(sub_layout) = self.types.struct_layouts.get(key).cloned() {
+                                    if let Some(sub_layout) = self.types.struct_layouts.get(&**key).cloned() {
                                         self.emit_struct_init(sub_items, base_alloca, &sub_layout, elem_offset);
                                     }
                                 }
@@ -1567,7 +1567,7 @@ impl Lowerer {
                     // point past this array field if we exhausted the continuation.
                 }
                 CType::Struct(key) | CType::Union(key) => {
-                    if let Some(sub_layout) = self.types.struct_layouts.get(key).cloned() {
+                    if let Some(sub_layout) = self.types.struct_layouts.get(&**key).cloned() {
                         match &item.init {
                             Initializer::List(sub_items) => {
                                 // Always zero-init the sub-struct/union region before writing explicit values.
@@ -1612,7 +1612,7 @@ impl Lowerer {
                             }
                             // Braced array init
                             if let CType::Struct(ref key) | CType::Union(ref key) = elem_ty.as_ref() {
-                                if let Some(sub_layout) = self.types.struct_layouts.get(key).cloned() {
+                                if let Some(sub_layout) = self.types.struct_layouts.get(&**key).cloned() {
                                 // Array of structs: each sub_item inits one struct element
                                 let mut ai = 0;
                                 let mut si = 0;
@@ -1714,7 +1714,7 @@ impl Lowerer {
                                 }
                             }
                             if let CType::Struct(ref key) | CType::Union(ref key) = elem_ty.as_ref() {
-                                if let Some(sub_layout) = self.types.struct_layouts.get(key).cloned() {
+                                if let Some(sub_layout) = self.types.struct_layouts.get(&**key).cloned() {
                                     // Flat init for array of structs: consume items for each
                                     // struct element's fields across the array
                                     let start_ai = array_start_idx.unwrap_or(0);

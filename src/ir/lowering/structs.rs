@@ -125,7 +125,7 @@ impl Lowerer {
             TypeSpecifier::TypedefName(name) => {
                 if let Some(ctype) = self.types.typedefs.get(name) {
                     if let CType::Union(key) = ctype {
-                        return Some(key.clone());
+                        return Some(key.to_string());
                     }
                 }
                 None
@@ -578,7 +578,7 @@ impl Lowerer {
     pub(super) fn struct_layout_from_ctype(&self, ctype: &CType) -> Option<StructLayout> {
         match ctype {
             CType::Struct(key) | CType::Union(key) => {
-                self.types.struct_layouts.get(key).cloned()
+                self.types.struct_layouts.get(key.as_ref()).cloned()
             }
             _ => None,
         }

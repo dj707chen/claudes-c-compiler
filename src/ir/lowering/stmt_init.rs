@@ -559,7 +559,7 @@ impl Lowerer {
                                 }
                             } else if let CType::Struct(ref key) | CType::Union(ref key) = field.ty {
                                 // Nested struct field
-                                if let Some(sub_layout) = self.types.struct_layouts.get(key).cloned() {
+                                if let Some(sub_layout) = self.types.struct_layouts.get(&**key).cloned() {
                                     let dest = self.emit_gep_offset(alloca, field_offset, IrType::I8);
                                     self.lower_local_struct_init(sub_items, dest, &sub_layout);
                                 }

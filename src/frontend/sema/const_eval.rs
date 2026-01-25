@@ -316,7 +316,7 @@ impl<'a> SemaConstEval<'a> {
         let ctype = self.type_spec_to_ctype(type_spec);
         match &ctype {
             CType::Struct(key) | CType::Union(key) => {
-                self.types.struct_layouts.get(key).cloned()
+                self.types.struct_layouts.get(&**key).cloned()
             }
             _ => None,
         }
@@ -675,14 +675,14 @@ fn ctype_from_type_spec(spec: &TypeSpecifier, types: &TypeContext) -> CType {
         }
         TypeSpecifier::Struct(tag, _, _, _, _) => {
             if let Some(tag) = tag {
-                CType::Struct(format!("struct.{}", tag))
+                CType::Struct(format!("struct.{}", tag).into())
             } else {
                 CType::Int // anonymous struct without context
             }
         }
         TypeSpecifier::Union(tag, _, _, _, _) => {
             if let Some(tag) = tag {
-                CType::Union(format!("union.{}", tag))
+                CType::Union(format!("union.{}", tag).into())
             } else {
                 CType::Int // anonymous union without context
             }

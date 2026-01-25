@@ -940,7 +940,7 @@ impl Lowerer {
     pub(super) fn get_struct_layout_for_ctype(&self, ty: &CType) -> Option<StructLayout> {
         match ty {
             CType::Struct(key) | CType::Union(key) => {
-                self.types.struct_layouts.get(key).cloned()
+                self.types.struct_layouts.get(&**key).cloned()
             }
             _ => None,
         }

@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use crate::common::type_builder;
 use crate::frontend::parser::ast::*;
 use crate::common::types::{IrType, StructField, StructLayout, CType};
@@ -51,7 +52,7 @@ impl Lowerer {
     pub(super) fn is_transparent_union(&self, ts: &TypeSpecifier) -> bool {
         let key = match ts {
             TypeSpecifier::Union(tag, _, _, _, _) => {
-                tag.as_ref().map(|t| format!("union.{}", t))
+                tag.as_ref().map(|t| -> Rc<str> { format!("union.{}", t).into() })
             }
             TypeSpecifier::TypedefName(name) => {
                 if let Some(CType::Union(key)) = self.types.typedefs.get(name) {
@@ -63,7 +64,7 @@ impl Lowerer {
             _ => None,
         };
         if let Some(key) = key {
-            self.types.struct_layouts.get(&key).map_or(false, |l| l.is_transparent_union)
+            self.types.struct_layouts.get(&*key).map_or(false, |l| l.is_transparent_union)
         } else {
             false
         }
@@ -1099,7 +1100,7 @@ impl Lowerer {
     ) -> CType {
         let prefix = if is_union { "union" } else { "struct" };
         let wrap = |key: String| -> CType {
-            if is_union { CType::Union(key) } else { CType::Struct(key) }
+            if is_union { CType::Union(key.into()) } else { CType::Struct(key.into()) }
         };
         // __attribute__((packed)) forces alignment 1; #pragma pack(N) caps to N.
         let max_field_align = if is_packed { Some(1) } else { pragma_pack };

@@ -345,12 +345,16 @@ impl Parser {
                                     }
                                     TokenKind::Identifier(name) if name == "alias" || name == "__alias__" => {
                                         self.advance();
-                                        // Parse alias("target_name")
+                                        // Parse alias("target_name") - supports string concatenation
                                         if matches!(self.peek(), TokenKind::LParen) {
                                             self.advance(); // consume (
-                                            if let TokenKind::StringLiteral(target) = self.peek() {
-                                                self.parsing_alias_target = Some(target.clone());
+                                            let mut result = String::new();
+                                            while let TokenKind::StringLiteral(s) = self.peek() {
+                                                result.push_str(&s);
                                                 self.advance();
+                                            }
+                                            if !result.is_empty() {
+                                                self.parsing_alias_target = Some(result);
                                             }
                                             // consume )
                                             if matches!(self.peek(), TokenKind::RParen) {
@@ -360,12 +364,16 @@ impl Parser {
                                     }
                                     TokenKind::Identifier(name) if name == "visibility" || name == "__visibility__" => {
                                         self.advance();
-                                        // Parse visibility("hidden"|"default"|"internal"|"protected")
+                                        // Parse visibility("hidden"|"default"|"internal"|"protected") - supports string concatenation
                                         if matches!(self.peek(), TokenKind::LParen) {
                                             self.advance(); // consume (
-                                            if let TokenKind::StringLiteral(vis) = self.peek() {
-                                                self.parsing_visibility = Some(vis.clone());
+                                            let mut result = String::new();
+                                            while let TokenKind::StringLiteral(s) = self.peek() {
+                                                result.push_str(&s);
                                                 self.advance();
+                                            }
+                                            if !result.is_empty() {
+                                                self.parsing_visibility = Some(result);
                                             }
                                             if matches!(self.peek(), TokenKind::RParen) {
                                                 self.advance();
@@ -374,12 +382,16 @@ impl Parser {
                                     }
                                     TokenKind::Identifier(name) if name == "section" || name == "__section__" => {
                                         self.advance();
-                                        // Parse section("name")
+                                        // Parse section("name") - supports string concatenation
                                         if matches!(self.peek(), TokenKind::LParen) {
                                             self.advance(); // consume (
-                                            if let TokenKind::StringLiteral(sect) = self.peek() {
-                                                self.parsing_section = Some(sect.clone());
+                                            let mut result = String::new();
+                                            while let TokenKind::StringLiteral(s) = self.peek() {
+                                                result.push_str(&s);
                                                 self.advance();
+                                            }
+                                            if !result.is_empty() {
+                                                self.parsing_section = Some(result);
                                             }
                                             if matches!(self.peek(), TokenKind::RParen) {
                                                 self.advance();

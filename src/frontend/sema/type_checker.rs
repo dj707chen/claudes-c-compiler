@@ -374,7 +374,7 @@ impl<'a> ExprTypeChecker<'a> {
 
         match &base_ctype {
             CType::Struct(key) | CType::Union(key) => {
-                if let Some(layout) = self.types.struct_layouts.get(key) {
+                if let Some(layout) = self.types.struct_layouts.get(key.as_ref()) {
                     if let Some((_offset, field_ct)) = layout.field_offset(field_name, &self.types.struct_layouts) {
                         return Some(field_ct);
                     }
@@ -484,7 +484,7 @@ impl<'a> ExprTypeChecker<'a> {
             TypeSpecifier::Enum(_, _) => CType::Int, // enums are int-sized
             TypeSpecifier::Struct(tag, _, _, _, _) => {
                 if let Some(tag) = tag {
-                    CType::Struct(format!("struct.{}", tag))
+                    CType::Struct(format!("struct.{}", tag).into())
                 } else {
                     // TODO: anonymous structs get unique keys via anon_struct_counter
                     // in sema.rs, but we don't have access to the counter here.
@@ -495,7 +495,7 @@ impl<'a> ExprTypeChecker<'a> {
             }
             TypeSpecifier::Union(tag, _, _, _, _) => {
                 if let Some(tag) = tag {
-                    CType::Union(format!("union.{}", tag))
+                    CType::Union(format!("union.{}", tag).into())
                 } else {
                     // TODO: anonymous unions get unique keys via anon_struct_counter
                     // in sema.rs, but we don't have access to the counter here.

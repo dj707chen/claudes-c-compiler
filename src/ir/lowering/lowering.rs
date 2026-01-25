@@ -235,7 +235,7 @@ impl Lowerer {
                         for declarator in &decl.declarators {
                             if !declarator.name.is_empty() {
                                 if let Some(CType::Union(key)) = self.types.typedefs.get(&declarator.name) {
-                                    found_key = Some(key.clone());
+                                    found_key = Some(key.to_string());
                                     break;
                                 }
                             }
@@ -1193,7 +1193,7 @@ impl Lowerer {
                     for declarator in &decl.declarators {
                         if !declarator.name.is_empty() {
                             if let Some(CType::Union(key)) = self.types.typedefs.get(&declarator.name) {
-                                found_key = Some(key.clone());
+                                found_key = Some(key.to_string());
                                 break;
                             }
                         }

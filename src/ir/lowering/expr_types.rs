@@ -1019,15 +1019,15 @@ impl Lowerer {
         match &ctype {
             CType::Struct(key) | CType::Union(key) => {
                 // Check if the layout for this key is a forward-declaration stub (size 0, no fields)
-                let is_incomplete = self.types.struct_layouts.get(key)
+                let is_incomplete = self.types.struct_layouts.get(&**key)
                     .map(|l| l.fields.is_empty())
                     .unwrap_or(true);
                 if is_incomplete {
                     // Try the ctype_cache for a complete version
-                    if let Some(cached) = self.types.ctype_cache.borrow().get(key) {
+                    if let Some(cached) = self.types.ctype_cache.borrow().get(&**key) {
                         match cached {
                             CType::Struct(cached_key) | CType::Union(cached_key) => {
-                                let cached_complete = self.types.struct_layouts.get(cached_key)
+                                let cached_complete = self.types.struct_layouts.get(&**cached_key)
                                     .map(|l| !l.fields.is_empty())
                                     .unwrap_or(false);
                                 if cached_complete {
@@ -1065,7 +1065,7 @@ impl Lowerer {
         // Look up field in the struct/union type, recursing into anonymous members
         match &base_ctype {
             CType::Struct(key) | CType::Union(key) => {
-                if let Some(layout) = self.types.struct_layouts.get(key) {
+                if let Some(layout) = self.types.struct_layouts.get(&**key) {
                     // Use field_offset which recursively searches anonymous
                     // struct/union members, returning the correct field type
                     if let Some((_offset, ctype)) = layout.field_offset(field_name, &self.types.struct_layouts) {

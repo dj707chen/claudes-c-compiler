@@ -229,7 +229,7 @@ impl Lowerer {
         // another type's CType that was built before the union was fully defined).
         match ctype {
             CType::Struct(key) | CType::Union(key) => {
-                if let Some(layout) = self.types.struct_layouts.get(key) {
+                if let Some(layout) = self.types.struct_layouts.get(&**key) {
                     return layout.size;
                 }
             }

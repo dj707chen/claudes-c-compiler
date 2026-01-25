@@ -1,4 +1,10 @@
+use std::rc::Rc;
+
 use crate::common::fx_hash::FxHashMap;
+
+/// Reference-counted string used for struct/union layout keys in CType.
+/// Cloning is a cheap reference count increment instead of a heap allocation.
+pub type RcStr = Rc<str>;
 
 /// Trait for looking up struct/union layout information.
 /// TypeContext implements this trait, allowing CType methods in common/
@@ -46,10 +52,12 @@ pub enum CType {
     Function(Box<FunctionType>),
     /// Struct type, identified by key (e.g., "struct.Foo" or "__anon_struct_7").
     /// The actual layout is stored in TypeContext's struct_layouts map.
-    Struct(String),
+    /// Uses Rc<str> for cheap cloning (reference count bump vs heap allocation).
+    Struct(RcStr),
     /// Union type, identified by key (e.g., "union.Bar" or "__anon_struct_7").
     /// The actual layout is stored in TypeContext's struct_layouts map.
-    Union(String),
+    /// Uses Rc<str> for cheap cloning (reference count bump vs heap allocation).
+    Union(RcStr),
     Enum(EnumType),
 }
 
