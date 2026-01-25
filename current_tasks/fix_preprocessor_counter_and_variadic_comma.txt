@@ -1,0 +1,17 @@
+Task: Fix preprocessor __COUNTER__ and named variadic comma elision
+
+Description:
+Two preprocessor bugs prevent many kernel files from compiling:
+
+1. __COUNTER__ macro not implemented - should expand to incrementing integers (0, 1, 2, ...)
+   on each use. Used extensively in Linux kernel instrumentation/tracing macros.
+
+2. GNU extension ", ## args" comma elision not working for named variadic parameters.
+   For macros like `#define FOO(a, b, args...) bar(a, b, ## args)`, when args is empty,
+   the preceding comma should be removed (same as , ## __VA_ARGS__). This was only
+   implemented for __VA_ARGS__, not for named variadic parameters like `args...`.
+
+Files changed:
+- src/frontend/preprocessor/macro_defs.rs
+
+Status: In progress
