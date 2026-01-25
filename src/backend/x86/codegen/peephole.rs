@@ -1193,6 +1193,19 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
         let fused_cc = if is_jne { cc } else { invert_cc(cc) };
         let fused_jcc = format!("    j{} {}", fused_cc, branch_target);
 
+        // Check if there is a StoreRbp in the sequence between setCC and
+        // testq. If so, the comparison result is stored to a stack slot
+        // that may be read by another basic block (e.g., after GVN replaces
+        // a redundant comparison with a reference to this one). In that
+        // case, skip fusion to avoid leaving the stack slot uninitialized.
+        let has_store = (1..=test_scan).any(|s|
+            matches!(infos[seq_indices[s]].kind, LineKind::StoreRbp { .. })
+        );
+        if has_store {
+            i += 1;
+            continue;
+        }
+
         // NOP out everything from setCC through testq
         for s in 1..=test_scan {
             mark_nop(&mut infos[seq_indices[s]]);
