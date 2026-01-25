@@ -16,6 +16,40 @@
 //!    -> replaces with `movq %rax, %rcx` (saves the push/pop pair when the
 //!    pushed value is immediately restored)
 
+/// Strip leading spaces from an assembly line. The codegen emits lines with
+/// either no indent (labels/directives) or a fixed indent (instructions).
+/// Trailing whitespace is never present in codegen output, so only leading
+/// spaces need to be stripped.
+#[inline]
+fn trim_asm(s: &str) -> &str {
+    let b = s.as_bytes();
+    if b.first() == Some(&b' ') {
+        let mut i = 0;
+        while i < b.len() && b[i] == b' ' {
+            i += 1;
+        }
+        &s[i..]
+    } else {
+        s
+    }
+}
+
+/// Check if a line has been marked as a NOP (dead line).
+/// Dead lines are marked with a NUL byte, which cannot appear in valid
+/// assembly text, making this a safe and fast single-byte sentinel check.
+#[inline]
+fn is_nop(line: &str) -> bool {
+    line.as_bytes().first() == Some(&0)
+}
+
+/// Mark a line as NOP by clearing it and writing a NUL sentinel byte.
+/// Reuses the existing String allocation rather than allocating a new string.
+#[inline]
+fn mark_nop(line: &mut String) {
+    line.clear();
+    line.push('\0');
+}
+
 /// Run peephole optimization on x86-64 assembly text.
 /// Returns the optimized assembly string.
 pub fn peephole_optimize(asm: String) -> String {
@@ -40,7 +74,7 @@ pub fn peephole_optimize(asm: String) -> String {
     }
 
     // Remove NOP markers and rebuild
-    lines.retain(|l| l != "<<NOP>>");
+    lines.retain(|l| !is_nop(l));
 
     let mut result = String::with_capacity(asm.len());
     for line in &lines {
@@ -58,19 +92,19 @@ fn eliminate_redundant_store_load(lines: &mut [String]) -> bool {
     let len = lines.len();
 
     for i in 0..len.saturating_sub(1) {
-        if lines[i] == "<<NOP>>" || lines[i + 1] == "<<NOP>>" {
+        if is_nop(&lines[i]) || is_nop(&lines[i + 1]) {
             continue;
         }
 
-        let store_line = lines[i].trim();
-        let load_line = lines[i + 1].trim();
+        let store_line = trim_asm(&lines[i]);
+        let load_line = trim_asm(&lines[i + 1]);
 
         // Check: movX %reg, offset(%rbp) followed by movX offset(%rbp), %reg
         if let Some((store_reg, store_offset, store_size)) = parse_store_to_rbp(store_line) {
             if let Some((load_offset, load_reg, load_size)) = parse_load_from_rbp(load_line) {
                 if store_offset == load_offset && store_reg == load_reg && store_size == load_size {
                     // The register already has the value; remove the load
-                    lines[i + 1] = "<<NOP>>".to_string();
+                    mark_nop(&mut lines[i + 1]);
                     changed = true;
                 }
             }
@@ -87,12 +121,12 @@ fn eliminate_store_load_different_reg(lines: &mut [String]) -> bool {
     let len = lines.len();
 
     for i in 0..len.saturating_sub(1) {
-        if lines[i] == "<<NOP>>" || lines[i + 1] == "<<NOP>>" {
+        if is_nop(&lines[i]) || is_nop(&lines[i + 1]) {
             continue;
         }
 
-        let store_line = lines[i].trim();
-        let load_line = lines[i + 1].trim();
+        let store_line = trim_asm(&lines[i]);
+        let load_line = trim_asm(&lines[i + 1]);
 
         if let Some((store_reg, store_offset, store_size)) = parse_store_to_rbp(store_line) {
             if let Some((load_offset, load_reg, load_size)) = parse_load_from_rbp(load_line) {
@@ -121,25 +155,25 @@ fn eliminate_redundant_jumps(lines: &mut [String]) -> bool {
     let len = lines.len();
 
     for i in 0..len.saturating_sub(1) {
-        if lines[i] == "<<NOP>>" {
+        if is_nop(&lines[i]) {
             continue;
         }
 
-        let jmp_line = lines[i].trim();
+        let jmp_line = trim_asm(&lines[i]);
 
         // Parse: jmp LABEL
         if let Some(target) = jmp_line.strip_prefix("jmp ") {
             let target = target.trim();
             // Find the next non-NOP, non-empty line
             for j in (i + 1)..len {
-                let next = lines[j].trim();
-                if next.is_empty() || next == "<<NOP>>" {
+                let next = trim_asm(&lines[j]);
+                if next.is_empty() || is_nop(&lines[j]) {
                     continue;
                 }
                 // Check if it's the target label
                 if let Some(label) = next.strip_suffix(':') {
                     if label == target {
-                        lines[i] = "<<NOP>>".to_string();
+                        mark_nop(&mut lines[i]);
                         changed = true;
                     }
                 }
@@ -159,11 +193,11 @@ fn eliminate_push_pop_pairs(lines: &mut [String]) -> bool {
     let len = lines.len();
 
     for i in 0..len.saturating_sub(2) {
-        if lines[i] == "<<NOP>>" {
+        if is_nop(&lines[i]) {
             continue;
         }
 
-        let push_line = lines[i].trim();
+        let push_line = trim_asm(&lines[i]);
 
         // Parse: pushq %REG
         if let Some(push_reg) = push_line.strip_prefix("pushq ") {
@@ -174,10 +208,10 @@ fn eliminate_push_pop_pairs(lines: &mut [String]) -> bool {
 
             // Look for the matching popq within a small window
             for j in (i + 1)..std::cmp::min(i + 4, len) {
-                if lines[j] == "<<NOP>>" {
+                if is_nop(&lines[j]) {
                     continue;
                 }
-                let line = lines[j].trim();
+                let line = trim_asm(&lines[j]);
 
                 // Check for matching pop
                 if let Some(pop_reg) = line.strip_prefix("popq ") {
@@ -186,18 +220,18 @@ fn eliminate_push_pop_pairs(lines: &mut [String]) -> bool {
                         // Check that intermediate instructions don't modify the pushed register
                         let mut safe = true;
                         for k in (i + 1)..j {
-                            if lines[k] == "<<NOP>>" {
+                            if is_nop(&lines[k]) {
                                 continue;
                             }
-                            if instruction_modifies_reg(lines[k].trim(), push_reg) {
+                            if instruction_modifies_reg(trim_asm(&lines[k]), push_reg) {
                                 safe = false;
                                 break;
                             }
                         }
                         if safe {
                             // Remove push and pop, keep intermediates
-                            lines[i] = "<<NOP>>".to_string();
-                            lines[j] = "<<NOP>>".to_string();
+                            mark_nop(&mut lines[i]);
+                            mark_nop(&mut lines[j]);
                             changed = true;
                         }
                     }
@@ -236,12 +270,12 @@ fn eliminate_binop_push_pop_pattern(lines: &mut [String]) -> bool {
     let mut i = 0;
     while i + 3 < len {
         // Skip NOPs
-        if lines[i] == "<<NOP>>" {
+        if is_nop(&lines[i]) {
             i += 1;
             continue;
         }
 
-        let push_line = lines[i].trim().to_string();
+        let push_line = trim_asm(&lines[i]);
 
         // Match: pushq %REG
         if let Some(push_reg) = push_line.strip_prefix("pushq ") {
@@ -251,24 +285,26 @@ fn eliminate_binop_push_pop_pattern(lines: &mut [String]) -> bool {
                 continue;
             }
 
-            // Find next 3 non-NOP lines after push
-            let mut real_indices = Vec::new();
+            // Find next 3 non-NOP lines after push (use fixed-size array)
+            let mut real_indices = [0usize; 3];
+            let mut count = 0;
             let mut j = i + 1;
-            while j < len && real_indices.len() < 3 {
-                if lines[j] != "<<NOP>>" {
-                    real_indices.push(j);
+            while j < len && count < 3 {
+                if !is_nop(&lines[j]) {
+                    real_indices[count] = j;
+                    count += 1;
                 }
                 j += 1;
             }
 
-            if real_indices.len() == 3 {
+            if count == 3 {
                 let load_idx = real_indices[0];
                 let move_idx = real_indices[1];
                 let pop_idx = real_indices[2];
 
-                let load_line = lines[load_idx].trim().to_string();
-                let move_line = lines[move_idx].trim().to_string();
-                let pop_line = lines[pop_idx].trim().to_string();
+                let load_line = trim_asm(&lines[load_idx]);
+                let move_line = trim_asm(&lines[move_idx]);
+                let pop_line = trim_asm(&lines[pop_idx]);
 
                 // Check: the load instruction writes to push_reg
                 // (e.g., `movq -8(%rbp), %rax` or `movq $5, %rax`)
@@ -278,16 +314,16 @@ fn eliminate_binop_push_pop_pattern(lines: &mut [String]) -> bool {
                     let pop_reg = pop_reg.trim();
                     if pop_reg == push_reg {
                         // Check the move: `movq %push_reg, %other`
-                        if let Some(move_target) = parse_reg_to_reg_move(&move_line, push_reg) {
+                        if let Some(move_target) = parse_reg_to_reg_move(move_line, push_reg) {
                             // Check the load writes to push_reg and can be safely redirected
-                            if instruction_writes_to(&load_line, push_reg) && can_redirect_instruction(&load_line) {
+                            if instruction_writes_to(load_line, push_reg) && can_redirect_instruction(load_line) {
                                 // Transform: replace load's destination with move_target,
                                 // remove the push, move, and pop
-                                if let Some(new_load) = replace_dest_register(&load_line, push_reg, move_target) {
-                                    lines[i] = "<<NOP>>".to_string(); // push
+                                if let Some(new_load) = replace_dest_register(load_line, push_reg, move_target) {
+                                    mark_nop(&mut lines[i]); // push
                                     lines[load_idx] = format!("    {}", new_load); // redirected load
-                                    lines[move_idx] = "<<NOP>>".to_string(); // move
-                                    lines[pop_idx] = "<<NOP>>".to_string(); // pop
+                                    mark_nop(&mut lines[move_idx]); // move
+                                    mark_nop(&mut lines[pop_idx]); // pop
                                     changed = true;
                                     i = pop_idx + 1;
                                     continue;
@@ -337,16 +373,15 @@ fn instruction_writes_to(inst: &str, reg: &str) -> bool {
 /// Check if an instruction can have its destination register replaced safely.
 /// Some instructions have encoding restrictions (e.g., certain forms of movabs).
 fn can_redirect_instruction(inst: &str) -> bool {
-    let trimmed = inst.trim();
     // movabsq with immediate can technically take any GPR, but some assembler
     // versions have issues. Also skip any instruction that references memory
     // through %rax (like `movq (%rax), %rax`) since %rax would need to be
     // preserved for the address computation.
-    if trimmed.starts_with("movabsq ") {
+    if inst.starts_with("movabsq ") {
         return false;
     }
     // Skip inline asm or anything unusual
-    if trimmed.starts_with(".") || trimmed.ends_with(":") {
+    if inst.starts_with(".") || inst.ends_with(":") {
         return false;
     }
     true
@@ -408,9 +443,12 @@ fn replace_dest_register(inst: &str, old_reg: &str, new_reg: &str) -> Option<Str
 fn eliminate_redundant_movq_self(lines: &mut [String]) -> bool {
     let mut changed = false;
     for line in lines.iter_mut() {
-        let trimmed = line.trim();
+        if is_nop(line) {
+            continue;
+        }
+        let trimmed = trim_asm(line);
         if is_self_move(trimmed) {
-            *line = "<<NOP>>".to_string();
+            mark_nop(line);
             changed = true;
         }
     }
@@ -443,7 +481,7 @@ fn instruction_modifies_reg(inst: &str, reg: &str) -> bool {
     // The destination is the LAST operand.
 
     // Skip empty/NOP/labels/directives
-    if inst.is_empty() || inst == "<<NOP>>" || inst.ends_with(':') || inst.starts_with('.') {
+    if inst.is_empty() || is_nop(inst) || inst.ends_with(':') || inst.starts_with('.') {
         return false;
     }
 
@@ -500,28 +538,30 @@ fn fuse_compare_and_branch(lines: &mut [String]) -> bool {
 
     let mut i = 0;
     while i < len {
-        if lines[i] == "<<NOP>>" {
+        if is_nop(&lines[i]) {
             i += 1;
             continue;
         }
 
-        // Collect the next non-NOP lines starting from i (up to 8)
-        let mut seq_indices: Vec<usize> = Vec::with_capacity(8);
+        // Collect the next non-NOP lines starting from i (up to 8, fixed-size array)
+        let mut seq_indices = [0usize; 8];
+        let mut seq_count = 0;
         let mut j = i;
-        while j < len && seq_indices.len() < 8 {
-            if lines[j] != "<<NOP>>" {
-                seq_indices.push(j);
+        while j < len && seq_count < 8 {
+            if !is_nop(&lines[j]) {
+                seq_indices[seq_count] = j;
+                seq_count += 1;
             }
             j += 1;
         }
 
-        if seq_indices.len() < 4 {
+        if seq_count < 4 {
             i += 1;
             continue;
         }
 
         // Try to match the pattern starting with a cmp/test instruction
-        let cmp_line = lines[seq_indices[0]].trim();
+        let cmp_line = trim_asm(&lines[seq_indices[0]]);
 
         // Must be a comparison or test instruction that sets flags
         let is_cmp = cmp_line.starts_with("cmpq ") || cmp_line.starts_with("cmpl ")
@@ -536,7 +576,7 @@ fn fuse_compare_and_branch(lines: &mut [String]) -> bool {
         }
 
         // Look for setCC as the next instruction
-        let set_line = lines[seq_indices[1]].trim();
+        let set_line = trim_asm(&lines[seq_indices[1]]);
         let cc = parse_setcc(set_line);
         if cc.is_none() {
             i += 1;
@@ -555,8 +595,8 @@ fn fuse_compare_and_branch(lines: &mut [String]) -> bool {
 
         let mut test_idx = None;
         let mut scan = 2; // start after setCC
-        while scan < seq_indices.len() {
-            let line = lines[seq_indices[scan]].trim();
+        while scan < seq_count {
+            let line = trim_asm(&lines[seq_indices[scan]]);
             // Skip movzbq %al, %rax (zero-extend of the setcc result)
             if line.starts_with("movzbq %al,") || line.starts_with("movzbl %al,") {
                 scan += 1;
@@ -598,11 +638,11 @@ fn fuse_compare_and_branch(lines: &mut [String]) -> bool {
         let test_scan = test_idx.unwrap();
 
         // After testq, we need jne or je
-        if test_scan + 1 >= seq_indices.len() {
+        if test_scan + 1 >= seq_count {
             i += 1;
             continue;
         }
-        let jmp_line = lines[seq_indices[test_scan + 1]].trim();
+        let jmp_line = trim_asm(&lines[seq_indices[test_scan + 1]]);
         let (is_jne, branch_target) = if let Some(target) = jmp_line.strip_prefix("jne ") {
             (true, target.trim())
         } else if let Some(target) = jmp_line.strip_prefix("je ") {
@@ -621,7 +661,7 @@ fn fuse_compare_and_branch(lines: &mut [String]) -> bool {
 
         // NOP out everything from setCC through testq, replace testq+1 (the jne/je) with jCC
         for s in 1..=test_scan {
-            lines[seq_indices[s]] = "<<NOP>>".to_string();
+            mark_nop(&mut lines[seq_indices[s]]);
         }
         lines[seq_indices[test_scan + 1]] = fused_jcc;
 
@@ -695,31 +735,31 @@ fn forward_store_load_non_adjacent(lines: &mut [String]) -> bool {
     const WINDOW: usize = 20;
 
     for i in 0..len {
-        if lines[i] == "<<NOP>>" {
+        if is_nop(&lines[i]) {
             continue;
         }
 
-        let store_line = lines[i].trim().to_string();
-
-        // Check if this is a store to rbp
-        let store_info = parse_store_to_rbp(&store_line);
+        // Parse store info from the trimmed line, then extract small owned copies
+        // of register and offset (avoids cloning the entire line)
+        let trimmed_i = trim_asm(&lines[i]);
+        let store_info = parse_store_to_rbp(trimmed_i);
         if store_info.is_none() {
             continue;
         }
-        let (store_reg, store_offset, store_size) = store_info.unwrap();
-        let store_reg = store_reg.to_string();
-        let store_offset = store_offset.to_string();
+        let (sr, so, store_size) = store_info.unwrap();
+        let store_reg = sr.to_string();
+        let store_offset = so.to_string();
 
         // Scan forward for loads from the same offset
         let mut reg_still_valid = true;
         let end = std::cmp::min(i + WINDOW, len);
 
         for j in (i + 1)..end {
-            if lines[j] == "<<NOP>>" {
+            if is_nop(&lines[j]) {
                 continue;
             }
 
-            let line = lines[j].trim().to_string();
+            let line = trim_asm(&lines[j]);
 
             // If we hit a label, call, jump, or ret, stop scanning
             if line.ends_with(':') || line.starts_with("call")
@@ -740,7 +780,7 @@ fn forward_store_load_non_adjacent(lines: &mut [String]) -> bool {
             }
 
             // Check if this line is another store to the same offset (kills forwarding)
-            if let Some((_, other_offset, _)) = parse_store_to_rbp(&line) {
+            if let Some((_, other_offset, _)) = parse_store_to_rbp(line) {
                 if other_offset == store_offset {
                     break; // The slot was overwritten
                 }
@@ -748,11 +788,11 @@ fn forward_store_load_non_adjacent(lines: &mut [String]) -> bool {
 
             // Check if this is a load from the same offset BEFORE checking
             // register modifications (since the load itself writes the dest register)
-            if let Some((load_offset, load_reg, load_size)) = parse_load_from_rbp(&line) {
+            if let Some((load_offset, load_reg, load_size)) = parse_load_from_rbp(line) {
                 if load_offset == store_offset && load_size == store_size && reg_still_valid {
                     if load_reg == store_reg {
                         // Same register: the load is entirely redundant
-                        lines[j] = "<<NOP>>".to_string();
+                        mark_nop(&mut lines[j]);
                         changed = true;
                         continue;
                     } else {
@@ -772,7 +812,7 @@ fn forward_store_load_non_adjacent(lines: &mut [String]) -> bool {
             }
 
             // Check if this instruction modifies the source register
-            if reg_still_valid && instruction_modifies_reg(&line, &store_reg) {
+            if reg_still_valid && instruction_modifies_reg(line, &store_reg) {
                 reg_still_valid = false;
             }
         }
@@ -793,27 +833,27 @@ fn eliminate_redundant_cltq(lines: &mut [String]) -> bool {
     let len = lines.len();
 
     for i in 0..len.saturating_sub(1) {
-        if lines[i] == "<<NOP>>" || lines[i + 1] == "<<NOP>>" {
+        if is_nop(&lines[i]) || is_nop(&lines[i + 1]) {
             continue;
         }
 
-        let curr_is_cltq = lines[i + 1].trim() == "cltq";
+        let curr_is_cltq = trim_asm(&lines[i + 1]) == "cltq";
         if !curr_is_cltq {
             continue;
         }
 
-        let prev = lines[i].trim();
+        let prev = trim_asm(&lines[i]);
 
         // movslq already sign-extends to 64-bit, so following cltq is redundant
         if prev.starts_with("movslq ") && prev.contains("%rax") {
-            lines[i + 1] = "<<NOP>>".to_string();
+            mark_nop(&mut lines[i + 1]);
             changed = true;
             continue;
         }
 
         // movq $IMM, %rax followed by cltq is also redundant (constant already full-width)
         if prev.starts_with("movq $") && prev.ends_with("%rax") {
-            lines[i + 1] = "<<NOP>>".to_string();
+            mark_nop(&mut lines[i + 1]);
             changed = true;
         }
     }
@@ -831,17 +871,20 @@ fn eliminate_dead_stores(lines: &mut [String]) -> bool {
     const WINDOW: usize = 16;
 
     for i in 0..len {
-        if lines[i] == "<<NOP>>" {
+        if is_nop(&lines[i]) {
             continue;
         }
 
-        let store_line = lines[i].trim().to_string();
-        let store_info = parse_store_to_rbp(&store_line);
+        let trimmed_i = trim_asm(&lines[i]);
+        let store_info = parse_store_to_rbp(trimmed_i);
         if store_info.is_none() {
             continue;
         }
-        let (_, store_offset, _) = store_info.unwrap();
-        let store_offset = store_offset.to_string();
+        let (_, so, _) = store_info.unwrap();
+        let store_offset = so.to_string();
+
+        // Pre-compute the slot pattern once outside the inner loop
+        let slot_pattern = format!("{}(%rbp)", store_offset);
 
         // Scan forward to see if the slot is read before being overwritten
         let end = std::cmp::min(i + WINDOW, len);
@@ -849,24 +892,24 @@ fn eliminate_dead_stores(lines: &mut [String]) -> bool {
         let mut slot_overwritten = false;
 
         for j in (i + 1)..end {
-            if lines[j] == "<<NOP>>" {
+            if is_nop(&lines[j]) {
                 continue;
             }
 
-            let line = lines[j].trim().to_string();
+            let line = trim_asm(&lines[j]);
 
             // If we hit a label/call/jump/ret, the slot might be read later
             if line.ends_with(':') || line.starts_with("call")
                 || line.starts_with("jmp ") || line == "ret"
                 || line.starts_with(".")
-                || is_conditional_jump(&line)
+                || is_conditional_jump(line)
             {
                 slot_read = true; // conservatively assume the slot may be read
                 break;
             }
 
             // Check if this loads from the same offset (slot is read)
-            if let Some((load_offset, _, _)) = parse_load_from_rbp(&line) {
+            if let Some((load_offset, _, _)) = parse_load_from_rbp(line) {
                 if load_offset == store_offset {
                     slot_read = true;
                     break;
@@ -874,7 +917,7 @@ fn eliminate_dead_stores(lines: &mut [String]) -> bool {
             }
 
             // Check if another store to the same offset (slot overwritten before read)
-            if let Some((_, other_offset, _)) = parse_store_to_rbp(&line) {
+            if let Some((_, other_offset, _)) = parse_store_to_rbp(line) {
                 if other_offset == store_offset {
                     slot_overwritten = true;
                     break;
@@ -885,15 +928,14 @@ fn eliminate_dead_stores(lines: &mut [String]) -> bool {
             // (e.g., leaq -24(%rbp), %rax or movslq -24(%rbp), %rax)
             // This is a conservative catch-all for non-standard access patterns.
             // Exclude stores (already handled above) and loads (already handled above).
-            let slot_pattern = format!("{}(%rbp)", store_offset);
-            if line.contains(&slot_pattern) {
+            if line.contains(slot_pattern.as_str()) {
                 slot_read = true;
                 break;
             }
         }
 
         if slot_overwritten && !slot_read {
-            lines[i] = "<<NOP>>".to_string();
+            mark_nop(&mut lines[i]);
             changed = true;
         }
     }
