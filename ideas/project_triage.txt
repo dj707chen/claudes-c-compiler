@@ -4,87 +4,53 @@ Project Verification Triage
 Status of all 16 verification targets as of 2026-01-25.
 Failures are based on running verify_*.py scripts.
 
-PASSING (no action needed):
+PASSING (12):
   - zlib:          PASS (all backends)
-  - libuv:         PASS (all backends)
-  - libffi:        PASS (all backends)
+  - lua:           PASS (all backends)
+  - libsodium:     PASS (all backends — fixed GEP fold i128 bug)
+  - mquickjs:      PASS (all backends)
+  - libpng:        PASS (all backends)
   - libjpeg-turbo: PASS (all backends)
+  - sqlite:        PASS (all backends, 622/622 sqllogictest)
+  - libuv:         PASS (all backends)
+  - redis:         PASS (all backends)
+  - libffi:        PASS (all backends)
+  - musl:          PASS (all backends)
+  - tcc:           PASS (all backends)
 
-FAILING — needs investigation and fixes:
-
-  lua:
-    Status: FAIL (all backends)
-    Notes: Was previously passing per README. Likely a regression.
-    Action: Bisect recent commits to find which change broke it.
-
+PARTIAL:
   mbedtls:
-    Status: FAIL (x86 fails, arm fails; times out on some backends)
-    Notes: Was previously passing per README. Possible regression or timeout issue.
-    Action: Check for runtime hang (possible LICM or codegen regression). Debug x86 first.
+    Status: PARTIAL (4/7 tests pass; ECP and RSA tests fail)
+    Notes: md5, sha256, sha512, aes pass. rsa, ecp fail (exit=1).
+           Self-test reports 5 test suite failures: ECP SW test
+           and ECJPAKE handshake. Likely a codegen bug in big-integer
+           or modular arithmetic used by RSA/ECP.
+    Action: Debug RSA test first (simpler). Compare assembly for
+            mbedtls_mpi_mul_mpi against GCC output.
 
-  libpng:
-    Status: FAIL (all backends)
-    Notes: Was previously passing per README. Depends on zlib which still passes.
-    Action: Investigate build or test failure; may be related to lua/mbedtls regression.
-
+FAILING:
   jq:
     Status: FAIL / TIMEOUT (all backends)
-    Notes: Was previously passing per README. Times out during build or test.
-    Action: Check for infinite loop in generated code or compile-time hang.
+    Notes: Build times out after 60 seconds. Likely a compile-time
+           hang in a large function (e.g., jv_print or parse).
+    Action: Identify which file/function causes the hang. May be
+            LICM or another optimization pass running in O(n^2).
 
-  sqlite:
-    Status: FAIL / TIMEOUT (all backends)
-    Notes: Was previously passing per README. Times out during build or test.
-    Action: Likely same root cause as jq — possible LICM or optimization regression causing hangs.
-
-  redis:
+  liburing:
     Status: FAIL (all backends)
-    Notes: Was previously passing per README.
-    Action: Investigate build/link/runtime failure.
+    Notes: Builds but all 5 runtime tests fail. io_uring_queue_init
+           returns -1 (EPERM). This is likely a Docker/kernel limitation
+           rather than a compiler bug.
+    Action: Low priority. Verify by running the test with GCC-compiled
+            binary — if it also fails, this is an environment issue.
 
   postgres:
     Status: FAIL (all backends)
-    Notes: Was previously PARTIAL (build succeeded, initdb failed). May have regressed further.
-    Action: Low priority — was never fully passing. Fix other regressions first.
-
-  libsodium:
-    Status: FAIL (all backends)
-    Notes: Was previously passing per README.
-    Action: Investigate; may share root cause with other regressions.
-
-  mquickjs:
-    Status: FAIL (all backends)
-    Notes: Was previously passing per README.
-    Action: Investigate; may share root cause with other regressions.
-
-  liburing:
-    Status: FAIL (x86)
-    Notes: Was previously PARTIAL (builds but tests need kernel support). x86 now fails.
-    Action: Low priority — check if build itself broke.
-
-  tcc:
-    Status: FAIL / TIMEOUT (all backends)
-    Notes: Was previously passing per README. Known LICM regression (commit 7bd1987)
-           causes TCC binary to hang. verify_tcc.py is blocked by this.
-    Action: Fix the LICM regression. This is documented and likely affects other projects too.
-
-  musl:
-    Status: PARTIAL (not listed in current failures; build+link works)
-    Notes: Hello test passes, some stdio tests fail. malloc works (register asm variable fix).
-    Action: Fix stdio printf output issues. Lower priority than full regressions above.
-
-COMMON THEMES:
-  - Multiple projects that were previously passing now fail or timeout.
-  - The LICM regression (commit 7bd1987) documented in the TCC notes may be a
-    root cause for timeouts in jq, sqlite, and tcc.
-  - Many failures are likely regressions from recent optimization/codegen changes.
-  - Recommended approach: fix the LICM regression first, then re-test all projects
-    to see how many are restored.
+    Notes: Builds successfully. initdb fails at runtime.
+    Action: Debug initdb crash. Compare with GCC-compiled initdb.
 
 PRIORITY ORDER for fixing:
-  1. Fix LICM regression (unblocks tcc, possibly jq, sqlite)
-  2. Fix lua (small project, easy to debug)
-  3. Fix libsodium, mquickjs (were fully passing)
-  4. Fix mbedtls, libpng, redis (were fully passing)
-  5. Fix jq, sqlite timeouts (if not fixed by LICM fix)
-  6. Improve postgres, liburing, musl (were only partial)
+  1. Fix mbedtls ECP/RSA (close to passing, already partially works)
+  2. Fix jq compile-time hang (likely optimization issue)
+  3. Fix postgres initdb (complex, low priority)
+  4. Verify liburing is an environment issue

@@ -88,11 +88,23 @@ fn build_gep_fold_map(func: &IrFunction, use_counts: &[u32]) -> FxHashMap<u32, G
     for block in &func.blocks {
         for inst in &block.instructions {
             match inst {
-                // Load.ptr is foldable — skip entirely (no Operand uses).
-                Instruction::Load { .. } => {}
+                // Load.ptr is foldable — UNLESS the load type is i128/u128,
+                // because the i128 load path in generate_instruction doesn't
+                // support GEP folding and falls through to emit_load which
+                // expects the pointer value to have been computed.
+                Instruction::Load { ptr, ty, .. } => {
+                    if matches!(ty, IrType::I128 | IrType::U128) {
+                        mark_non_ptr(ptr.0);
+                    }
+                }
                 // Store.ptr is foldable, but Store.val is an Operand that is NOT foldable.
-                Instruction::Store { val, .. } => {
+                // Also invalidate if the store type is i128/u128, for the same
+                // reason as Load above: the i128 store path doesn't fold GEPs.
+                Instruction::Store { val, ptr, ty } => {
                     if let Operand::Value(v) = val { mark_non_ptr(v.0); }
+                    if matches!(ty, IrType::I128 | IrType::U128) {
+                        mark_non_ptr(ptr.0);
+                    }
                 }
                 // All other instructions: any reference invalidates folding.
                 _ => {

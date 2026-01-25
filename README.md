@@ -80,21 +80,21 @@ See `git log` for full history. Key milestones:
 | Project | Status | Notes |
 |---------|--------|-------|
 | zlib | PASS | Build + self-test + minigzip roundtrip all pass |
-| libuv | PASS | All 7 tests pass (version, loop, timer, idle, async, tcp_bind, fs) |
-| libffi | PASS | All 6 tests pass (call_int, call_double, call_pointer, call_void, call_many_args, closure) |
+| lua | PASS | All 6 tests pass (version, math, strings, tables, functions, bytecode) |
+| libsodium | PASS | All 7 tests pass (init, random, sha256, secretbox, sign, box, generichash) |
+| mquickjs | PASS | All 5 tests pass (closure, language, loop, builtin, bytecode roundtrip) |
+| libpng | PASS | pngtest passes |
 | libjpeg-turbo | PASS | Builds; cjpeg/djpeg roundtrip and jpegtran pass |
-| lua | FAIL | Fails all backends (was passing; regression) |
-| mbedtls | FAIL | x86 fails, arm fails; times out on some backends (was passing; regression) |
-| libpng | FAIL | Fails all backends (was passing; regression) |
-| jq | FAIL | Times out all backends (was passing; likely LICM regression) |
-| sqlite | FAIL | Times out all backends (was passing; likely LICM regression) |
-| redis | FAIL | Fails all backends (was passing; regression) |
-| libsodium | FAIL | Fails all backends (was passing; regression) |
-| mquickjs | FAIL | Fails all backends (was passing; regression) |
-| tcc | FAIL | Fails/times out all backends; known LICM regression (7bd1987) causes hangs |
-| liburing | FAIL | x86 fails (was partial — builds but tests need kernel support) |
-| postgres | FAIL | Fails all backends (was partial — build succeeded, initdb failed) |
-| musl | PARTIAL | Builds and links; hello test passes. stdio printf output missing in some tests |
+| sqlite | PASS | All 622 sqllogictest tests pass |
+| libuv | PASS | All 7 tests pass (version, loop, timer, idle, async, tcp_bind, fs) |
+| redis | PASS | All 3 tests pass (version, cli version, SET/GET roundtrip) |
+| libffi | PASS | All 6 tests pass (call_int, call_double, call_pointer, call_void, call_many_args, closure) |
+| musl | PASS | All 6 tests pass (hello, malloc, string_ops, math, io, environ) |
+| tcc | PASS | All 78 tests pass (version, hello world, tests2 suite) |
+| mbedtls | PARTIAL | 4/7 pass; ECP and RSA tests fail (self-test and individual tests) |
+| jq | FAIL | Build times out (likely LICM-related compile-time hang) |
+| liburing | FAIL | Builds but all 5 runtime tests fail (io_uring init returns -1) |
+| postgres | FAIL | Builds but initdb fails at runtime |
 
 See `ideas/project_triage.txt` for detailed failure analysis and fix priorities.
 
