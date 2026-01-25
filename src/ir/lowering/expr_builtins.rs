@@ -320,6 +320,29 @@ impl Lowerer {
                 };
                 Some(Operand::Const(IrConst::I64(result)))
             }
+            // __builtin_object_size(ptr, type) -> compile-time object size, or unknown
+            // For types 0 and 1: return (size_t)-1 when size is unknown
+            // For types 2 and 3: return 0 when size is unknown
+            // We conservatively return "unknown" since we don't do points-to analysis.
+            BuiltinIntrinsic::ObjectSize => {
+                // Evaluate args for side effects
+                for arg in args {
+                    self.lower_expr(arg);
+                }
+                let obj_type = if args.len() >= 2 {
+                    match self.eval_const_expr(&args[1]) {
+                        Some(IrConst::I64(v)) => v,
+                        Some(IrConst::I32(v)) => v as i64,
+                        _ => 0,
+                    }
+                } else {
+                    0
+                };
+                // Types 0 and 1: maximum estimate -> -1 (unknown)
+                // Types 2 and 3: minimum estimate -> 0 (unknown)
+                let result = if obj_type == 2 || obj_type == 3 { 0i64 } else { -1i64 };
+                Some(Operand::Const(IrConst::I64(result)))
+            }
             // Nop intrinsic - just evaluate args for side effects and return 0
             BuiltinIntrinsic::Nop => {
                 for arg in args {

@@ -101,6 +101,7 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
 
     // Type queries (compile-time constants)
     m.insert("__builtin_constant_p", BuiltinInfo::intrinsic(BuiltinIntrinsic::ConstantP));
+    m.insert("__builtin_object_size", BuiltinInfo::intrinsic(BuiltinIntrinsic::ObjectSize));
     // Note: __builtin_types_compatible_p is handled as a special AST node (BuiltinTypesCompatibleP),
     // parsed directly in the parser and evaluated at compile-time in the lowerer.
 
@@ -335,6 +336,8 @@ pub enum BuiltinIntrinsic {
     VaCopy,
     /// __builtin_constant_p(expr) -> 1 if expr is a compile-time constant, 0 otherwise
     ConstantP,
+    /// __builtin_object_size(ptr, type) -> size of object ptr points to, or -1/0 if unknown
+    ObjectSize,
     /// No-op builtin (evaluates args, returns 0)
     Nop,
     /// __builtin_add_overflow(a, b, result_ptr) -> bool (1 if overflow)
