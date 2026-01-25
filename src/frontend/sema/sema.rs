@@ -184,8 +184,10 @@ impl SemanticAnalyzer {
             is_defined: true,
         });
 
-        // Push scope for function body
+        // Push scope for function body (both symbol table and type context,
+        // so local struct/union definitions don't overwrite global layouts)
         self.symbol_table.push_scope();
+        self.result.type_context.push_scope();
 
         // Declare parameters in function scope
         for param in &func.params {
@@ -205,6 +207,7 @@ impl SemanticAnalyzer {
         self.analyze_compound_stmt(&func.body);
 
         // Pop function scope
+        self.result.type_context.pop_scope();
         self.symbol_table.pop_scope();
     }
 
@@ -489,6 +492,7 @@ impl SemanticAnalyzer {
 
     fn analyze_compound_stmt(&mut self, compound: &CompoundStmt) {
         self.symbol_table.push_scope();
+        self.result.type_context.push_scope();
         for item in &compound.items {
             match item {
                 BlockItem::Declaration(decl) => {
@@ -499,6 +503,7 @@ impl SemanticAnalyzer {
                 }
             }
         }
+        self.result.type_context.pop_scope();
         self.symbol_table.pop_scope();
     }
 
@@ -529,6 +534,7 @@ impl SemanticAnalyzer {
             }
             Stmt::For(init, cond, inc, body, _) => {
                 self.symbol_table.push_scope();
+                self.result.type_context.push_scope();
                 if let Some(init) = init {
                     match init.as_ref() {
                         ForInit::Declaration(decl) => {
@@ -546,6 +552,7 @@ impl SemanticAnalyzer {
                     self.analyze_expr(inc);
                 }
                 self.analyze_stmt(body);
+                self.result.type_context.pop_scope();
                 self.symbol_table.pop_scope();
             }
             Stmt::Compound(compound) => {
@@ -936,7 +943,7 @@ impl type_builder::TypeConvertContext for SemanticAnalyzer {
                     layout.size = (layout.size + mask) & !mask;
                 }
             }
-            self.result.type_context.insert_struct_layout_from_ref(&key, layout);
+            self.result.type_context.insert_struct_layout_scoped_from_ref(&key, layout);
         } else if self.result.type_context.struct_layouts.get(&key).is_none() {
             let layout = StructLayout {
                 fields: Vec::new(),
@@ -945,7 +952,7 @@ impl type_builder::TypeConvertContext for SemanticAnalyzer {
                 is_union,
                 is_transparent_union: false,
             };
-            self.result.type_context.insert_struct_layout_from_ref(&key, layout);
+            self.result.type_context.insert_struct_layout_scoped_from_ref(&key, layout);
         }
         if is_union { CType::Union(key.into()) } else { CType::Struct(key.into()) }
     }
