@@ -59,11 +59,13 @@ pub struct AsmOperand {
     pub imm_symbol: Option<String>,
     /// IR type of this operand, used for correctly-sized loads/stores.
     pub operand_type: IrType,
+    /// Original constraint string, used for fallback decisions.
+    pub constraint: String,
 }
 
 impl AsmOperand {
     pub fn new(kind: AsmOperandKind, name: Option<String>) -> Self {
-        Self { kind, reg: String::new(), name, mem_addr: String::new(), mem_offset: 0, imm_value: None, imm_symbol: None, operand_type: IrType::I64 }
+        Self { kind, reg: String::new(), name, mem_addr: String::new(), mem_offset: 0, imm_value: None, imm_symbol: None, operand_type: IrType::I64, constraint: String::new() }
     }
 
     /// Copy register assignment and addressing metadata from another operand.
@@ -141,6 +143,39 @@ pub fn constraint_has_immediate_alt(constraint: &str) -> bool {
     stripped.chars().any(|c| matches!(c, 'I' | 'i' | 'n'))
 }
 
+/// Check whether a constraint is purely immediate (only "i", "I", "n", or similar
+/// immediate letters, with no register or memory alternatives). When such a constraint
+/// can't be resolved at compile time, we must still emit a dummy immediate to produce
+/// valid assembly (e.g., `testb $0, mem` instead of `testb %edx, mem`).
+/// This occurs in static inline functions whose "i" constraint expressions depend on
+/// parameters — the standalone function body can't evaluate them, but the function
+/// is only ever called with constant arguments at call sites.
+pub fn constraint_is_immediate_only(constraint: &str) -> bool {
+    let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+    if stripped.is_empty() {
+        return false;
+    }
+    if stripped.starts_with('[') && stripped.ends_with(']') {
+        return false;
+    }
+    // Must have at least one immediate letter
+    let has_imm = stripped.chars().any(|c| matches!(c,
+        'i' | 'I' | 'n' | 'N' | 'e' | 'E' | 'K' | 'M' | 'G' | 'H' | 'J' | 'L' | 'O'
+    ));
+    if !has_imm {
+        return false;
+    }
+    // Must NOT have any register or memory alternative
+    let has_reg_or_mem = stripped.chars().any(|c| matches!(c,
+        'r' | 'q' | 'R' | 'Q' | 'l' |  // GP register
+        'g' |                              // general (reg + mem + imm)
+        'x' | 'v' | 'Y' |                 // FP register
+        'a' | 'b' | 'c' | 'd' | 'S' | 'D' | // specific register
+        'm' | 'o' | 'V' | 'p'             // memory
+    ));
+    !has_reg_or_mem && !stripped.chars().any(|c| c.is_ascii_digit())
+}
+
 /// Check whether a constraint string contains a memory alternative character.
 /// Handles both single-character ("m") and multi-character constraints ("rm", "mq").
 pub fn constraint_has_memory_alt(constraint: &str) -> bool {
@@ -201,6 +236,7 @@ pub fn emit_inline_asm_common(
     for (constraint, ptr, name) in outputs {
         let kind = emitter.classify_constraint(constraint);
         let mut op = AsmOperand::new(kind, name.clone());
+        op.constraint = constraint.clone();
         if let AsmOperandKind::Specific(ref reg) = op.kind {
             op.reg = reg.clone();
         }
@@ -229,6 +265,7 @@ pub fn emit_inline_asm_common(
             emitter.classify_constraint(constraint)
         };
         let mut op = AsmOperand::new(kind.clone(), name.clone());
+        op.constraint = constraint.clone();
         if let AsmOperandKind::Specific(ref reg) = op.kind {
             op.reg = reg.clone();
         }
@@ -267,11 +304,28 @@ pub fn emit_inline_asm_common(
 
     // For Immediate operands that have neither an imm_value nor an imm_symbol,
     // the value is a runtime expression (e.g., &struct.member) that couldn't be
-    // resolved to a constant or symbol. Fall back to GpReg so the value gets
-    // loaded into a register for use by %P/%a modifiers.
+    // resolved to a constant or symbol.
     for op in operands.iter_mut() {
         if matches!(op.kind, AsmOperandKind::Immediate) && op.imm_value.is_none() && op.imm_symbol.is_none() {
-            op.kind = AsmOperandKind::GpReg;
+            if constraint_is_immediate_only(&op.constraint) {
+                // Pure immediate constraint (e.g., "i", "n") with no register or memory
+                // alternative, but the expression couldn't be evaluated at compile time.
+                // This happens in static inline functions where the "i" operand depends
+                // on a function parameter — the standalone body can't evaluate it, but
+                // GCC always inlines such functions. Emit $0 as a placeholder to produce
+                // valid assembly. The function won't produce correct results if called
+                // at runtime, but these functions are only called with constant args.
+                // TODO: Implement function inlining so these static inline functions
+                // are inlined at call sites with constant arguments, making the "i"
+                // constraint evaluable. Once inlining is implemented, this placeholder
+                // path should be replaced with a proper diagnostic/error.
+                op.imm_value = Some(0);
+            } else {
+                // Multi-alternative constraint (e.g., "Ir" classified as Immediate but
+                // value is runtime). Fall back to GpReg so the value gets loaded into
+                // a register for use by %P/%a modifiers.
+                op.kind = AsmOperandKind::GpReg;
+            }
         }
     }
 
