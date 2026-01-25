@@ -359,6 +359,12 @@ impl Preprocessor {
         self.define_simple_macro("__alignof", "_Alignof");
         self.define_simple_macro("__alignof__", "_Alignof");
 
+        // GCC named address space qualifiers (x86 segment overrides).
+        // We don't support named address spaces, so define these as empty to strip them.
+        // The Linux kernel uses these when CONFIG_CC_HAS_NAMED_AS is set.
+        self.define_simple_macro("__seg_gs", "");
+        self.define_simple_macro("__seg_fs", "");
+
         // GCC 128-bit float type: map to long double since we don't support true 128-bit floats.
         // glibc headers declare _Float128 functions when __HAVE_FLOAT128 is set
         // (__GNUC_PREREQ(4,3) on x86_64). The header does `typedef __float128 _Float128;`
@@ -775,6 +781,51 @@ impl Preprocessor {
     /// Adds regardless of whether the directory currently exists.
     pub fn add_include_path(&mut self, path: &str) {
         self.include_paths.push(PathBuf::from(path));
+    }
+
+    /// Process a force-included file (-include flag). This preprocesses the file content
+    /// as if it were #include'd at the very beginning of the main source file.
+    /// All #define directives in the file take effect, and the preprocessed output
+    /// is discarded (macros/typedefs persist in the preprocessor state).
+    pub fn preprocess_force_include(&mut self, content: &str, resolved_path: &str) {
+        let resolved = PathBuf::from(resolved_path);
+
+        // Check for #pragma once
+        if self.pragma_once_files.contains(&resolved) {
+            return;
+        }
+
+        // Push onto include stack
+        self.include_stack.push(resolved.clone());
+
+        // Save and set __FILE__
+        let old_file = self.macros.get("__FILE__").map(|m| m.body.clone());
+        self.macros.define(super::macro_defs::MacroDef {
+            name: "__FILE__".to_string(),
+            is_function_like: false,
+            params: Vec::new(),
+            is_variadic: false,
+            body: format!("\"{}\"", resolved.display()),
+            is_predefined: true,
+        });
+
+        // Preprocess the included content (output is discarded, but macros persist)
+        let _output = self.preprocess_included(content);
+
+        // Restore __FILE__
+        if let Some(old) = old_file {
+            self.macros.define(super::macro_defs::MacroDef {
+                name: "__FILE__".to_string(),
+                is_function_like: false,
+                params: Vec::new(),
+                is_variadic: false,
+                body: old,
+                is_predefined: true,
+            });
+        }
+
+        // Pop include stack
+        self.include_stack.pop();
     }
 
     /// Check if a line has unbalanced parentheses, indicating a multi-line

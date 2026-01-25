@@ -54,6 +54,8 @@ pub struct Driver {
     pub nostdlib: bool,
     /// Whether to generate position-independent code (-fPIC/-fpic)
     pub pic: bool,
+    /// Files to force-include before the main source (-include flag)
+    pub force_includes: Vec<String>,
 }
 
 impl Driver {
@@ -76,6 +78,7 @@ impl Driver {
             shared_lib: false,
             nostdlib: false,
             pic: false,
+            force_includes: Vec::new(),
         }
     }
 
@@ -146,6 +149,30 @@ impl Driver {
         }
     }
 
+    /// Process force-included files (-include flag) through the preprocessor before
+    /// the main source. This matches GCC's behavior where -include files are processed
+    /// as if they were #include'd at the top of the source, with paths resolved relative
+    /// to the current working directory (unlike regular #include which resolves relative
+    /// to the source file's directory).
+    fn process_force_includes(&self, preprocessor: &mut Preprocessor) -> Result<(), String> {
+        for path in &self.force_includes {
+            // Resolve relative to CWD (matching GCC behavior)
+            let resolved = std::path::Path::new(path);
+            let resolved = if resolved.is_absolute() {
+                resolved.to_path_buf()
+            } else if let Ok(cwd) = std::env::current_dir() {
+                cwd.join(resolved)
+            } else {
+                resolved.to_path_buf()
+            };
+
+            let content = std::fs::read_to_string(&resolved)
+                .map_err(|e| format!("{}: {}: No such file or directory", path, e))?;
+            preprocessor.preprocess_force_include(&content, &resolved.to_string_lossy());
+        }
+        Ok(())
+    }
+
     fn run_preprocess_only(&self) -> Result<(), String> {
         for input_file in &self.input_files {
             let source = std::fs::read_to_string(input_file)
@@ -154,6 +181,7 @@ impl Driver {
             let mut preprocessor = Preprocessor::new();
             self.configure_preprocessor(&mut preprocessor);
             preprocessor.set_filename(input_file);
+            self.process_force_includes(&mut preprocessor)?;
             let preprocessed = preprocessor.preprocess(&source);
 
             if self.output_path_set {
@@ -276,6 +304,7 @@ impl Driver {
         let mut preprocessor = Preprocessor::new();
         self.configure_preprocessor(&mut preprocessor);
         preprocessor.set_filename(input_file);
+        self.process_force_includes(&mut preprocessor)?;
         let preprocessed = preprocessor.preprocess(&source);
 
         // Lex

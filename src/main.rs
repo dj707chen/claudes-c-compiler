@@ -114,6 +114,17 @@ fn real_main() {
                 driver.add_define(&arg[2..]);
             }
 
+            // Force-include files: -include path (must be before -I matching)
+            "-include" => {
+                i += 1;
+                if i < args.len() {
+                    driver.force_includes.push(args[i].clone());
+                } else {
+                    eprintln!("error: -include requires an argument");
+                    std::process::exit(1);
+                }
+            }
+
             // Include paths: -I path or -Ipath
             "-I" => {
                 i += 1;
