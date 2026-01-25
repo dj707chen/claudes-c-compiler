@@ -24,7 +24,7 @@ pub fn peephole_optimize(asm: String) -> String {
 
     // Run multiple passes since eliminating one pattern may enable another
     let mut pass_count = 0;
-    while changed && pass_count < 5 {
+    while changed && pass_count < 10 {
         changed = false;
         changed |= eliminate_redundant_store_load(&mut lines);
         changed |= eliminate_store_load_different_reg(&mut lines);
@@ -32,6 +32,10 @@ pub fn peephole_optimize(asm: String) -> String {
         changed |= eliminate_push_pop_pairs(&mut lines);
         changed |= eliminate_binop_push_pop_pattern(&mut lines);
         changed |= eliminate_redundant_movq_self(&mut lines);
+        changed |= fuse_compare_and_branch(&mut lines);
+        changed |= forward_store_load_non_adjacent(&mut lines);
+        changed |= eliminate_redundant_cltq(&mut lines);
+        changed |= eliminate_dead_stores(&mut lines);
         pass_count += 1;
     }
 
@@ -471,6 +475,442 @@ fn instruction_modifies_reg(inst: &str, reg: &str) -> bool {
     false
 }
 
+/// Pattern 7: Fuse compare-and-branch sequences.
+///
+/// The codegen produces this sequence for every conditional branch:
+///   cmpX %rcx, %rax       (or cmpl, testq, etc.)
+///   setCC %al              (materialize boolean)
+///   movzbq %al, %rax      (zero-extend to 64-bit)
+///   movq %rax, N(%rbp)    (store boolean to stack)
+///   movq N(%rbp), %rax    (reload boolean -- may already be eliminated)
+///   testq %rax, %rax      (test boolean)
+///   jne .Ltrue             (branch if true)
+///   jmp .Lfalse            (fallthrough to false)
+///
+/// This is replaced with:
+///   cmpX %rcx, %rax
+///   jCC .Ltrue             (direct conditional jump using flags from cmp)
+///   jmp .Lfalse
+///
+/// Also handles the variant where the store/load pair has already been optimized
+/// away (so the sequence is: cmp / setCC / movzbq / testq / jne / jmp).
+fn fuse_compare_and_branch(lines: &mut [String]) -> bool {
+    let mut changed = false;
+    let len = lines.len();
+
+    let mut i = 0;
+    while i < len {
+        if lines[i] == "<<NOP>>" {
+            i += 1;
+            continue;
+        }
+
+        // Collect the next non-NOP lines starting from i (up to 8)
+        let mut seq_indices: Vec<usize> = Vec::with_capacity(8);
+        let mut j = i;
+        while j < len && seq_indices.len() < 8 {
+            if lines[j] != "<<NOP>>" {
+                seq_indices.push(j);
+            }
+            j += 1;
+        }
+
+        if seq_indices.len() < 4 {
+            i += 1;
+            continue;
+        }
+
+        // Try to match the pattern starting with a cmp/test instruction
+        let cmp_line = lines[seq_indices[0]].trim();
+
+        // Must be a comparison or test instruction that sets flags
+        let is_cmp = cmp_line.starts_with("cmpq ") || cmp_line.starts_with("cmpl ")
+            || cmp_line.starts_with("cmpw ") || cmp_line.starts_with("cmpb ")
+            || cmp_line.starts_with("testq ") || cmp_line.starts_with("testl ")
+            || cmp_line.starts_with("testw ") || cmp_line.starts_with("testb ")
+            || cmp_line.starts_with("ucomisd ") || cmp_line.starts_with("ucomiss ");
+
+        if !is_cmp {
+            i += 1;
+            continue;
+        }
+
+        // Look for setCC as the next instruction
+        let set_line = lines[seq_indices[1]].trim();
+        let cc = parse_setcc(set_line);
+        if cc.is_none() {
+            i += 1;
+            continue;
+        }
+        let cc = cc.unwrap();
+
+        // The rest of the pattern can vary depending on what prior peephole
+        // passes have already done. We need to find the testq + jne/je sequence.
+        // Pattern A (full): setCC / movzbq / movq store / movq load / testq / jne / jmp
+        // Pattern B (store/load eliminated): setCC / movzbq / testq / jne / jmp
+        // Pattern C (movzbq+test eliminated too): setCC / movzbq / testq / jne / jmp
+        //
+        // In all cases, after the setCC we look for testq %rax, %rax + jne/je
+        // scanning forward through movzbq and store/load pairs.
+
+        let mut test_idx = None;
+        let mut scan = 2; // start after setCC
+        while scan < seq_indices.len() {
+            let line = lines[seq_indices[scan]].trim();
+            // Skip movzbq %al, %rax (zero-extend of the setcc result)
+            if line.starts_with("movzbq %al,") || line.starts_with("movzbl %al,") {
+                scan += 1;
+                continue;
+            }
+            // Skip store to rbp (storing the boolean)
+            if parse_store_to_rbp(line).is_some() {
+                scan += 1;
+                continue;
+            }
+            // Skip load from rbp (reloading the boolean)
+            if parse_load_from_rbp(line).is_some() {
+                scan += 1;
+                continue;
+            }
+            // Skip cltq (sign-extend eax to rax)
+            if line == "cltq" {
+                scan += 1;
+                continue;
+            }
+            // Skip movslq (sign extend) - also used for the boolean
+            if line.starts_with("movslq ") {
+                scan += 1;
+                continue;
+            }
+            // Check for testq/testl %rax, %rax
+            if line == "testq %rax, %rax" || line == "testl %eax, %eax" {
+                test_idx = Some(scan);
+                break;
+            }
+            // If we hit anything else, the pattern doesn't match
+            break;
+        }
+
+        if test_idx.is_none() {
+            i += 1;
+            continue;
+        }
+        let test_scan = test_idx.unwrap();
+
+        // After testq, we need jne or je
+        if test_scan + 1 >= seq_indices.len() {
+            i += 1;
+            continue;
+        }
+        let jmp_line = lines[seq_indices[test_scan + 1]].trim();
+        let (is_jne, branch_target) = if let Some(target) = jmp_line.strip_prefix("jne ") {
+            (true, target.trim())
+        } else if let Some(target) = jmp_line.strip_prefix("je ") {
+            (false, target.trim())
+        } else {
+            i += 1;
+            continue;
+        };
+
+        // Determine the fused conditional jump opcode.
+        // If the branch is `jne` (branch if condition != 0), use the direct condition.
+        // If the branch is `je` (branch if condition == 0), use the inverted condition.
+        let fused_cc = if is_jne { cc } else { invert_cc(cc) };
+
+        let fused_jcc = format!("    j{} {}", fused_cc, branch_target);
+
+        // NOP out everything from setCC through testq, replace testq+1 (the jne/je) with jCC
+        for s in 1..=test_scan {
+            lines[seq_indices[s]] = "<<NOP>>".to_string();
+        }
+        lines[seq_indices[test_scan + 1]] = fused_jcc;
+
+        changed = true;
+        i = seq_indices[test_scan + 1] + 1;
+    }
+
+    changed
+}
+
+/// Parse a setCC instruction and return the condition code string.
+/// E.g., "sete %al" -> Some("e"), "setl %al" -> Some("l")
+fn parse_setcc(s: &str) -> Option<&str> {
+    if !s.starts_with("set") {
+        return None;
+    }
+    // Handle "setnp %al" and similar two-char conditions first
+    // The format is "setCC %reg" where CC is 1-3 chars
+    let rest = &s[3..]; // skip "set"
+    let space_idx = rest.find(' ')?;
+    let cc = &rest[..space_idx];
+    // Validate it's a known condition code
+    match cc {
+        "e" | "ne" | "l" | "le" | "g" | "ge" | "b" | "be" | "a" | "ae"
+        | "s" | "ns" | "o" | "no" | "p" | "np" | "z" | "nz" => Some(cc),
+        _ => None,
+    }
+}
+
+/// Invert a condition code (e.g., "e" -> "ne", "l" -> "ge")
+fn invert_cc(cc: &str) -> &str {
+    match cc {
+        "e" | "z" => "ne",
+        "ne" | "nz" => "e",
+        "l" => "ge",
+        "ge" => "l",
+        "le" => "g",
+        "g" => "le",
+        "b" => "ae",
+        "ae" => "b",
+        "be" => "a",
+        "a" => "be",
+        "s" => "ns",
+        "ns" => "s",
+        "o" => "no",
+        "no" => "o",
+        "p" => "np",
+        "np" => "p",
+        _ => cc, // fallback, should not happen
+    }
+}
+
+/// Pattern 8: Forward stores to non-adjacent loads from the same rbp offset.
+///
+/// When a value is stored to a stack slot and then loaded from the same slot
+/// several instructions later (not immediately adjacent), we can replace the
+/// load with a register-to-register move if the intervening instructions don't
+/// write to the source register or to the same stack slot.
+///
+/// Example:
+///   movq %rax, -24(%rbp)     # store
+///   ... (instructions that don't modify %rax or -24(%rbp)) ...
+///   movq -24(%rbp), %rax     # load -> eliminated (value is still in %rax)
+///   movq -24(%rbp), %rcx     # load -> replaced with: movq %rax, %rcx
+fn forward_store_load_non_adjacent(lines: &mut [String]) -> bool {
+    let mut changed = false;
+    let len = lines.len();
+    // Look at a window of instructions - track recent stores to rbp slots
+    // The window size limits how far ahead we look. 16 is a reasonable
+    // trade-off between effectiveness and safety.
+    const WINDOW: usize = 20;
+
+    for i in 0..len {
+        if lines[i] == "<<NOP>>" {
+            continue;
+        }
+
+        let store_line = lines[i].trim().to_string();
+
+        // Check if this is a store to rbp
+        let store_info = parse_store_to_rbp(&store_line);
+        if store_info.is_none() {
+            continue;
+        }
+        let (store_reg, store_offset, store_size) = store_info.unwrap();
+        let store_reg = store_reg.to_string();
+        let store_offset = store_offset.to_string();
+
+        // Scan forward for loads from the same offset
+        let mut reg_still_valid = true;
+        let end = std::cmp::min(i + WINDOW, len);
+
+        for j in (i + 1)..end {
+            if lines[j] == "<<NOP>>" {
+                continue;
+            }
+
+            let line = lines[j].trim().to_string();
+
+            // If we hit a label, call, jump, or ret, stop scanning
+            if line.ends_with(':') || line.starts_with("call")
+                || line.starts_with("jmp ") || line.starts_with("je ")
+                || line.starts_with("jne ") || line.starts_with("jl ")
+                || line.starts_with("jle ") || line.starts_with("jg ")
+                || line.starts_with("jge ") || line.starts_with("jb ")
+                || line.starts_with("jbe ") || line.starts_with("ja ")
+                || line.starts_with("jae ") || line.starts_with("js ")
+                || line.starts_with("jns ") || line.starts_with("jo ")
+                || line.starts_with("jno ") || line.starts_with("jp ")
+                || line.starts_with("jnp ") || line.starts_with("jnz ")
+                || line.starts_with("jz ")
+                || line == "ret"
+                || line.starts_with(".")
+            {
+                break;
+            }
+
+            // Check if this line is another store to the same offset (kills forwarding)
+            if let Some((_, other_offset, _)) = parse_store_to_rbp(&line) {
+                if other_offset == store_offset {
+                    break; // The slot was overwritten
+                }
+            }
+
+            // Check if this is a load from the same offset BEFORE checking
+            // register modifications (since the load itself writes the dest register)
+            if let Some((load_offset, load_reg, load_size)) = parse_load_from_rbp(&line) {
+                if load_offset == store_offset && load_size == store_size && reg_still_valid {
+                    if load_reg == store_reg {
+                        // Same register: the load is entirely redundant
+                        lines[j] = "<<NOP>>".to_string();
+                        changed = true;
+                        continue;
+                    } else {
+                        // Different register: replace load with reg-to-reg move
+                        let mov = match store_size {
+                            MoveSize::Q => "movq",
+                            MoveSize::L => "movl",
+                            MoveSize::W => "movw",
+                            MoveSize::B => "movb",
+                            MoveSize::SLQ => "movslq",
+                        };
+                        lines[j] = format!("    {} {}, {}", mov, store_reg, load_reg);
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+
+            // Check if this instruction modifies the source register
+            if reg_still_valid && instruction_modifies_reg(&line, &store_reg) {
+                reg_still_valid = false;
+            }
+        }
+    }
+
+    changed
+}
+
+/// Pattern 9: Eliminate redundant cltq after movslq.
+///
+/// The codegen sometimes produces:
+///   movslq N(%rbp), %rax    (sign-extend 32-bit to 64-bit)
+///   cltq                     (sign-extend eax to rax - redundant!)
+///
+/// The movslq already sign-extends the value to 64 bits, so cltq is a no-op.
+fn eliminate_redundant_cltq(lines: &mut [String]) -> bool {
+    let mut changed = false;
+    let len = lines.len();
+
+    for i in 0..len.saturating_sub(1) {
+        if lines[i] == "<<NOP>>" || lines[i + 1] == "<<NOP>>" {
+            continue;
+        }
+
+        let curr_is_cltq = lines[i + 1].trim() == "cltq";
+        if !curr_is_cltq {
+            continue;
+        }
+
+        let prev = lines[i].trim();
+
+        // movslq already sign-extends to 64-bit, so following cltq is redundant
+        if prev.starts_with("movslq ") && prev.contains("%rax") {
+            lines[i + 1] = "<<NOP>>".to_string();
+            changed = true;
+            continue;
+        }
+
+        // movq $IMM, %rax followed by cltq is also redundant (constant already full-width)
+        if prev.starts_with("movq $") && prev.ends_with("%rax") {
+            lines[i + 1] = "<<NOP>>".to_string();
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+/// Pattern 10: Eliminate dead stores to stack slots.
+///
+/// If a store to a stack slot is followed by another store to the same slot
+/// with no intervening load, the first store is dead and can be eliminated.
+fn eliminate_dead_stores(lines: &mut [String]) -> bool {
+    let mut changed = false;
+    let len = lines.len();
+    const WINDOW: usize = 16;
+
+    for i in 0..len {
+        if lines[i] == "<<NOP>>" {
+            continue;
+        }
+
+        let store_line = lines[i].trim().to_string();
+        let store_info = parse_store_to_rbp(&store_line);
+        if store_info.is_none() {
+            continue;
+        }
+        let (_, store_offset, _) = store_info.unwrap();
+        let store_offset = store_offset.to_string();
+
+        // Scan forward to see if the slot is read before being overwritten
+        let end = std::cmp::min(i + WINDOW, len);
+        let mut slot_read = false;
+        let mut slot_overwritten = false;
+
+        for j in (i + 1)..end {
+            if lines[j] == "<<NOP>>" {
+                continue;
+            }
+
+            let line = lines[j].trim().to_string();
+
+            // If we hit a label/call/jump/ret, the slot might be read later
+            if line.ends_with(':') || line.starts_with("call")
+                || line.starts_with("jmp ") || line == "ret"
+                || line.starts_with(".")
+                || is_conditional_jump(&line)
+            {
+                slot_read = true; // conservatively assume the slot may be read
+                break;
+            }
+
+            // Check if this loads from the same offset (slot is read)
+            if let Some((load_offset, _, _)) = parse_load_from_rbp(&line) {
+                if load_offset == store_offset {
+                    slot_read = true;
+                    break;
+                }
+            }
+
+            // Check if another store to the same offset (slot overwritten before read)
+            if let Some((_, other_offset, _)) = parse_store_to_rbp(&line) {
+                if other_offset == store_offset {
+                    slot_overwritten = true;
+                    break;
+                }
+            }
+
+            // Check for other instructions that reference the slot via rbp
+            // (e.g., leaq -24(%rbp), %rax or movslq -24(%rbp), %rax)
+            // This is a conservative catch-all for non-standard access patterns.
+            // Exclude stores (already handled above) and loads (already handled above).
+            let slot_pattern = format!("{}(%rbp)", store_offset);
+            if line.contains(&slot_pattern) {
+                slot_read = true;
+                break;
+            }
+        }
+
+        if slot_overwritten && !slot_read {
+            lines[i] = "<<NOP>>".to_string();
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+/// Check if a line is a conditional jump instruction.
+fn is_conditional_jump(s: &str) -> bool {
+    s.starts_with("je ") || s.starts_with("jne ") || s.starts_with("jl ")
+        || s.starts_with("jle ") || s.starts_with("jg ") || s.starts_with("jge ")
+        || s.starts_with("jb ") || s.starts_with("jbe ") || s.starts_with("ja ")
+        || s.starts_with("jae ") || s.starts_with("js ") || s.starts_with("jns ")
+        || s.starts_with("jo ") || s.starts_with("jno ") || s.starts_with("jp ")
+        || s.starts_with("jnp ") || s.starts_with("jz ") || s.starts_with("jnz ")
+}
+
 /// Check if two register names overlap (e.g., %eax overlaps with %rax).
 fn register_overlaps(a: &str, b: &str) -> bool {
     if a == b {
@@ -636,5 +1076,137 @@ mod tests {
     fn test_parse_load_from_rbp() {
         assert!(parse_load_from_rbp("movq -8(%rbp), %rax").is_some());
         assert!(parse_load_from_rbp("movslq -8(%rbp), %rax").is_some());
+    }
+
+    #[test]
+    fn test_compare_branch_fusion_full() {
+        // Full pattern: cmp / setl / movzbq / store / load / testq / jne / jmp
+        let asm = [
+            "    cmpq %rcx, %rax",
+            "    setl %al",
+            "    movzbq %al, %rax",
+            "    movq %rax, -24(%rbp)",
+            "    movq -24(%rbp), %rax",
+            "    testq %rax, %rax",
+            "    jne .L2",
+            "    jmp .L4",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("cmpq %rcx, %rax"), "should keep the cmp");
+        assert!(result.contains("jl .L2"), "should fuse to jl: {}", result);
+        assert!(result.contains("jmp .L4"), "should keep the fallthrough jmp");
+        assert!(!result.contains("setl"), "should eliminate setl");
+        assert!(!result.contains("movzbq"), "should eliminate movzbq");
+        assert!(!result.contains("testq"), "should eliminate testq");
+    }
+
+    #[test]
+    fn test_compare_branch_fusion_short() {
+        // Short pattern after prior peephole: cmp / setl / movzbq / testq / jne / jmp
+        // (store/load already eliminated)
+        let asm = [
+            "    cmpq %rcx, %rax",
+            "    setl %al",
+            "    movzbq %al, %rax",
+            "    testq %rax, %rax",
+            "    jne .L2",
+            "    jmp .L4",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("jl .L2"), "should fuse to jl: {}", result);
+        assert!(!result.contains("setl"), "should eliminate setl");
+    }
+
+    #[test]
+    fn test_compare_branch_fusion_je() {
+        // When branch uses je instead of jne, invert the condition
+        let asm = [
+            "    cmpq %rcx, %rax",
+            "    setl %al",
+            "    movzbq %al, %rax",
+            "    testq %rax, %rax",
+            "    je .Lfalse",
+            "    jmp .Ltrue",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // je means "branch if NOT condition", so setl + je => jge
+        assert!(result.contains("jge .Lfalse"), "should fuse to jge: {}", result);
+    }
+
+    #[test]
+    fn test_non_adjacent_store_load_same_reg() {
+        // Store to slot, intervening instruction, load from same slot to same reg
+        let asm = [
+            "    movq %rax, -24(%rbp)",
+            "    movq %rcx, -32(%rbp)",
+            "    movq -24(%rbp), %rax",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // The load should be eliminated since %rax still has the value
+        assert!(!result.contains("-24(%rbp), %rax"), "should eliminate the load: {}", result);
+    }
+
+    #[test]
+    fn test_non_adjacent_store_load_diff_reg() {
+        // Store to slot, intervening instruction, load from same slot to different reg
+        let asm = [
+            "    movq %rax, -24(%rbp)",
+            "    movq %rcx, -32(%rbp)",
+            "    movq -24(%rbp), %rdx",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // The load should become movq %rax, %rdx
+        assert!(result.contains("movq %rax, %rdx"), "should forward to reg-reg: {}", result);
+    }
+
+    #[test]
+    fn test_non_adjacent_store_load_reg_modified() {
+        // Store to slot, modify source reg, load from same slot
+        // Should NOT forward because %rax was modified
+        let asm = [
+            "    movq %rax, -24(%rbp)",
+            "    movq -32(%rbp), %rax",
+            "    movq -24(%rbp), %rcx",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // Should NOT be optimized since %rax was overwritten
+        assert!(result.contains("-24(%rbp), %rcx") || result.contains("%rax, %rcx"),
+            "should not forward since rax was modified: {}", result);
+    }
+
+    #[test]
+    fn test_redundant_cltq() {
+        let asm = "    movslq -8(%rbp), %rax\n    cltq\n".to_string();
+        let result = peephole_optimize(asm);
+        assert!(result.contains("movslq"), "should keep movslq");
+        assert!(!result.contains("cltq"), "should eliminate redundant cltq: {}", result);
+    }
+
+    #[test]
+    fn test_dead_store_elimination() {
+        // Two consecutive stores to the same slot, no intervening read
+        let asm = [
+            "    movq %rax, -24(%rbp)",
+            "    movq %rcx, -24(%rbp)",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // First store should be eliminated
+        assert!(!result.contains("%rax, -24(%rbp)"), "first store should be dead: {}", result);
+        assert!(result.contains("%rcx, -24(%rbp)"), "second store should remain: {}", result);
+    }
+
+    #[test]
+    fn test_condition_codes() {
+        // Test various condition codes work correctly
+        for (cc, expected_jcc) in &[("e", "je"), ("ne", "jne"), ("l", "jl"), ("g", "jg"),
+                                     ("le", "jle"), ("ge", "jge"), ("b", "jb"), ("a", "ja")] {
+            let asm = format!(
+                "    cmpq %rcx, %rax\n    set{} %al\n    movzbq %al, %rax\n    testq %rax, %rax\n    jne .L1\n",
+                cc
+            );
+            let result = peephole_optimize(asm);
+            assert!(result.contains(&format!("{} .L1", expected_jcc)),
+                "cc={} should produce {}: {}", cc, expected_jcc, result);
+        }
     }
 }
