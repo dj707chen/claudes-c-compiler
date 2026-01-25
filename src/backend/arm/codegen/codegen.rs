@@ -1186,8 +1186,15 @@ impl ArchCodegen for ArmCodegen {
         }
     }
 
-    fn emit_int_popcount(&mut self, _ty: IrType) {
-        self.state.emit("    fmov d0, x0");
+    fn emit_int_popcount(&mut self, ty: IrType) {
+        // For 32-bit types, use fmov s0, w0 to zero-extend to 32 bits only,
+        // preventing sign-extended upper 32 bits from being counted.
+        // For 64-bit types, use fmov d0, x0 to count all 64 bits.
+        if ty == IrType::I32 || ty == IrType::U32 {
+            self.state.emit("    fmov s0, w0");
+        } else {
+            self.state.emit("    fmov d0, x0");
+        }
         self.state.emit("    cnt v0.8b, v0.8b");
         self.state.emit("    uaddlv h0, v0.8b");
         self.state.emit("    fmov w0, s0");

@@ -5,6 +5,7 @@
 //! redundant computation and enables further optimizations (DCE, etc.).
 
 use crate::ir::ir::*;
+use crate::common::types::IrType;
 
 /// Run constant folding on the entire module.
 /// Returns the number of instructions folded.
@@ -65,7 +66,7 @@ fn try_fold(inst: &Instruction) -> Option<Instruction> {
                 return None;
             }
             let src_const = as_i64_const(src)?;
-            let result = fold_unaryop(*op, src_const)?;
+            let result = fold_unaryop(*op, src_const, *ty)?;
             Some(Instruction::Copy {
                 dest: *dest,
                 src: Operand::Const(IrConst::from_i64(result, *ty)),
@@ -140,14 +141,46 @@ fn fold_binop(op: IrBinOp, lhs: i64, rhs: i64) -> Option<i64> {
 }
 
 /// Evaluate a unary operation on a constant integer.
-fn fold_unaryop(op: IrUnaryOp, src: i64) -> Option<i64> {
+/// Width-sensitive operations (CLZ, CTZ, Popcount, Bswap) use `ty` to determine
+/// whether to operate on 32 or 64 bits, matching the runtime semantics of
+/// __builtin_clz vs __builtin_clzll, etc.
+fn fold_unaryop(op: IrUnaryOp, src: i64, ty: IrType) -> Option<i64> {
+    let is_32bit = ty == IrType::I32 || ty == IrType::U32
+        || ty == IrType::I16 || ty == IrType::U16
+        || ty == IrType::I8 || ty == IrType::U8;
     Some(match op {
         IrUnaryOp::Neg => src.wrapping_neg(),
         IrUnaryOp::Not => !src,
-        IrUnaryOp::Clz => (src as u64).leading_zeros() as i64,
-        IrUnaryOp::Ctz => if src == 0 { 64 } else { (src as u64).trailing_zeros() as i64 },
-        IrUnaryOp::Bswap => (src as u64).swap_bytes() as i64,
-        IrUnaryOp::Popcount => (src as u64).count_ones() as i64,
+        IrUnaryOp::Clz => {
+            if is_32bit {
+                (src as u32).leading_zeros() as i64
+            } else {
+                (src as u64).leading_zeros() as i64
+            }
+        }
+        IrUnaryOp::Ctz => {
+            if src == 0 {
+                if is_32bit { 32 } else { 64 }
+            } else if is_32bit {
+                (src as u32).trailing_zeros() as i64
+            } else {
+                (src as u64).trailing_zeros() as i64
+            }
+        }
+        IrUnaryOp::Bswap => {
+            if is_32bit {
+                (src as u32).swap_bytes() as i64
+            } else {
+                (src as u64).swap_bytes() as i64
+            }
+        }
+        IrUnaryOp::Popcount => {
+            if is_32bit {
+                (src as u32).count_ones() as i64
+            } else {
+                (src as u64).count_ones() as i64
+            }
+        }
     })
 }
 
@@ -237,8 +270,16 @@ mod tests {
 
     #[test]
     fn test_fold_unaryop() {
-        assert_eq!(fold_unaryop(IrUnaryOp::Neg, 5), Some(-5));
-        assert_eq!(fold_unaryop(IrUnaryOp::Not, 0), Some(-1));
+        assert_eq!(fold_unaryop(IrUnaryOp::Neg, 5, IrType::I64), Some(-5));
+        assert_eq!(fold_unaryop(IrUnaryOp::Not, 0, IrType::I64), Some(-1));
+        // 32-bit popcount of -33 (0xFFFFFFDF) = 31 set bits
+        assert_eq!(fold_unaryop(IrUnaryOp::Popcount, -33, IrType::I32), Some(31));
+        // 64-bit popcount of -33 (0xFFFFFFFFFFFFFFDF) = 63 set bits
+        assert_eq!(fold_unaryop(IrUnaryOp::Popcount, -33, IrType::I64), Some(63));
+        // 32-bit CLZ of 1 = 31
+        assert_eq!(fold_unaryop(IrUnaryOp::Clz, 1, IrType::I32), Some(31));
+        // 64-bit CLZ of 1 = 63
+        assert_eq!(fold_unaryop(IrUnaryOp::Clz, 1, IrType::I64), Some(63));
     }
 
     #[test]

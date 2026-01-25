@@ -1516,14 +1516,20 @@ impl Lowerer {
             }
         }
 
-        // Detect arrays-of-pointers and arrays-of-function-pointers
+        // Detect arrays-of-pointers and arrays-of-function-pointers.
+        // For declarations like `int (*ap[3])[4]` (array of pointers-to-arrays),
+        // derived = [Array(4), Pointer, Array(3)]. The last element is Array(3),
+        // making this an array-of-pointers. We check:
+        //   1. Any pointer before the LAST array in derived (not just the first array),
+        //      matching the logic in compute_decl_info which checks `last_is_array`.
+        //   2. Typedef'd pointer with array dimensions.
         let is_array_of_pointers = is_array && {
             let ptr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Pointer));
-            let arr_pos = derived.iter().position(|d| matches!(d, DerivedDeclarator::Array(_)));
-            let has_derived_ptr_before_arr = matches!((ptr_pos, arr_pos), (Some(pp), Some(ap)) if pp < ap);
-            let typedef_ptr_array = ptr_pos.is_none() && arr_pos.is_some() &&
+            let last_arr_pos = derived.iter().rposition(|d| matches!(d, DerivedDeclarator::Array(_)));
+            let has_derived_ptr_before_last_arr = matches!((ptr_pos, last_arr_pos), (Some(pp), Some(ap)) if pp < ap);
+            let typedef_ptr_array = ptr_pos.is_none() && last_arr_pos.is_some() &&
                 self.is_type_pointer(type_spec);
-            has_derived_ptr_before_arr || typedef_ptr_array
+            has_derived_ptr_before_last_arr || typedef_ptr_array
         };
         let is_array_of_func_ptrs = is_array && derived.iter().any(|d|
             matches!(d, DerivedDeclarator::FunctionPointer(_, _) | DerivedDeclarator::Function(_, _)));
