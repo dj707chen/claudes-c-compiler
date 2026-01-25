@@ -1,0 +1,27 @@
+Fix phi elimination critical edge bug causing TCC segfault
+
+Problem:
+Phi elimination places copies at the end of predecessor blocks, but when a
+predecessor has multiple successors (critical edge), the copy can corrupt values
+used on the other branch path.
+
+Example: In TCC's label_pop function:
+  .L846 (body tail):
+    ... code using Value(71) = s ...
+    Store table_ident[s->v - TOK_IDENT]->sym_label = s->prev_tok
+    CondBranch: if (keep==0) -> .L853, else -> .L840
+
+  .L853 (sym_free block):
+    Call sym_free(Value(71))   // uses 's' (Value 71)
+    Branch -> .L840
+
+  .L840 (loop condition - has phi):
+    Phi { Value(71), incoming: [(Value(12), .L846), (Value(12), .L853)] }
+
+Phi elimination places "Value(71) = Value(12)" (i.e. s = s1) at the end of .L846.
+But .L846 branches to BOTH .L853 and .L840. The copy overwrites Value(71) before
+.L853 can read the old value, causing sym_free(s1) instead of sym_free(s).
+
+Fix:
+Split critical edges before placing phi copies. When a predecessor has multiple
+successors, insert a new empty block on the edge for the phi copy.
