@@ -698,13 +698,16 @@ impl Lexer {
     }
 
     /// Recognize synthetic pragma pack identifiers emitted by the preprocessor.
-    /// Format: __ccc_pack_set_N, __ccc_pack_push_N, __ccc_pack_pop, __ccc_pack_reset
+    /// Format: __ccc_pack_set_N, __ccc_pack_push_N, __ccc_pack_push_only,
+    ///         __ccc_pack_pop, __ccc_pack_reset
     fn try_pragma_pack_token(text: &str) -> Option<TokenKind> {
         if let Some(rest) = text.strip_prefix("__ccc_pack_") {
             if rest == "pop" {
                 Some(TokenKind::PragmaPackPop)
             } else if rest == "reset" {
                 Some(TokenKind::PragmaPackReset)
+            } else if rest == "push_only" {
+                Some(TokenKind::PragmaPackPushOnly)
             } else if let Some(n_str) = rest.strip_prefix("set_") {
                 if let Ok(n) = n_str.parse::<usize>() {
                     Some(TokenKind::PragmaPackSet(n))

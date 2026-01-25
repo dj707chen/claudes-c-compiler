@@ -13,6 +13,43 @@ use crate::common::fx_hash::{FxHashMap, FxHashSet};
 
 use super::utils::{is_ident_start, is_ident_cont, copy_literal, skip_literal};
 
+/// Check if two adjacent bytes would form an unintended multi-character token
+/// when concatenated during macro expansion. Returns true if a separating space
+/// is needed to prevent accidental token pasting.
+fn would_paste_tokens(last: u8, first: u8) -> bool {
+    match (last, first) {
+        // -- or -=  or -> from separate sources
+        (b'-', b'-') | (b'-', b'=') | (b'-', b'>') => true,
+        // ++ or +=
+        (b'+', b'+') | (b'+', b'=') => true,
+        // << or <= or <:
+        (b'<', b'<') | (b'<', b'=') | (b'<', b':') | (b'<', b'%') => true,
+        // >> or >=
+        (b'>', b'>') | (b'>', b'=') => true,
+        // == or ending = followed by =
+        (b'=', b'=') => true,
+        // != &= |= *= /= ^= %=
+        (b'!', b'=') | (b'&', b'=') | (b'|', b'=') | (b'*', b'=') |
+        (b'/', b'=') | (b'^', b'=') | (b'%', b'=') => true,
+        // && ||
+        (b'&', b'&') | (b'|', b'|') => true,
+        // ## (token paste)
+        (b'#', b'#') => true,
+        // / followed by * or / (comment start)
+        (b'/', b'*') | (b'/', b'/') => true,
+        // . followed by digit (e.g., prevent "1." + "5" pasting weirdly)
+        (b'.', b'0'..=b'9') => true,
+        // Identifier/number continuation: letter/digit/_ followed by letter/digit/_
+        (a, b) if is_ident_byte(a) && is_ident_byte(b) => true,
+        _ => false,
+    }
+}
+
+#[inline]
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 /// Represents a macro definition.
 #[derive(Debug, Clone)]
 pub struct MacroDef {
@@ -286,6 +323,15 @@ impl MacroTable {
                                 }
                             }
 
+                            // Insert space to prevent accidental token pasting
+                            // e.g., "1 -" + "-23530091311039" -> "1 - -23530091311039"
+                            if !expanded.is_empty() && !result.is_empty() {
+                                let last = result.as_bytes()[result.len() - 1];
+                                let first = expanded.as_bytes()[0];
+                                if would_paste_tokens(last, first) {
+                                    result.push(' ');
+                                }
+                            }
                             result.push_str(&expanded);
                             continue;
                         }

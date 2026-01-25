@@ -92,9 +92,11 @@ pub enum TokenKind {
     AutoType,
 
     /// #pragma pack directive, emitted by preprocessor as synthetic token.
-    /// Variants: Set(N), Push(N), Pop, Reset (pack())
+    /// Variants: Set(N), Push(N), PushOnly (push without change), Pop, Reset (pack())
     PragmaPackSet(usize),
     PragmaPackPush(usize),
+    /// #pragma pack(push) - push current alignment without changing it
+    PragmaPackPushOnly,
     PragmaPackPop,
     PragmaPackReset,
 

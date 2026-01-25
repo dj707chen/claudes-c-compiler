@@ -635,6 +635,7 @@ impl Parser {
             TokenKind::PragmaPackSet(n) => {
                 let n = *n;
                 self.advance();
+                // pack(0) means reset to default (natural alignment)
                 self.pragma_pack_align = if n == 0 { None } else { Some(n) };
                 true
             }
@@ -643,10 +644,19 @@ impl Parser {
                 self.advance();
                 // Push current alignment onto stack
                 self.pragma_pack_stack.push(self.pragma_pack_align);
-                // Set new alignment (0 means push without changing)
-                if n != 0 {
+                // pack(push, 0) means push and reset to default (natural alignment)
+                // pack(push, N) means push and set to N
+                if n == 0 {
+                    self.pragma_pack_align = None;
+                } else {
                     self.pragma_pack_align = Some(n);
                 }
+                true
+            }
+            TokenKind::PragmaPackPushOnly => {
+                self.advance();
+                // pack(push) - push current alignment without changing it
+                self.pragma_pack_stack.push(self.pragma_pack_align);
                 true
             }
             TokenKind::PragmaPackPop => {

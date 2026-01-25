@@ -1227,10 +1227,9 @@ impl Preprocessor {
             let rest = rest.trim().trim_start_matches(',').trim();
             if rest.is_empty() {
                 // #pragma pack(push) - push current alignment, don't change
-                // Emit push with 0 as sentinel meaning "push current, no change"
-                return Some("__ccc_pack_push_0 ;\n".to_string());
+                return Some("__ccc_pack_push_only ;\n".to_string());
             }
-            // #pragma pack(push, N)
+            // #pragma pack(push, N) - push current and set to N (0 means default)
             if let Ok(n) = rest.parse::<usize>() {
                 return Some(format!("__ccc_pack_push_{} ;\n", n));
             }
