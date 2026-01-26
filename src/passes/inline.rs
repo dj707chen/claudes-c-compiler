@@ -1,9 +1,10 @@
 //! Function inlining pass.
 //!
-//! Inlines small static/static-inline functions at their call sites.
-//! This is critical for eliminating dead branches guarded by constant-returning
-//! inline functions (e.g., kernel's `IS_ENABLED()` patterns), which would
-//! otherwise reference undefined external symbols and cause link errors.
+//! Inlines small static/static-inline functions and `__attribute__((always_inline))`
+//! functions at their call sites. Normal inlining is critical for eliminating dead
+//! branches guarded by constant-returning inline functions (e.g., kernel's
+//! `IS_ENABLED()` patterns). Always-inline is critical for kernel code where
+//! functions must remain in their caller's section (e.g., `.noinstr.text`).
 //!
 //! After inlining, subsequent passes (constant fold, DCE, CFG simplify) clean up
 //! the inlined code and eliminate dead branches.
@@ -29,6 +30,16 @@ const MAX_INLINE_BLOCKS: usize = 1;
 /// Maximum total inlining budget per caller function (total inlined instructions).
 /// Prevents exponential blowup from recursive inlining chains.
 const MAX_INLINE_BUDGET_PER_CALLER: usize = 800;
+
+/// Maximum instructions for __attribute__((always_inline)) functions.
+/// These must be inlined regardless of size, so we use a very generous limit.
+const MAX_ALWAYS_INLINE_INSTRUCTIONS: usize = 2000;
+
+/// Maximum blocks for __attribute__((always_inline)) functions.
+const MAX_ALWAYS_INLINE_BLOCKS: usize = 200;
+
+/// Budget for always_inline callees per caller.
+const MAX_ALWAYS_INLINE_BUDGET_PER_CALLER: usize = 20000;
 
 /// Run the inlining pass on the module.
 /// Returns the number of call sites inlined.
@@ -78,6 +89,7 @@ pub fn run(module: &mut IrModule) -> usize {
         }
 
         let mut budget_remaining = MAX_INLINE_BUDGET_PER_CALLER;
+        let mut always_inline_budget_remaining = MAX_ALWAYS_INLINE_BUDGET_PER_CALLER;
         let mut changed = true;
 
         // Iterate to handle chains of inlined calls (A calls B calls C, all small inline).
@@ -103,7 +115,13 @@ pub fn run(module: &mut IrModule) -> usize {
                 .map(|b| b.instructions.len())
                 .sum();
 
-            if callee_inst_count > budget_remaining {
+            // Use appropriate budget based on whether callee is always_inline
+            let effective_budget = if callee_data.is_always_inline {
+                always_inline_budget_remaining
+            } else {
+                budget_remaining
+            };
+            if callee_inst_count > effective_budget {
                 break;
             }
 
@@ -125,7 +143,11 @@ pub fn run(module: &mut IrModule) -> usize {
                     dump_function_ir(&module.functions[func_idx],
                         &format!("after inlining '{}' into '{}'", site.callee_name, module.functions[func_idx].name));
                 }
-                budget_remaining = budget_remaining.saturating_sub(callee_inst_count);
+                if callee_data.is_always_inline {
+                    always_inline_budget_remaining = always_inline_budget_remaining.saturating_sub(callee_inst_count);
+                } else {
+                    budget_remaining = budget_remaining.saturating_sub(callee_inst_count);
+                }
                 total_inlined += 1;
                 changed = true;
                 module.functions[func_idx].has_inlined_calls = true;
@@ -305,6 +327,8 @@ struct CalleeData {
     next_value_id: u32,
     /// Maximum BlockId used in the callee
     max_block_id: u32,
+    /// Whether this callee was marked __attribute__((always_inline))
+    is_always_inline: bool,
 }
 
 /// A call site that is eligible for inlining.
@@ -330,16 +354,21 @@ fn build_callee_map(module: &IrModule) -> HashMap<String, CalleeData> {
         if func.is_declaration {
             continue;
         }
-        // Only inline static inline functions (internal linkage + inline hint).
-        // Non-static functions have external linkage and can't be removed after inlining.
-        // Non-inline static functions are less likely to benefit from inlining and
-        // may cause correctness issues if they have complex semantics.
-        if !func.is_static || !func.is_inline {
-            if debug_callee && func.name.contains("write16") {
-                eprintln!("[INLINE_DEBUG] {} skipped: is_static={}, is_inline={}, is_declaration={}",
-                    func.name, func.is_static, func.is_inline, func.is_declaration);
+        // Determine if this is an always_inline function
+        let is_always_inline = func.is_always_inline;
+
+        // For always_inline: we inline regardless of whether the function is static,
+        // because GCC/Clang semantics dictate that __attribute__((always_inline))
+        // means the function must always be inlined at call sites.
+        // For normal inlining: only inline static inline functions (internal linkage).
+        if !is_always_inline {
+            if !func.is_static || !func.is_inline {
+                if debug_callee && func.name.contains("write16") {
+                    eprintln!("[INLINE_DEBUG] {} skipped: is_static={}, is_inline={}, is_declaration={}",
+                        func.name, func.is_static, func.is_inline, func.is_declaration);
+                }
+                continue;
             }
-            continue;
         }
         if debug_callee && func.name.contains("write16") {
             let ic: usize = func.blocks.iter().map(|b| b.instructions.len()).sum();
@@ -351,25 +380,27 @@ fn build_callee_map(module: &IrModule) -> HashMap<String, CalleeData> {
             continue;
         }
 
-        // Check size limits
+        // Check size limits (relaxed for always_inline)
         let inst_count: usize = func.blocks.iter().map(|b| b.instructions.len()).sum();
-        if inst_count > MAX_INLINE_INSTRUCTIONS {
+        let max_inst = if is_always_inline { MAX_ALWAYS_INLINE_INSTRUCTIONS } else { MAX_INLINE_INSTRUCTIONS };
+        let max_blocks = if is_always_inline { MAX_ALWAYS_INLINE_BLOCKS } else { MAX_INLINE_BLOCKS };
+        if inst_count > max_inst {
             continue;
         }
-        if func.blocks.len() > MAX_INLINE_BLOCKS {
+        if func.blocks.len() > max_blocks {
             continue;
         }
 
-        // Skip functions containing constructs that are hard to inline correctly:
-        // - Inline assembly (may have constraints tied to function-level semantics)
-        // - VaStart/VaEnd/VaArg/VaCopy (variadic machinery)
-        // - DynAlloca (dynamic stack allocation)
-        // - Indirect branches (computed goto)
-        // - StackSave/StackRestore (VLA-related)
+        // Skip functions containing constructs that are hard to inline correctly.
+        // For always_inline, we are more permissive: we allow inline assembly (common
+        // in kernel always_inline functions like atomic ops, barriers, etc.) but still
+        // reject variadic machinery and dynamic stack allocation.
         let mut has_problematic = false;
         for block in &func.blocks {
             for inst in &block.instructions {
                 match inst {
+                    // Inline asm is allowed for always_inline (kernel needs it)
+                    Instruction::InlineAsm { .. } if is_always_inline => {}
                     Instruction::InlineAsm { .. }
                     | Instruction::VaStart { .. }
                     | Instruction::VaEnd { .. }
@@ -413,6 +444,7 @@ fn build_callee_map(module: &IrModule) -> HashMap<String, CalleeData> {
             num_params: func.params.len(),
             next_value_id: func.next_value_id,
             max_block_id,
+            is_always_inline,
         });
     }
 

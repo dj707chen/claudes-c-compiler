@@ -1130,6 +1130,7 @@ impl Lowerer {
             blocks: std::mem::take(&mut self.func_mut().blocks),
             is_variadic: func.variadic, is_declaration: false, is_static,
             is_inline: func.is_inline,
+            is_always_inline: func.is_always_inline,
             stack_size: 0,
             next_value_id: next_val,
             section: func.section.clone(),
