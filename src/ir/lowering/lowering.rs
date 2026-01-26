@@ -1104,6 +1104,7 @@ impl Lowerer {
             next_value_id: next_val,
             section: func.section.clone(),
             visibility: func.visibility.clone(),
+            is_weak: func.is_weak,
         };
         self.module.functions.push(ir_func);
         self.pop_scope();
@@ -1389,6 +1390,7 @@ impl Lowerer {
                 is_extern: is_extern_decl,
                 is_common: decl.is_common,
                 section: declarator.section.clone(),
+                is_weak: declarator.is_weak,
             });
         }
     }

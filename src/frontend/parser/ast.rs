@@ -40,6 +40,8 @@ pub struct FunctionDef {
     pub section: Option<String>,
     /// __attribute__((visibility("hidden"|"default"|...)))
     pub visibility: Option<String>,
+    /// __attribute__((weak)) - emit as a weak symbol
+    pub is_weak: bool,
     pub span: Span,
 }
 

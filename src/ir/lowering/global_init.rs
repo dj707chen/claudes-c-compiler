@@ -522,6 +522,7 @@ impl Lowerer {
             is_extern: false,
             is_common: false,
             section: None,
+            is_weak: false,
         });
 
         GlobalInit::GlobalAddr(label)

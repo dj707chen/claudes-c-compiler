@@ -349,7 +349,11 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
 
     let type_dir = cg.function_type_directive();
     if !func.is_static {
-        cg.state().emit_fmt(format_args!(".globl {}", func.name));
+        if func.is_weak {
+            cg.state().emit_fmt(format_args!(".weak {}", func.name));
+        } else {
+            cg.state().emit_fmt(format_args!(".globl {}", func.name));
+        }
     }
     // Emit visibility directive from __attribute__((visibility("..."))) on function defs
     if let Some(ref vis) = func.visibility {

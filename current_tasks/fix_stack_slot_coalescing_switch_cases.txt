@@ -1,0 +1,23 @@
+Fix: Stack Slot Coalescing for Non-Overlapping Allocas
+
+Problem:
+The compiler allocates a unique stack slot for every Alloca instruction, even when
+allocas have non-overlapping lifetimes (e.g., local variables in different case blocks
+of a switch statement). For large bison-generated parsers like PostgreSQL's gram.c
+(2000+ case blocks), this causes a 29MB stack frame vs GCC's 3KB, crashing postgres
+due to stack overflow.
+
+Root cause:
+calculate_stack_space_common() in generation.rs monotonically increments the stack
+space for every alloca without considering lifetime overlap.
+
+Fix:
+Implement stack slot coalescing in the backend. Compute which allocas have
+non-overlapping lifetimes (based on basic block liveness analysis) and assign
+them to the same stack memory. This is safe because only one case block executes
+at a time, so their local variables never coexist.
+
+Expected impact:
+- Fixes PostgreSQL initdb segfault (stack overflow in base_yyparse)
+- Reduces stack frame sizes for all functions with large switch statements
+- Affects all three architectures (x86, ARM, RISC-V)

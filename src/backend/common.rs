@@ -446,7 +446,11 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
         out.emit_fmt(format_args!(".section {},\"{}\",@progbits", sect, flags));
         if is_zero_init || g.size == 0 {
             if !g.is_static {
-                out.emit_fmt(format_args!(".globl {}", g.name));
+                if g.is_weak {
+                    out.emit_fmt(format_args!(".weak {}", g.name));
+                } else {
+                    out.emit_fmt(format_args!(".globl {}", g.name));
+                }
             }
             out.emit_fmt(format_args!(".align {}", effective_align(g)));
             out.emit_fmt(format_args!(".type {}, @object", g.name));
@@ -523,7 +527,11 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
             has_bss = true;
         }
         if !g.is_static {
-            out.emit_fmt(format_args!(".globl {}", g.name));
+            if g.is_weak {
+                out.emit_fmt(format_args!(".weak {}", g.name));
+            } else {
+                out.emit_fmt(format_args!(".globl {}", g.name));
+            }
         }
         out.emit_fmt(format_args!(".align {}", ptr_dir.align_arg(effective_align(g))));
         out.emit_fmt(format_args!(".type {}, @object", g.name));
@@ -539,7 +547,11 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
 /// Emit a single global variable definition.
 fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
     if !g.is_static {
-        out.emit_fmt(format_args!(".globl {}", g.name));
+        if g.is_weak {
+            out.emit_fmt(format_args!(".weak {}", g.name));
+        } else {
+            out.emit_fmt(format_args!(".globl {}", g.name));
+        }
     }
     out.emit_fmt(format_args!(".align {}", ptr_dir.align_arg(effective_align(g))));
     out.emit_fmt(format_args!(".type {}, @object", g.name));

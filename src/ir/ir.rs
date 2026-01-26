@@ -59,6 +59,8 @@ pub struct IrGlobal {
     pub is_common: bool,
     /// __attribute__((section("..."))) - place in specific ELF section.
     pub section: Option<String>,
+    /// __attribute__((weak)) - emit as a weak symbol (STB_WEAK).
+    pub is_weak: bool,
 }
 
 /// Initializer for a global variable.
@@ -125,6 +127,8 @@ pub struct IrFunction {
     pub section: Option<String>,
     /// __attribute__((visibility("hidden"|"default"|...)))
     pub visibility: Option<String>,
+    /// __attribute__((weak)) - emit as a weak symbol (STB_WEAK).
+    pub is_weak: bool,
 }
 
 /// A function parameter.
@@ -1038,6 +1042,7 @@ impl IrFunction {
             next_value_id: 0,
             section: None,
             visibility: None,
+            is_weak: false,
         }
     }
 

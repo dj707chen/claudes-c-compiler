@@ -143,7 +143,7 @@ impl Parser {
             && (matches!(self.peek(), TokenKind::LBrace) || self.is_type_specifier());
 
         if is_funcdef {
-            self.parse_function_def(type_spec, name, derived, start, is_constructor, is_destructor, section, visibility)
+            self.parse_function_def(type_spec, name, derived, start, is_constructor, is_destructor, section, visibility, is_weak)
         } else {
             self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common, merged_alignment, is_weak, alias_target, visibility, section, first_asm_reg)
         }
@@ -160,6 +160,7 @@ impl Parser {
         is_destructor: bool,
         section: Option<String>,
         visibility: Option<String>,
+        is_weak: bool,
     ) -> Option<ExternalDecl> {
         self.parsing_typedef = false; // function defs are never typedefs
         let (params, variadic) = if let Some(DerivedDeclarator::Function(p, v)) = derived.last() {
@@ -213,6 +214,7 @@ impl Parser {
             is_destructor,
             section,
             visibility,
+            is_weak,
             span: start,
         }))
     }
