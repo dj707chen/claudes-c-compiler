@@ -1,0 +1,21 @@
+Fix long double (F128) constant folding precision loss
+
+Problem: When the compiler constant-folds long double arithmetic (e.g., 7.0L / 3.0L),
+it extracts the f64 approximation from LongDouble(f64, [u8;16]), performs f64 arithmetic,
+then reconstructs x87 bytes from the f64 result. This loses the bottom 11 mantissa bits
+of the 80-bit x87 extended precision format.
+
+This causes the long-double-arithmetic test to fail (div_ld(3.5, 1.5) != 7.0L / 3.0L)
+because the runtime division uses full x87 precision but the constant-folded value has
+only f64 precision.
+
+Fix: Add x87 arithmetic functions to long_double.rs using inline assembly (since the
+compiler runs on x86-64), then update const_arith.rs and constant_fold.rs to use these
+for LongDouble operations instead of f64 arithmetic.
+
+Files to change:
+- src/common/long_double.rs -- add x87_add, x87_sub, x87_mul, x87_div, x87_neg, x87_cmp
+- src/common/const_arith.rs -- use x87 byte arithmetic for LongDouble binop and negation
+- src/passes/constant_fold.rs -- use x87 byte arithmetic for F128 folding
+
+Status: in_progress
