@@ -1,0 +1,17 @@
+Task: Fix inline asm "m" memory constraint with constant address operand
+Status: in_progress
+
+Problem: When copy propagation replaces a Value operand with a Const operand for
+inline asm "m" memory constraints, the backend's resolve_memory_operand() doesn't
+handle Operand::Const, leaving the memory address string empty. This produces broken
+assembly like "movl ,%ecx" (missing source operand).
+
+This affects kernel code that uses readl()/writel() with compile-time constant MMIO
+addresses (e.g., readl((void *)(fix_to_virt(FIX_APIC_BASE) + 0x300))).
+The constant address gets folded by copy propagation into the inline asm input operand.
+
+Failing file: arch/x86/kernel/apic/ipi.c (COMPILE_FAIL)
+
+Fix: Handle Operand::Const in resolve_memory_operand() for all three backends
+(x86, ARM, RISC-V) by loading the constant address into a scratch register
+and using indirect addressing through that register.
