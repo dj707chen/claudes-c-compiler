@@ -467,6 +467,10 @@ impl Parser {
         let save = self.pos;
         self.advance(); // consume '('
 
+        // Skip __attribute__ / __extension__ before pointer declarator
+        // e.g. void foo(void (__attribute__((ms_abi)) *handler)(int))
+        self.skip_gcc_extensions();
+
         if matches!(self.peek(), TokenKind::Star) {
             // Function pointer or pointer-to-array: (*name)(params) or (*name)[N]
             let mut inner_ptr_depth = 0u32;

@@ -172,6 +172,16 @@ impl<'a> SemaConstEval<'a> {
                     }
                 }
 
+                // Handle I128 source: use full 128-bit value to avoid truncation
+                // through the u64-based eval_const_expr_as_bits path
+                if let IrConst::I128(v128) = src_val {
+                    let target_size = self.ctype_size(&target_ctype);
+                    // Determine source signedness for int-to-float conversions
+                    let src_unsigned = self.lookup_expr_type(inner)
+                        .map_or(false, |ct| ct.is_unsigned());
+                    return self.cast_i128_to_ctype(v128, &target_ctype, target_size, src_unsigned);
+                }
+
                 // Integer source: use bit-based cast chain evaluation
                 let (bits, _src_signed) = self.eval_const_expr_as_bits(inner)?;
                 let target_size = self.ctype_size(&target_ctype);
@@ -599,6 +609,69 @@ impl<'a> SemaConstEval<'a> {
                 // Pointer types and other 8-byte types
                 if target.is_pointer_like() {
                     IrConst::I64(bits as i64)
+                } else {
+                    return None;
+                }
+            }
+        })
+    }
+
+    /// Cast a full 128-bit integer value to a target CType.
+    ///
+    /// This handles casts from __int128/unsigned __int128 without going through the
+    /// u64-based eval_const_expr_as_bits path, which would truncate the upper 64 bits.
+    /// For targets <= 64 bits, extract the lower bits. For 128-bit targets, preserve
+    /// the full value.
+    fn cast_i128_to_ctype(&self, v128: i128, target: &CType, target_size: usize, src_unsigned: bool) -> Option<IrConst> {
+        let bits_lo = v128 as u64; // lower 64 bits
+        let target_signed = !target.is_unsigned() && !target.is_pointer_like();
+        Some(match target_size {
+            0 => return None, // void cast
+            1 => {
+                if !target_signed {
+                    IrConst::I32(bits_lo as u8 as i32)
+                } else {
+                    IrConst::I8(bits_lo as i8)
+                }
+            }
+            2 => {
+                if !target_signed {
+                    IrConst::I32(bits_lo as u16 as i32)
+                } else {
+                    IrConst::I16(bits_lo as i16)
+                }
+            }
+            4 => {
+                if matches!(target, CType::Float) {
+                    // int-to-float: signedness comes from the source type
+                    let fv = if src_unsigned { (v128 as u128) as f32 } else { v128 as f32 };
+                    IrConst::F32(fv)
+                } else if !target_signed {
+                    IrConst::I64(bits_lo as u32 as i64)
+                } else {
+                    IrConst::I32(bits_lo as i32)
+                }
+            }
+            8 => {
+                if matches!(target, CType::Double) {
+                    let fv = if src_unsigned { (v128 as u128) as f64 } else { v128 as f64 };
+                    IrConst::F64(fv)
+                } else {
+                    IrConst::I64(bits_lo as i64)
+                }
+            }
+            16 => {
+                if matches!(target, CType::LongDouble) {
+                    let fv = if src_unsigned { (v128 as u128) as f64 } else { v128 as f64 };
+                    IrConst::LongDouble(fv)
+                } else {
+                    // __int128 / unsigned __int128: preserve full 128-bit value
+                    IrConst::I128(v128)
+                }
+            }
+            _ => {
+                if target.is_pointer_like() {
+                    IrConst::I64(bits_lo as i64)
                 } else {
                     return None;
                 }

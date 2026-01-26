@@ -236,6 +236,37 @@ fn simplify_cast(
 /// zero-extension. For example, IrConst::I8(-1) with from_ty=U8 represents
 /// the value 255, not -1.
 fn fold_const_cast(c: &IrConst, from_ty: IrType, to_ty: IrType) -> Option<IrConst> {
+    // Handle I128 source directly to avoid truncation through to_i64().
+    // to_i64() truncates the upper 64 bits, which loses data for values like (U)1 << 127.
+    if let IrConst::I128(v128) = c {
+        let bits_lo = *v128 as u64;
+        return Some(match to_ty {
+            IrType::I8 | IrType::U8 => IrConst::I8(bits_lo as i8),
+            IrType::I16 | IrType::U16 => IrConst::I16(bits_lo as i16),
+            IrType::I32 => IrConst::I32(bits_lo as i32),
+            IrType::U32 => IrConst::I64(bits_lo as u32 as i64),
+            IrType::I64 | IrType::U64 | IrType::Ptr => IrConst::I64(bits_lo as i64),
+            IrType::I128 | IrType::U128 => IrConst::I128(*v128),
+            IrType::F32 => {
+                if from_ty.is_unsigned() {
+                    IrConst::F32((*v128 as u128) as f32)
+                } else {
+                    IrConst::F32(*v128 as f32)
+                }
+            }
+            IrType::F64 | IrType::F128 => {
+                if from_ty.is_unsigned() {
+                    let fv = (*v128 as u128) as f64;
+                    if to_ty == IrType::F128 { IrConst::LongDouble(fv) } else { IrConst::F64(fv) }
+                } else {
+                    let fv = *v128 as f64;
+                    if to_ty == IrType::F128 { IrConst::LongDouble(fv) } else { IrConst::F64(fv) }
+                }
+            }
+            _ => return None,
+        });
+    }
+
     // Integer-to-integer/float constant cast
     if let Some(raw_val) = c.to_i64() {
         // Normalize source value according to from_ty signedness.

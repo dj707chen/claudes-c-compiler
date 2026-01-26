@@ -143,6 +143,15 @@ impl Lowerer {
                     }
                 }
 
+                // Handle I128 source: use full 128-bit value to avoid truncation
+                // through the u64-based eval_const_expr_as_bits path
+                if let IrConst::I128(v128) = src_val {
+                    // Determine source signedness for int-to-float conversions
+                    let src_ty = self.get_expr_type(inner);
+                    let src_unsigned = src_ty.is_unsigned();
+                    return Some(Self::cast_i128_to_ir_type(v128, target_ir_ty, src_unsigned));
+                }
+
                 // Integer source: use bit-based cast chain evaluation
                 let (bits, _src_signed) = self.eval_const_expr_as_bits(inner)?;
                 let target_width = target_ir_ty.size() * 8;
@@ -269,7 +278,33 @@ impl Lowerer {
                     None
                 }
             }
+            // Handle compound literals in constant expressions:
+            // ((type) { value }) -> evaluate the inner initializer's scalar value.
+            // This is critical for global/static array initializers where compound
+            // literals like ((pgprot_t) { 0x120 }) must be evaluated at compile time.
+            Expr::CompoundLiteral(_type_spec, ref init, _) => {
+                self.eval_const_initializer_scalar(init)
+            }
             _ => None,
+        }
+    }
+
+    /// Evaluate an initializer to a scalar constant for use in constant expressions.
+    /// Handles both direct expressions and brace-wrapped lists (including nested ones
+    /// like `{ { 42 } }` which occur when a struct compound literal has a single field).
+    fn eval_const_initializer_scalar(&self, init: &Initializer) -> Option<IrConst> {
+        match init {
+            Initializer::Expr(expr) => self.eval_const_expr(expr),
+            Initializer::List(items) => {
+                // For a struct/union compound literal with one field,
+                // the initializer list has one item whose value is the scalar.
+                // Recurse into the first item.
+                if let Some(first) = items.first() {
+                    self.eval_const_initializer_scalar(&first.init)
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -365,6 +400,38 @@ impl Lowerer {
                 };
                 Some((bits, true))
             }
+        }
+    }
+
+    /// Cast a full 128-bit integer value to an IrType without going through u64 truncation.
+    ///
+    /// For targets <= 64 bits, extracts the lower bits. For 128-bit targets, preserves the
+    /// full value. For float targets, uses value-based conversion from the full i128.
+    fn cast_i128_to_ir_type(v128: i128, target: IrType, src_unsigned: bool) -> IrConst {
+        let bits_lo = v128 as u64; // lower 64 bits
+        match target {
+            IrType::I8 => IrConst::I8(bits_lo as i8),
+            IrType::U8 => IrConst::I64(bits_lo as u8 as i64),
+            IrType::I16 => IrConst::I16(bits_lo as i16),
+            IrType::U16 => IrConst::I64(bits_lo as u16 as i64),
+            IrType::I32 => IrConst::I32(bits_lo as i32),
+            IrType::U32 => IrConst::I64(bits_lo as u32 as i64),
+            IrType::I64 | IrType::U64 | IrType::Ptr => IrConst::I64(bits_lo as i64),
+            IrType::I128 | IrType::U128 => IrConst::I128(v128),
+            IrType::F32 => {
+                // int-to-float: signedness comes from the source type
+                let fv = if src_unsigned { (v128 as u128) as f32 } else { v128 as f32 };
+                IrConst::F32(fv)
+            }
+            IrType::F64 => {
+                let fv = if src_unsigned { (v128 as u128) as f64 } else { v128 as f64 };
+                IrConst::F64(fv)
+            }
+            IrType::F128 => {
+                let fv = if src_unsigned { (v128 as u128) as f64 } else { v128 as f64 };
+                IrConst::LongDouble(fv)
+            }
+            _ => IrConst::I128(v128), // fallback: preserve value
         }
     }
 
