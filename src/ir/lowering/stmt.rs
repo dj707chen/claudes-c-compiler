@@ -1417,11 +1417,14 @@ impl Lowerer {
         });
     }
 
-    /// Extract a global symbol name from an expression, for use with inline asm
-    /// `"i"` constraint operands and `%P`/`%c`/`%a` modifiers. Handles:
+    /// Extract a global symbol name (possibly with offset) from an expression,
+    /// for use with inline asm `"i"` constraint operands and `%P`/`%c`/`%a`
+    /// modifiers. Handles:
     /// - `func_name` (bare function identifier that is a known function or global)
     /// - `&var_name` (address-of global variable)
     /// - Casts of the above (e.g., `(void *)func_name`)
+    /// - Complex global address expressions like `&((const char *)s.member)[N]`
+    ///   which produce `"symbol+offset"` strings (e.g., `"boot_cpu_data+9"`)
     ///
     /// Returns `None` for local variables/parameters, since those are not valid
     /// assembly symbols and would produce invalid assembly if emitted literally.
@@ -1444,10 +1447,32 @@ impl Lowerer {
                         None
                     }
                 } else {
-                    None
+                    // Try resolving complex address expressions like
+                    // &((const char *)boot_cpu_data.x86_capability)[12 >> 3]
+                    // via the global address evaluator.
+                    self.extract_symbol_from_global_addr_expr(expr)
                 }
             }
             Expr::Cast(_, inner, _) => self.extract_symbol_name(inner),
+            _ => None,
+        }
+    }
+
+    /// Try to resolve an expression to a global symbol name with optional offset,
+    /// using the global address expression evaluator. Returns strings like
+    /// `"boot_cpu_data"` or `"boot_cpu_data+9"`.
+    fn extract_symbol_from_global_addr_expr(&self, expr: &Expr) -> Option<String> {
+        use crate::ir::ir::GlobalInit;
+        let init = self.eval_global_addr_expr(expr)?;
+        match init {
+            GlobalInit::GlobalAddr(name) => Some(name),
+            GlobalInit::GlobalAddrOffset(name, offset) => {
+                if offset >= 0 {
+                    Some(format!("{}+{}", name, offset))
+                } else {
+                    Some(format!("{}{}", name, offset))
+                }
+            }
             _ => None,
         }
     }

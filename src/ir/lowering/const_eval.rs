@@ -638,46 +638,139 @@ impl Lowerer {
                 _ => break,
             }
         }
-        // current should now be the base identifier
-        let name = match current {
-            Expr::Identifier(name, _) => name,
+
+        // Try to resolve the base. It can be:
+        // 1. A plain Identifier (global array)
+        // 2. A Cast of a global address expression, e.g.:
+        //    (const char *)boot_cpu_data.x86_capability
+        //    which reinterprets the member as a different pointer/array type.
+        match current {
+            Expr::Identifier(name, _) => {
+                let global_name = self.resolve_to_global_name(name)?;
+                let ginfo = self.globals.get(&global_name)?;
+                if !ginfo.is_array {
+                    return None;
+                }
+                subscripts.reverse();
+
+                let mut total_offset: i64 = 0;
+                let strides = &ginfo.array_dim_strides;
+                for (dim, idx_expr) in subscripts.iter().enumerate() {
+                    let idx_val = self.eval_const_expr(idx_expr)?;
+                    let idx = self.const_to_i64(&idx_val)?;
+                    let stride = if !strides.is_empty() && dim < strides.len() {
+                        strides[dim] as i64
+                    } else if dim == 0 {
+                        ginfo.elem_size as i64
+                    } else {
+                        return None;
+                    };
+                    total_offset += idx * stride;
+                }
+
+                if total_offset == 0 {
+                    Some(GlobalInit::GlobalAddr(global_name))
+                } else {
+                    Some(GlobalInit::GlobalAddrOffset(global_name, total_offset))
+                }
+            }
+            Expr::Cast(type_spec, inner, _) => {
+                // Handle patterns like ((const char *)boot_cpu_data.x86_capability)[N]
+                // The inner expression should resolve to a global address, and the cast's
+                // pointee type determines the element size for subscript strides.
+                self.resolve_cast_array_subscript(type_spec, inner, &subscripts)
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve an array subscript where the base is a cast of a global address
+    /// expression. For example: `((const char *)boot_cpu_data.x86_capability)[1]`
+    /// resolves to `boot_cpu_data + offsetof(x86_capability) + 1 * sizeof(char)`.
+    fn resolve_cast_array_subscript(
+        &self,
+        cast_type: &TypeSpecifier,
+        inner_expr: &Expr,
+        subscripts: &[&Expr],
+    ) -> Option<GlobalInit> {
+        // The cast type should be a pointer type; the pointee is the element type.
+        let cast_ctype = self.type_spec_to_ctype(cast_type);
+        let elem_size = match &cast_ctype {
+            CType::Pointer(pointee, _) => self.ctype_size(pointee),
+            // If it's an array type, use the element size
+            CType::Array(elem, _) => self.ctype_size(elem),
             _ => return None,
         };
-        let global_name = self.resolve_to_global_name(name)?;
-        let ginfo = self.globals.get(&global_name)?;
-        if !ginfo.is_array {
+        if elem_size == 0 {
             return None;
         }
 
-        // subscripts are collected outer-to-inner, but we need inner-to-outer
-        // for stride computation. Reverse to get [i, j, k] order.
-        subscripts.reverse();
+        // Resolve the inner expression as a global address.
+        // This handles MemberAccess on globals (e.g., boot_cpu_data.x86_capability),
+        // AddressOf patterns, identifiers, etc.
+        let base_init = self.resolve_inner_as_global_addr(inner_expr)?;
+        let (global_name, base_offset) = match &base_init {
+            GlobalInit::GlobalAddr(name) => (name.clone(), 0i64),
+            GlobalInit::GlobalAddrOffset(name, off) => (name.clone(), *off),
+            _ => return None,
+        };
 
-        // Compute the total byte offset using array dimension strides.
-        // For int a[D0][D1][D2]:
-        //   array_dim_strides = [D1*D2*sizeof(int), D2*sizeof(int), sizeof(int)]
-        //   elem_size = D1*D2*sizeof(int) (stride for first dimension)
-        // &a[i][j][k] -> offset = i * strides[0] + j * strides[1] + k * strides[2]
-        let mut total_offset: i64 = 0;
-        let strides = &ginfo.array_dim_strides;
-        for (dim, idx_expr) in subscripts.iter().enumerate() {
+        // Compute the total subscript offset. Only a single subscript dimension
+        // makes sense here since the cast reinterprets the base as a flat pointer.
+        // subscripts are in outer-to-inner order; reverse for left-to-right.
+        let mut total_offset = base_offset;
+        for idx_expr in subscripts.iter().rev() {
             let idx_val = self.eval_const_expr(idx_expr)?;
             let idx = self.const_to_i64(&idx_val)?;
-            let stride = if !strides.is_empty() && dim < strides.len() {
-                strides[dim] as i64
-            } else if dim == 0 {
-                // 1D array: use elem_size as the stride
-                ginfo.elem_size as i64
-            } else {
-                return None;
-            };
-            total_offset += idx * stride;
+            total_offset += idx * elem_size as i64;
         }
 
         if total_offset == 0 {
             Some(GlobalInit::GlobalAddr(global_name))
         } else {
             Some(GlobalInit::GlobalAddrOffset(global_name, total_offset))
+        }
+    }
+
+    /// Resolve an expression to a global address, handling member access on global
+    /// structs (e.g., `boot_cpu_data.x86_capability` -> GlobalAddrOffset("boot_cpu_data", 8)).
+    /// This is used as the base of cast+subscript patterns in inline asm operands.
+    fn resolve_inner_as_global_addr(&self, expr: &Expr) -> Option<GlobalInit> {
+        match expr {
+            // Direct global identifier - treat as address of the global
+            Expr::Identifier(name, _) => {
+                let global_name = self.resolve_to_global_name(name)?;
+                Some(GlobalInit::GlobalAddr(global_name))
+            }
+            // struct_var.field -> global + field_offset
+            Expr::MemberAccess(base, field, _) => {
+                // Resolve the base to a global address
+                let base_init = self.resolve_inner_as_global_addr(base)?;
+                let (global_name, base_off) = match &base_init {
+                    GlobalInit::GlobalAddr(name) => (name.clone(), 0i64),
+                    GlobalInit::GlobalAddrOffset(name, off) => (name.clone(), *off),
+                    _ => return None,
+                };
+                // Look up the struct layout to get the field offset
+                let ginfo = self.globals.get(&global_name)?;
+                let layout = ginfo.struct_layout.clone()?;
+                let (field_offset, _field_ty) = layout.field_offset(field, &self.types)?;
+                let total = base_off + field_offset as i64;
+                if total == 0 {
+                    Some(GlobalInit::GlobalAddr(global_name))
+                } else {
+                    Some(GlobalInit::GlobalAddrOffset(global_name, total))
+                }
+            }
+            // AddressOf(&x) -> address of x
+            Expr::AddressOf(_inner, _) => {
+                self.eval_global_addr_expr(expr)
+            }
+            // Cast preserves the address
+            Expr::Cast(_, inner, _) => {
+                self.resolve_inner_as_global_addr(inner)
+            }
+            _ => None,
         }
     }
 
