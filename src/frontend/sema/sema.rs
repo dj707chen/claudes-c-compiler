@@ -302,7 +302,7 @@ impl SemanticAnalyzer {
             // subsequent global initializer const-evaluation.
             if let CType::Array(ref elem, None) = full_type {
                 if let Some(ref init) = init_decl.init {
-                    if let Some(count) = Self::count_initializer_elements(init, elem) {
+                    if let Some(count) = self.count_initializer_elements(init, elem) {
                         full_type = CType::Array(elem.clone(), Some(count));
                     }
                 }
@@ -354,7 +354,7 @@ impl SemanticAnalyzer {
     /// `compute_init_list_array_size`. Handles initializer lists with
     /// designators, string literals for char arrays, and brace-wrapped
     /// string literals.
-    fn count_initializer_elements(init: &Initializer, elem_ty: &CType) -> Option<usize> {
+    fn count_initializer_elements(&self, init: &Initializer, elem_ty: &CType) -> Option<usize> {
         match init {
             Initializer::List(items) => {
                 // Check for brace-wrapped string literal: char c[] = {"hello"}
@@ -374,9 +374,18 @@ impl SemanticAnalyzer {
                     }
                 }
 
+                // C11 6.7.9: flat initializers for struct arrays fill fields
+                // sequentially, so array members consume multiple scalar items.
+                // E.g. struct { int arr[4]; int b, e, k; } needs 7 items per element.
+                let flat_scalars_per_elem = self.flat_scalar_count_for_type(elem_ty);
+
                 // General case: track current index through the initializer list.
                 let mut max_idx = 0usize;
                 let mut current_idx = 0usize;
+                let mut fields_consumed = 0usize;
+                let has_any_designator = items.iter()
+                    .any(|item| !item.designators.is_empty());
+
                 for item in items {
                     // If this item has an array index designator, jump to that index
                     if let Some(designator) = item.designators.first() {
@@ -384,12 +393,14 @@ impl SemanticAnalyzer {
                             Designator::Index(idx_expr) => {
                                 if let Some(idx) = Self::eval_designator_index(idx_expr) {
                                     current_idx = idx;
+                                    fields_consumed = 0;
                                 }
                             }
                             Designator::Range(_lo, hi) => {
                                 // GNU range designator [lo ... hi]: size determined by hi
                                 if let Some(idx) = Self::eval_designator_index(hi) {
                                     current_idx = idx;
+                                    fields_consumed = 0;
                                 }
                             }
                             Designator::Field(_) => {
@@ -401,19 +412,42 @@ impl SemanticAnalyzer {
                         max_idx = current_idx + 1;
                     }
                     // Only advance if this item doesn't have a field designator
-                    // (multiple items may target different fields of the same element)
+                    // (field designators target fields within the same struct element)
                     let has_field_designator = item.designators.iter()
                         .any(|d| matches!(d, Designator::Field(_)));
                     if !has_field_designator {
-                        current_idx += 1;
+                        if flat_scalars_per_elem > 1 && !has_any_designator {
+                            // Struct with array fields: group flat scalars per struct.
+                            // Designators disable grouping (conservative per-item count).
+                            let is_braced = matches!(item.init, Initializer::List(_));
+                            if is_braced {
+                                // Braced sub-list counts as one complete element
+                                current_idx += 1;
+                                fields_consumed = 0;
+                            } else {
+                                fields_consumed += 1;
+                                if fields_consumed >= flat_scalars_per_elem {
+                                    current_idx += 1;
+                                    fields_consumed = 0;
+                                }
+                            }
+                        } else {
+                            current_idx += 1;
+                        }
                     }
                 }
-                let has_any_designator = items.iter()
-                    .any(|item| !item.designators.is_empty());
+
+                // Count partial struct element at the end
+                if flat_scalars_per_elem > 1 && fields_consumed > 0 {
+                    if current_idx >= max_idx {
+                        max_idx = current_idx + 1;
+                    }
+                }
+
                 if has_any_designator {
                     Some(max_idx)
                 } else {
-                    Some(max_idx.max(items.len()))
+                    Some(max_idx.max(items.len().div_ceil(flat_scalars_per_elem.max(1))))
                 }
             }
             Initializer::Expr(expr) => {
@@ -429,6 +463,38 @@ impl SemanticAnalyzer {
                     _ => None,
                 }
             }
+        }
+    }
+
+    /// Compute the flat scalar count for a type - how many scalar initializer
+    /// items are needed to fully initialize one value of this type.
+    /// Scalar types = 1, arrays = element_count * per_element, structs = sum of fields.
+    fn flat_scalar_count_for_type(&self, ty: &CType) -> usize {
+        match ty {
+            CType::Array(elem_ty, Some(size)) => {
+                *size * self.flat_scalar_count_for_type(elem_ty)
+            }
+            CType::Array(_, None) => 0, // unsized arrays contribute 0 scalars
+            CType::Struct(key) | CType::Union(key) => {
+                if let Some(layout) = self.result.type_context.struct_layouts.get(&**key) {
+                    if layout.fields.is_empty() {
+                        return 0;
+                    }
+                    if layout.is_union {
+                        layout.fields.iter()
+                            .map(|f| self.flat_scalar_count_for_type(&f.ty))
+                            .max()
+                            .unwrap_or(1)
+                    } else {
+                        layout.fields.iter()
+                            .map(|f| self.flat_scalar_count_for_type(&f.ty))
+                            .sum()
+                    }
+                } else {
+                    1
+                }
+            }
+            _ => 1,
         }
     }
 
