@@ -1602,18 +1602,38 @@ impl ArchCodegen for X86Codegen {
         }
         self.state.emit_fmt(format_args!("    jae {}", default_label));
 
-        // Jump through the table: jmp *table(,%rax,8)
-        self.state.emit_fmt(format_args!("    leaq {}(%rip), %rcx", table_label));
-        self.state.emit("    movq (%rcx,%rax,8), %rcx");
-        self.state.emit("    jmp *%rcx");
+        // Jump through the table
+        if self.state.pic_mode {
+            // PIC mode: use relative 32-bit offsets to avoid R_X86_64_64 relocations.
+            // Table entries are .long (target - table_base), loaded with movslq and
+            // added to the base address.
+            self.state.emit_fmt(format_args!("    leaq {}(%rip), %rcx", table_label));
+            self.state.emit("    movslq (%rcx,%rax,4), %rdx");
+            self.state.emit("    addq %rcx, %rdx");
+            self.state.emit("    jmp *%rdx");
 
-        // Emit jump table in .rodata
-        self.state.emit(".section .rodata");
-        self.state.emit(".align 8");
-        self.state.emit_fmt(format_args!("{}:", table_label));
-        for target in &table {
-            let target_label = target.as_label();
-            self.state.emit_fmt(format_args!("    .quad {}", target_label));
+            // Emit jump table in .rodata with relative offsets
+            self.state.emit(".section .rodata");
+            self.state.emit(".align 4");
+            self.state.emit_fmt(format_args!("{}:", table_label));
+            for target in &table {
+                let target_label = target.as_label();
+                self.state.emit_fmt(format_args!("    .long {} - {}", target_label, table_label));
+            }
+        } else {
+            // Non-PIC: use absolute 64-bit addresses
+            self.state.emit_fmt(format_args!("    leaq {}(%rip), %rcx", table_label));
+            self.state.emit("    movq (%rcx,%rax,8), %rcx");
+            self.state.emit("    jmp *%rcx");
+
+            // Emit jump table in .rodata with absolute addresses
+            self.state.emit(".section .rodata");
+            self.state.emit(".align 8");
+            self.state.emit_fmt(format_args!("{}:", table_label));
+            for target in &table {
+                let target_label = target.as_label();
+                self.state.emit_fmt(format_args!("    .quad {}", target_label));
+            }
         }
         // Restore the function's text section (may be custom, e.g. .init.text)
         let sect = self.state.current_text_section.clone();
