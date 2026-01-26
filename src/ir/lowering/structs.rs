@@ -509,10 +509,14 @@ impl Lowerer {
                 };
                 return (fl.offset, ir_ty, bf);
             }
-            // Fallback: search anonymous struct/union members recursively
-            // (field_layout only does flat lookup; field_offset searches anonymous members)
-            if let Some((offset, ctype)) = layout.field_offset(field_name, &self.types) {
-                return (offset, IrType::from_ctype(&ctype), None);
+            // Fallback: search anonymous struct/union members recursively,
+            // preserving bitfield metadata (bit_offset, bit_width).
+            if let Some((offset, ctype, bit_offset, bit_width)) = layout.field_offset_with_bitfield(field_name, &self.types) {
+                let bf = match (bit_offset, bit_width) {
+                    (Some(bo), Some(bw)) => Some((bo, bw)),
+                    _ => None,
+                };
+                return (offset, IrType::from_ctype(&ctype), bf);
             }
         }
         (0, IrType::I32, None)
@@ -845,8 +849,14 @@ impl Lowerer {
                 };
                 return (fl.offset, ir_ty, bf, Some(fl.ty.clone()));
             }
-            if let Some((offset, ctype)) = layout.field_offset(field_name, &self.types) {
-                return (offset, IrType::from_ctype(&ctype), None, Some(ctype.clone()));
+            // Search anonymous struct/union members recursively,
+            // preserving bitfield metadata (bit_offset, bit_width).
+            if let Some((offset, ctype, bit_offset, bit_width)) = layout.field_offset_with_bitfield(field_name, &self.types) {
+                let bf = match (bit_offset, bit_width) {
+                    (Some(bo), Some(bw)) => Some((bo, bw)),
+                    _ => None,
+                };
+                return (offset, IrType::from_ctype(&ctype), bf, Some(ctype.clone()));
             }
         }
         (0, IrType::I32, None, None)

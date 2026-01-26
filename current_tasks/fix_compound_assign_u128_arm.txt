@@ -1,0 +1,9 @@
+Fix compound assignment (+=, -=, *=, etc.) when LHS is narrower than RHS
+involving __int128/__uint128 types, specifically on ARM.
+
+Bug: `uint64_t x += __uint128_t y` was being compiled as `x = (uint64_t)y`
+instead of `x = x + (uint64_t)y`. The promote_for_op() and narrow_from_op()
+functions in expr_assign.rs only checked for `ir_ty.size() < 8` which missed
+the 8-to-16 byte promotion needed for 128-bit operations.
+
+Status: in_progress

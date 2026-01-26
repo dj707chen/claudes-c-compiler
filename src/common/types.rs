@@ -681,6 +681,41 @@ impl StructLayout {
     pub fn field_layout(&self, name: &str) -> Option<&StructFieldLayout> {
         self.fields.iter().find(|f| f.name == name)
     }
+
+    /// Look up a field by name, returning its offset, type, and optional bitfield info.
+    /// Recursively searches anonymous struct/union members (unlike field_layout which
+    /// only does flat lookup). This is needed so that bitfield metadata is not lost
+    /// when accessing bitfields through anonymous struct/union members.
+    pub fn field_offset_with_bitfield(
+        &self,
+        name: &str,
+        ctx: &dyn StructLayoutProvider,
+    ) -> Option<(usize, CType, Option<u32>, Option<u32>)> {
+        // First, try direct field lookup
+        if let Some(f) = self.fields.iter().find(|f| f.name == name) {
+            return Some((f.offset, f.ty.clone(), f.bit_offset, f.bit_width));
+        }
+        // Then, search anonymous (unnamed) struct/union members recursively
+        for f in &self.fields {
+            if !f.name.is_empty() {
+                continue;
+            }
+            let anon_key = match &f.ty {
+                CType::Struct(key) | CType::Union(key) => key.clone(),
+                _ => continue,
+            };
+            let anon_layout = match ctx.get_struct_layout(&anon_key) {
+                Some(layout) => layout.clone(),
+                None => continue,
+            };
+            if let Some((inner_offset, ty, bit_offset, bit_width)) =
+                anon_layout.field_offset_with_bitfield(name, ctx)
+            {
+                return Some((f.offset + inner_offset, ty, bit_offset, bit_width));
+            }
+        }
+        None
+    }
 }
 
 /// Align `offset` up to the next multiple of `align`.

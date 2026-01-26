@@ -1,6 +1,0 @@
-Task: Fix miscompilation of arch/x86/kernel/cpu/cacheinfo.c causing kernel boot failure
-
-Problem: arch/x86/kernel/cpu/cacheinfo.c is miscompiled by ccc, causing the kernel
-to fail to boot. This is reproducible when testing the single file swap.
-
-Status: in_progress - investigating root cause by comparing ccc output with GCC output
