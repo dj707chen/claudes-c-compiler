@@ -16,6 +16,7 @@ pub mod dce;
 pub mod gvn;
 pub mod if_convert;
 pub mod licm;
+pub mod narrow;
 pub mod simplify;
 
 use crate::common::fx_hash::FxHashSet;
@@ -72,6 +73,13 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
         // and lowering so subsequent passes see through them)
         if !disabled.contains("copyprop") {
             changes += copy_prop::run(module);
+        }
+
+        // Phase 2b: Integer narrowing (widen-operate-narrow => direct narrow operation)
+        // Must run after copy propagation so widening casts are visible,
+        // and before other optimizations to reduce instruction count.
+        if !disabled.contains("narrow") {
+            changes += narrow::run(module);
         }
 
         // Phase 3: Algebraic simplification (x+0 => x, x*1 => x, etc.)

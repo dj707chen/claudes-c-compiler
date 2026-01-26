@@ -242,33 +242,44 @@ impl X86Codegen {
     /// based on register allocation (register-direct, immediate, or accumulator fallback).
     /// Used by both emit_cmp and emit_fused_cmp_branch.
     fn emit_int_cmp_insn(&mut self, lhs: &Operand, rhs: &Operand) {
+        self.emit_int_cmp_insn_typed(lhs, rhs, false);
+    }
+
+    /// Emit a comparison instruction, optionally using 32-bit form for I32/U32 types.
+    /// When `use_32bit` is true, emits `cmpl` with 32-bit register names instead of `cmpq`.
+    fn emit_int_cmp_insn_typed(&mut self, lhs: &Operand, rhs: &Operand, use_32bit: bool) {
+        let cmp_instr = if use_32bit { "cmpl" } else { "cmpq" };
         let lhs_phys = self.operand_reg(lhs);
         let rhs_phys = self.operand_reg(rhs);
         if let (Some(lhs_r), Some(rhs_r)) = (lhs_phys, rhs_phys) {
             // Both in callee-saved registers: compare directly
-            let lhs_name = callee_saved_name(lhs_r);
-            let rhs_name = callee_saved_name(rhs_r);
-            self.state.emit_fmt(format_args!("    cmpq %{}, %{}", rhs_name, lhs_name));
+            let lhs_name = if use_32bit { callee_saved_name_32(lhs_r) } else { callee_saved_name(lhs_r) };
+            let rhs_name = if use_32bit { callee_saved_name_32(rhs_r) } else { callee_saved_name(rhs_r) };
+            self.state.emit_fmt(format_args!("    {} %{}, %{}", cmp_instr, rhs_name, lhs_name));
         } else if let Some(imm) = Self::const_as_imm32(rhs) {
             if let Some(lhs_r) = lhs_phys {
-                let lhs_name = callee_saved_name(lhs_r);
-                self.state.emit_fmt(format_args!("    cmpq ${}, %{}", imm, lhs_name));
+                let lhs_name = if use_32bit { callee_saved_name_32(lhs_r) } else { callee_saved_name(lhs_r) };
+                self.state.emit_fmt(format_args!("    {} ${}, %{}", cmp_instr, imm, lhs_name));
             } else {
                 self.operand_to_rax(lhs);
-                self.state.emit_fmt(format_args!("    cmpq ${}, %rax", imm));
+                let reg = if use_32bit { "eax" } else { "rax" };
+                self.state.emit_fmt(format_args!("    {} ${}, %{}", cmp_instr, imm, reg));
             }
         } else if let Some(lhs_r) = lhs_phys {
-            let lhs_name = callee_saved_name(lhs_r);
+            let lhs_name = if use_32bit { callee_saved_name_32(lhs_r) } else { callee_saved_name(lhs_r) };
             self.operand_to_rcx(rhs);
-            self.state.emit_fmt(format_args!("    cmpq %rcx, %{}", lhs_name));
+            let rcx = if use_32bit { "ecx" } else { "rcx" };
+            self.state.emit_fmt(format_args!("    {} %{}, %{}", cmp_instr, rcx, lhs_name));
         } else if let Some(rhs_r) = rhs_phys {
-            let rhs_name = callee_saved_name(rhs_r);
+            let rhs_name = if use_32bit { callee_saved_name_32(rhs_r) } else { callee_saved_name(rhs_r) };
             self.operand_to_rax(lhs);
-            self.state.emit_fmt(format_args!("    cmpq %{}, %rax", rhs_name));
+            let reg = if use_32bit { "eax" } else { "rax" };
+            self.state.emit_fmt(format_args!("    {} %{}, %{}", cmp_instr, rhs_name, reg));
         } else {
             self.operand_to_rax(lhs);
             self.operand_to_rcx(rhs);
-            self.state.emit("    cmpq %rcx, %rax");
+            let (rcx, rax) = if use_32bit { ("ecx", "eax") } else { ("rcx", "rax") };
+            self.state.emit_fmt(format_args!("    {} %{}, %{}", cmp_instr, rcx, rax));
         }
     }
 
@@ -2545,8 +2556,9 @@ impl ArchCodegen for X86Codegen {
             return;
         }
 
-        // Integer comparison: use shared helper that tries register-direct cmpq
-        self.emit_int_cmp_insn(lhs, rhs);
+        // Integer comparison: use 32-bit compare for I32/U32 types
+        let use_32bit = ty == IrType::I32 || ty == IrType::U32;
+        self.emit_int_cmp_insn_typed(lhs, rhs, use_32bit);
 
         let set_instr = match op {
             IrCmpOp::Eq => "sete",
@@ -2580,12 +2592,13 @@ impl ArchCodegen for X86Codegen {
         op: IrCmpOp,
         lhs: &Operand,
         rhs: &Operand,
-        _ty: IrType,
+        ty: IrType,
         true_label: &str,
         false_label: &str,
     ) {
-        // Emit the integer comparison (shared with emit_cmp)
-        self.emit_int_cmp_insn(lhs, rhs);
+        // Emit the integer comparison, using 32-bit form for I32/U32
+        let use_32bit = ty == IrType::I32 || ty == IrType::U32;
+        self.emit_int_cmp_insn_typed(lhs, rhs, use_32bit);
 
         // Emit fused conditional jump directly (no setCC, no movzbq, no store/load/test)
         let jcc = match op {
@@ -2610,38 +2623,13 @@ impl ArchCodegen for X86Codegen {
         op: IrCmpOp,
         lhs: &Operand,
         rhs: &Operand,
-        _ty: IrType,
+        ty: IrType,
         true_block: BlockId,
         false_block: BlockId,
     ) {
-        // Emit the comparison (same logic as emit_fused_cmp_branch)
-        let lhs_phys = self.operand_reg(lhs);
-        let rhs_phys = self.operand_reg(rhs);
-        if let (Some(lhs_r), Some(rhs_r)) = (lhs_phys, rhs_phys) {
-            let lhs_name = callee_saved_name(lhs_r);
-            let rhs_name = callee_saved_name(rhs_r);
-            self.state.out.emit_instr_reg_reg("    cmpq", rhs_name, lhs_name);
-        } else if let Some(imm) = Self::const_as_imm32(rhs) {
-            if let Some(lhs_r) = lhs_phys {
-                let lhs_name = callee_saved_name(lhs_r);
-                self.state.out.emit_instr_imm_reg("    cmpq", imm as i64, lhs_name);
-            } else {
-                self.operand_to_rax(lhs);
-                self.state.out.emit_instr_imm_reg("    cmpq", imm as i64, "rax");
-            }
-        } else if let Some(lhs_r) = lhs_phys {
-            let lhs_name = callee_saved_name(lhs_r);
-            self.operand_to_rcx(rhs);
-            self.state.out.emit_instr_reg_reg("    cmpq", "rcx", lhs_name);
-        } else if let Some(rhs_r) = rhs_phys {
-            let rhs_name = callee_saved_name(rhs_r);
-            self.operand_to_rax(lhs);
-            self.state.out.emit_instr_reg_reg("    cmpq", rhs_name, "rax");
-        } else {
-            self.operand_to_rax(lhs);
-            self.operand_to_rcx(rhs);
-            self.state.emit("    cmpq %rcx, %rax");
-        }
+        // Use 32-bit compare for I32/U32 types (avoids unnecessary sign-extension)
+        let use_32bit = ty == IrType::I32 || ty == IrType::U32;
+        self.emit_int_cmp_insn_typed(lhs, rhs, use_32bit);
 
         // Emit fused conditional jump using fast block-id path
         let jcc = match op {
