@@ -1826,7 +1826,20 @@ impl Lowerer {
                         self.compute_init_list_array_size_for_char_array(items, da.base_ty)
                     };
                     if da.elem_size > 0 {
-                        da.alloc_size = actual_count * da.elem_size;
+                        // For multi-dimensional arrays with nested brace init
+                        // (e.g., int*[][3] = {{&x,&y,&z}, {&w,0,0}}), each
+                        // top-level item spans the outermost stride.
+                        // For flat init (e.g., {&x,0,0,&y,0,0}), each item
+                        // is one element.
+                        let has_nested_lists = items.iter().any(|item| {
+                            matches!(&item.init, Initializer::List(_))
+                        });
+                        let item_size = if da.array_dim_strides.len() > 1 && has_nested_lists {
+                            da.array_dim_strides[0]
+                        } else {
+                            da.elem_size
+                        };
+                        da.alloc_size = actual_count * item_size;
                         da.actual_alloc_size = da.alloc_size;
                         if da.array_dim_strides.len() == 1 {
                             da.array_dim_strides = vec![da.elem_size];

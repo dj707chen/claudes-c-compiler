@@ -302,8 +302,26 @@ impl Lowerer {
 
                     if has_addr_exprs {
                         // Use Compound initializer for arrays containing address expressions.
-                        // Support designated initializers: [idx] = val
-                        let mut elements: Vec<GlobalInit> = (0..num_elems).map(|_| GlobalInit::Zero).collect();
+                        // Each Compound element becomes one .quad directive in the backend.
+                        // For multi-dimensional arrays, we need the TOTAL number of base-type
+                        // slots, not the number of outer-dimension elements.
+                        let base_type_size = base_ty.size().max(1);
+                        let flat_num_elems = total_size / base_type_size;
+                        // For multi-dimensional arrays, compute how many flat elements
+                        // each top-level sub-array item spans. E.g., int *arr[2][3]
+                        // has stride 24 (3*8) for the outer dimension, so each outer
+                        // sub-array spans 3 flat pointer slots.
+                        let outer_stride = if array_dim_strides.len() >= 2 {
+                            array_dim_strides[0] / base_type_size
+                        } else {
+                            1
+                        };
+                        let mut elements: Vec<GlobalInit> = (0..flat_num_elems).map(|_| GlobalInit::Zero).collect();
+                        // Detect if items are structured (nested lists for sub-arrays)
+                        // vs flat (individual expressions for each element).
+                        let is_structured = outer_stride > 1 && items.iter().any(|item| {
+                            matches!(&item.init, Initializer::List(_))
+                        });
                         let mut current_idx = 0usize;
                         for item in items {
                             if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
@@ -311,20 +329,27 @@ impl Lowerer {
                                     current_idx = idx;
                                 }
                             }
-                            if current_idx < num_elems {
+                            // For structured init (nested lists), each item spans outer_stride
+                            // flat positions. For flat init, each item is one flat position.
+                            let flat_idx = if is_structured {
+                                current_idx * outer_stride
+                            } else {
+                                current_idx
+                            };
+                            if flat_idx < flat_num_elems {
                                 let mut elem_parts = Vec::new();
                                 self.collect_compound_init_element(&item.init, &mut elem_parts, elem_size);
-                                if let Some(elem) = elem_parts.into_iter().next() {
-                                    // Coerce scalar constants to the array's element type so
-                                    // that e.g. IrConst::I32(100) in a uint64_t[] array becomes
-                                    // IrConst::I64(100), ensuring correct element width in output.
-                                    let elem = match elem {
-                                        GlobalInit::Scalar(val) => {
-                                            GlobalInit::Scalar(val.coerce_to(base_ty))
-                                        }
-                                        other => other,
-                                    };
-                                    elements[current_idx] = elem;
+                                // Place collected elements at the correct flat positions
+                                for (i, elem) in elem_parts.into_iter().enumerate() {
+                                    if flat_idx + i < flat_num_elems {
+                                        let elem = match elem {
+                                            GlobalInit::Scalar(val) => {
+                                                GlobalInit::Scalar(val.coerce_to(base_ty))
+                                            }
+                                            other => other,
+                                        };
+                                        elements[flat_idx + i] = elem;
+                                    }
                                 }
                             }
                             current_idx += 1;
@@ -1070,13 +1095,14 @@ impl Lowerer {
                 }
             }
             Initializer::List(sub_items) => {
-                // Double-brace init like {{"str"}} or {{expr}}:
-                // Unwrap the nested list and process the first element as the value
-                // for this array slot.
-                if sub_items.len() >= 1 {
-                    self.collect_compound_init_element(&sub_items[0].init, elements, elem_size);
-                } else {
+                // Nested brace init like {{&x, &y, &z}} for a sub-array row:
+                // Recursively process each sub-item to collect all elements.
+                if sub_items.is_empty() {
                     elements.push(GlobalInit::Zero);
+                } else {
+                    for sub in sub_items {
+                        self.collect_compound_init_element(&sub.init, elements, elem_size);
+                    }
                 }
             }
         }

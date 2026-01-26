@@ -81,12 +81,31 @@ pub(super) fn init_contains_addr_expr(item: &InitializerItem, is_multidim_char_a
             if matches!(expr, Expr::StringLiteral(_, _)) {
                 !is_multidim_char_array
             } else {
-                false
+                expr_might_be_addr(expr)
             }
         }
         Initializer::List(sub_items) => {
             sub_items.iter().any(|sub| init_contains_addr_expr(sub, is_multidim_char_array))
         }
+    }
+}
+
+/// Check if an expression might produce an address that requires a relocation.
+/// This is used to determine whether a global initializer needs the Compound path.
+/// Conservative: false positives are safe (just use the slower Compound path).
+fn expr_might_be_addr(expr: &Expr) -> bool {
+    match expr {
+        Expr::AddressOf(_, _) => true,
+        Expr::LabelAddr(_, _) => true,
+        // Identifiers in global pointer array context are addresses (array/function names)
+        Expr::Identifier(_, _) => true,
+        // Cast of an address expression
+        Expr::Cast(_, inner, _) => expr_might_be_addr(inner),
+        // Binary ops on addresses (e.g., &x + offset, arr + n)
+        Expr::BinaryOp(_, lhs, rhs, _) => expr_might_be_addr(lhs) || expr_might_be_addr(rhs),
+        // Compound literals may contain addresses
+        Expr::CompoundLiteral(_, _, _) => true,
+        _ => false,
     }
 }
 
