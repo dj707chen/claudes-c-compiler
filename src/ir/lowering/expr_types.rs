@@ -639,6 +639,16 @@ impl Lowerer {
             return info.ty.size();
         }
         if let Some(ginfo) = self.globals.get(name) {
+            // For arrays, prefer the actual allocation size from the module global
+            // (handles implicit-size arrays like `int x[] = {1,2,3}` where
+            // CType may still be Array(_, None) returning pointer size).
+            if ginfo.is_array {
+                for g in &self.module.globals {
+                    if g.name == *name {
+                        return g.size;
+                    }
+                }
+            }
             // For structs, prefer CType size (returns the type size without
             // flexible array member data, matching C standard sizeof semantics).
             if let Some(ref ct) = ginfo.c_type {
@@ -647,7 +657,7 @@ impl Lowerer {
                     return ct_size;
                 }
             }
-            if ginfo.is_array || ginfo.is_struct {
+            if ginfo.is_struct {
                 for g in &self.module.globals {
                     if g.name == *name {
                         return g.size;
