@@ -192,6 +192,25 @@ impl<'a> SemaConstEval<'a> {
                 let target_width = target_size * 8;
                 let target_signed = !target_ctype.is_unsigned() && !target_ctype.is_pointer_like();
 
+                // For 128-bit targets, we need to sign-extend or zero-extend from 64 bits
+                // based on the *source* expression's signedness, not the target's.
+                // E.g., (unsigned __int128)(-1) should be all-ones (sign-extend from signed source),
+                // but (unsigned __int128)(0xFFFFFFFFFFFFFFFFULL) should be 0x0000...FFFF (zero-extend).
+                if target_size == 16 && !matches!(&target_ctype, CType::LongDouble) {
+                    // Determine source signedness: try type map first, then infer, default signed
+                    let src_signed = self.lookup_expr_type(inner)
+                        .or_else(|| self.infer_expr_ctype(inner))
+                        .map_or(true, |ct| !ct.is_unsigned());
+                    let v128 = if src_signed {
+                        // Sign-extend: u64 -> i64 (reinterpret) -> i128 (sign-extend)
+                        (bits as i64) as i128
+                    } else {
+                        // Zero-extend: u64 -> i128
+                        bits as i128
+                    };
+                    return Some(IrConst::I128(v128));
+                }
+
                 // Truncate to target width
                 let truncated = if target_width >= 64 {
                     bits

@@ -117,15 +117,29 @@ impl Lowerer {
                 const_arith::negate_const(promoted)
             }
             Expr::BinaryOp(op, lhs, rhs, _) => {
-                let l = self.eval_const_expr(lhs)?;
-                let r = self.eval_const_expr(rhs)?;
-                // Use infer_expr_type (C semantic types) for proper usual arithmetic
-                // conversions. get_expr_type returns IR storage types (IntLiteral → I64)
-                // which loses 32-bit width info needed for correct folding of
-                // expressions like (1 << 31) / N.
-                let lhs_ty = self.infer_expr_type(lhs);
-                let rhs_ty = self.infer_expr_type(rhs);
-                self.eval_const_binop(op, &l, &r, lhs_ty, rhs_ty)
+                let l = self.eval_const_expr(lhs);
+                let r = self.eval_const_expr(rhs);
+                if let (Some(l), Some(r)) = (l, r) {
+                    // Use infer_expr_type (C semantic types) for proper usual arithmetic
+                    // conversions. get_expr_type returns IR storage types (IntLiteral → I64)
+                    // which loses 32-bit width info needed for correct folding of
+                    // expressions like (1 << 31) / N.
+                    let lhs_ty = self.infer_expr_type(lhs);
+                    let rhs_ty = self.infer_expr_type(rhs);
+                    let result = self.eval_const_binop(op, &l, &r, lhs_ty, rhs_ty);
+                    if result.is_some() {
+                        return result;
+                    }
+                }
+                // For subtraction, try evaluating as pointer difference:
+                // &arr[5] - &arr[0], (char*)&s.c - (char*)&s.a, etc.
+                // Both operands may be global address expressions referring to the
+                // same symbol; the result is the byte offset difference (possibly
+                // divided by the pointed-to element size for typed pointer subtraction).
+                if *op == BinOp::Sub {
+                    return self.eval_const_ptr_diff(lhs, rhs);
+                }
+                None
             }
             Expr::UnaryOp(UnaryOp::BitNot, inner, _) => {
                 let val = self.eval_const_expr(inner)?;
@@ -161,6 +175,22 @@ impl Lowerer {
                 let target_width = target_ir_ty.size() * 8;
                 let target_signed = matches!(target_ir_ty, IrType::I8 | IrType::I16 | IrType::I32 | IrType::I64 | IrType::I128);
 
+                // For 128-bit targets, sign-extend or zero-extend from 64 bits
+                // based on the source expression's signedness (not the target's).
+                // E.g., (unsigned __int128)(-1) should be all-ones (sign-extend signed source),
+                // but (unsigned __int128)(0xFFFFFFFFFFFFFFFFULL) should be 0x0000...FFFF.
+                if matches!(target_ir_ty, IrType::I128 | IrType::U128) {
+                    let src_ty = self.get_expr_type(inner);
+                    let v128 = if src_ty.is_unsigned() {
+                        // Zero-extend: u64 -> i128
+                        bits as i128
+                    } else {
+                        // Sign-extend: u64 -> i64 (reinterpret) -> i128 (sign-extend)
+                        (bits as i64) as i128
+                    };
+                    return Some(IrConst::I128(v128));
+                }
+
                 // Truncate to target width
                 let truncated = if target_width >= 64 {
                     bits
@@ -177,7 +207,7 @@ impl Lowerer {
                     IrType::I32 => IrConst::I32(truncated as i32),
                     IrType::U32 => IrConst::I64(truncated as u32 as i64),
                     IrType::I64 | IrType::U64 | IrType::Ptr => IrConst::I64(truncated as i64),
-                    IrType::I128 | IrType::U128 => IrConst::I128(truncated as i128),
+                    IrType::I128 | IrType::U128 => unreachable!("handled above"),
                     IrType::F32 => {
                         let int_val = if target_signed { truncated as i64 as f32 } else { truncated as u64 as f32 };
                         IrConst::F32(int_val)
@@ -1305,6 +1335,59 @@ impl Lowerer {
     /// Evaluate a constant expression and return as usize (for array index designators).
     pub(super) fn eval_const_expr_for_designator(&self, expr: &Expr) -> Option<usize> {
         self.eval_const_expr(expr).and_then(|v| v.to_usize())
+    }
+
+    /// Evaluate a compile-time pointer difference expression.
+    /// Handles patterns like:
+    ///   &arr[5] - &arr[0]              -> 5  (typed pointer subtraction)
+    ///   (char*)&arr[5] - (char*)&arr[0] -> 20 (byte-level subtraction)
+    ///   (long)&arr[5] - (long)&arr[0]  -> 20 (cast-to-integer subtraction)
+    ///   (char*)&s.c - (char*)&s.a      -> 8  (struct member offset diff)
+    ///
+    /// Both operands must resolve to addresses within the same global symbol.
+    /// The byte offsets are subtracted; for typed pointer subtraction the result
+    /// is divided by the pointed-to element size.
+    fn eval_const_ptr_diff(&self, lhs: &Expr, rhs: &Expr) -> Option<IrConst> {
+        let lhs_addr = self.eval_global_addr_expr(lhs)?;
+        let rhs_addr = self.eval_global_addr_expr(rhs)?;
+
+        // Extract (symbol_name, byte_offset) from each side
+        let (lhs_name, lhs_offset) = match &lhs_addr {
+            GlobalInit::GlobalAddr(name) => (name.as_str(), 0i64),
+            GlobalInit::GlobalAddrOffset(name, off) => (name.as_str(), *off),
+            _ => return None,
+        };
+        let (rhs_name, rhs_offset) = match &rhs_addr {
+            GlobalInit::GlobalAddr(name) => (name.as_str(), 0i64),
+            GlobalInit::GlobalAddrOffset(name, off) => (name.as_str(), *off),
+            _ => return None,
+        };
+
+        // Both must refer to the same global symbol
+        if lhs_name != rhs_name {
+            return None;
+        }
+
+        let byte_diff = lhs_offset - rhs_offset;
+
+        // Determine if this is typed pointer subtraction (result in elements)
+        // or byte/integer subtraction (result in bytes).
+        // For typed pointer subtraction (ptr - ptr where both are non-void,
+        // non-char pointers), divide by the element size.
+        let result = if self.expr_is_pointer(lhs) && self.expr_is_pointer(rhs) {
+            let elem_size = self.get_pointer_elem_size_from_expr(lhs) as i64;
+            if elem_size > 1 {
+                byte_diff / elem_size
+            } else {
+                byte_diff
+            }
+        } else {
+            // Cast-to-integer subtraction: (long)&x - (long)&y, or
+            // char*/void* subtraction: result is in bytes
+            byte_diff
+        };
+
+        Some(IrConst::I64(result))
     }
 
     /// Convert an IrConst to i64. Delegates to IrConst::to_i64().
