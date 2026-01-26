@@ -1,0 +1,13 @@
+Fix VLA parameter side effect evaluation.
+
+In C, array parameter declarations like `void foo(int a, int b[a++])` have
+the outermost dimension decayed to a pointer, but the size expression (here
+`a++`) must still be evaluated for its side effects. Previously, the parser
+discarded the outermost dimension expression during array-to-pointer decay.
+
+Fix:
+1. Add `vla_size_exprs` field to ParamDecl to preserve dropped expressions
+2. In the parser, store the outermost dimension expression before discarding it
+3. In IR lowering, evaluate those expressions after parameter allocation
+
+Status: in_progress
