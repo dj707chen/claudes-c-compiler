@@ -1,0 +1,25 @@
+Fix __builtin_choose_expr and __builtin_constant_p in global initializers
+=========================================================================
+
+Problem: __builtin_choose_expr(const_expr, expr1, expr2) at file scope
+(global variable initializer) evaluates to 0 instead of the correct value.
+
+Root cause: The const expression evaluators (both sema and lowerer) don't
+handle FunctionCall AST nodes. __builtin_choose_expr and __builtin_constant_p
+are parsed as function calls but need to be evaluated at compile time for
+global initializer contexts.
+
+Example:
+  int y;
+  int z = __builtin_choose_expr(!__builtin_constant_p(y), 3, 4);
+  // z should be 3, but evaluates to 0
+
+Fix:
+1. Add FunctionCall handling in lowerer's eval_const_expr (const_eval.rs)
+   for __builtin_choose_expr and __builtin_constant_p
+2. Add same handling in sema's eval_const_expr (sema/const_eval.rs)
+
+Affects: gcc_torture_pr19449 test, and any code using __builtin_choose_expr
+in global initializer contexts (common in Linux kernel headers).
+
+Status: In progress
