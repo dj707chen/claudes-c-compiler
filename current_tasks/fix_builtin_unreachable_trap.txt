@@ -1,0 +1,8 @@
+Fix __builtin_unreachable() and __builtin_trap() to emit Terminator::Unreachable
+in the IR instead of generating a call to abort(). This is critical for kernel
+compilation where abort() doesn't exist. The correct behavior is to emit a ud2
+(x86) / brk #0 (ARM) / ebreak (RISC-V) trap instruction.
+
+Currently these builtins are mapped to BuiltinKind::LibcAlias("abort") which
+generates a call to the abort function. This creates an undefined symbol reference
+in kernel code and can cause boot failures.
