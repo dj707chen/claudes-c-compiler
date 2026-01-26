@@ -1074,6 +1074,56 @@ impl X86Codegen {
         }
     }
 
+    /// Load a float operand into %xmm0. Handles both Value operands (from stack)
+    /// and float constants (loaded via their bit pattern into rax first).
+    fn float_operand_to_xmm0(&mut self, op: &Operand, is_f32: bool) {
+        match op {
+            Operand::Const(c) => {
+                match c {
+                    IrConst::F64(v) => {
+                        let bits = v.to_bits() as i64;
+                        if bits == 0 {
+                            self.state.emit("    xorpd %xmm0, %xmm0");
+                        } else if bits >= i32::MIN as i64 && bits <= i32::MAX as i64 {
+                            self.state.emit_fmt(format_args!("    movq ${}, %rax", bits));
+                            self.state.emit("    movq %rax, %xmm0");
+                        } else {
+                            self.state.emit_fmt(format_args!("    movabsq ${}, %rax", bits));
+                            self.state.emit("    movq %rax, %xmm0");
+                        }
+                    }
+                    IrConst::F32(v) => {
+                        let bits = v.to_bits() as i32;
+                        if bits == 0 {
+                            self.state.emit("    xorps %xmm0, %xmm0");
+                        } else {
+                            self.state.emit_fmt(format_args!("    movl ${}, %eax", bits));
+                            self.state.emit("    movd %eax, %xmm0");
+                        }
+                    }
+                    _ => {
+                        // Integer or other constants - load to rax and move to xmm
+                        self.operand_to_reg(op, "rax");
+                        if is_f32 {
+                            self.state.emit("    movd %eax, %xmm0");
+                        } else {
+                            self.state.emit("    movq %rax, %xmm0");
+                        }
+                    }
+                }
+            }
+            Operand::Value(_) => {
+                // Load from stack slot to rax, then to xmm0
+                self.operand_to_reg(op, "rax");
+                if is_f32 {
+                    self.state.emit("    movd %eax, %xmm0");
+                } else {
+                    self.state.emit("    movq %rax, %xmm0");
+                }
+            }
+        }
+    }
+
     /// Emit SSE binary 128-bit op: load xmm0 from arg0 ptr, xmm1 from arg1 ptr,
     /// apply the given SSE instruction, store result xmm0 to dest_ptr.
     fn emit_sse_binary_128(&mut self, dest_ptr: &Value, args: &[Operand], sse_inst: &str) {
@@ -1227,6 +1277,46 @@ impl X86Codegen {
             IntrinsicOp::ReturnAddress => {
                 // __builtin_return_address(0): return address is at (%rbp)+8
                 self.state.emit("    movq 8(%rbp), %rax");
+                if let Some(d) = dest {
+                    self.store_rax_to(d);
+                }
+            }
+            IntrinsicOp::SqrtF64 => {
+                // sqrtsd: scalar double-precision square root
+                self.float_operand_to_xmm0(&args[0], false);
+                self.state.emit("    sqrtsd %xmm0, %xmm0");
+                self.state.emit("    movq %xmm0, %rax");
+                if let Some(d) = dest {
+                    self.store_rax_to(d);
+                }
+            }
+            IntrinsicOp::SqrtF32 => {
+                // sqrtss: scalar single-precision square root
+                self.float_operand_to_xmm0(&args[0], true);
+                self.state.emit("    sqrtss %xmm0, %xmm0");
+                self.state.emit("    movd %xmm0, %eax");
+                if let Some(d) = dest {
+                    self.store_rax_to(d);
+                }
+            }
+            IntrinsicOp::FabsF64 => {
+                // Clear sign bit for double-precision absolute value
+                self.float_operand_to_xmm0(&args[0], false);
+                self.state.emit("    movabsq $0x7FFFFFFFFFFFFFFF, %rcx");
+                self.state.emit("    movq %rcx, %xmm1");
+                self.state.emit("    andpd %xmm1, %xmm0");
+                self.state.emit("    movq %xmm0, %rax");
+                if let Some(d) = dest {
+                    self.store_rax_to(d);
+                }
+            }
+            IntrinsicOp::FabsF32 => {
+                // Clear sign bit for single-precision absolute value
+                self.float_operand_to_xmm0(&args[0], true);
+                self.state.emit("    movl $0x7FFFFFFF, %ecx");
+                self.state.emit("    movd %ecx, %xmm1");
+                self.state.emit("    andps %xmm1, %xmm0");
+                self.state.emit("    movd %xmm0, %eax");
                 if let Some(d) = dest {
                     self.store_rax_to(d);
                 }

@@ -11,7 +11,7 @@ SSA-based optimization passes that improve the IR before code generation.
 - **gvn.rs** - Dominator-based global value numbering: eliminates redundant BinOp, UnaryOp, Cmp, Cast, and GetElementPtr computations across all dominated blocks
 - **licm.rs** - Loop-invariant code motion: hoists loop-invariant computations and safe loads to loop preheaders. Includes load hoisting for non-address-taken alloca-based loads that are not modified within the loop (e.g., function parameter loads). Requires single-entry preheaders for soundness
 - **if_convert.rs** - If-conversion: converts simple diamond-shaped branch+phi patterns to Select instructions, enabling cmov/csel emission
-- **simplify.rs** - Algebraic simplification: identity removal (`x + 0` -> `x`), strength reduction (`x * 2` -> `x << 1`), boolean simplification. Float-unsafe simplifications (e.g., `x + 0`, `x * 0`, `x - x`) are restricted to integer types to preserve IEEE 754 semantics
+- **simplify.rs** - Algebraic simplification: identity removal (`x + 0` -> `x`), strength reduction (`x * 2` -> `x << 1`), boolean simplification, math call optimization (`sqrt`/`fabs` -> hardware intrinsics, `pow(x,2)` -> `x*x`, `pow(x,0.5)` -> `sqrt`). Float-unsafe simplifications (e.g., `x + 0`, `x * 0`, `x - x`) are restricted to integer types to preserve IEEE 754 semantics
 
 ## Pass Pipeline
 

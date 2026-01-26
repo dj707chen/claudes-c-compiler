@@ -125,6 +125,13 @@ fn try_simplify(
             }
             None
         }
+        Instruction::Call { dest, func, args, return_type, .. } => {
+            if let Some(d) = dest {
+                simplify_math_call(*d, func, args, *return_type)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -655,6 +662,132 @@ fn same_operand(a: &Operand, b: &Operand) -> bool {
     }
 }
 
+/// Simplify calls to known math library functions.
+///
+/// Optimizations:
+/// - pow(x, 2.0) / powf(x, 2.0f) => x * x  (avoids expensive libm call)
+/// - pow(x, 0.0) => 1.0, pow(x, 1.0) => x
+/// - pow(x, 0.5) => sqrt(x), powf(x, 0.5f) => sqrtf(x)
+/// - pow(x, -1.0) => 1.0 / x
+/// - sqrt(x) / sqrtf(x) => SqrtF64/SqrtF32 intrinsic (inline instruction)
+/// - fabs(x) / fabsf(x) => FabsF64/FabsF32 intrinsic (inline instruction)
+fn simplify_math_call(
+    dest: Value,
+    func: &str,
+    args: &[Operand],
+    return_type: IrType,
+) -> Option<Instruction> {
+    match func {
+        // pow(x, const_exp) => optimized form
+        "pow" | "powf" => {
+            if args.len() != 2 { return None; }
+            let exp = match &args[1] {
+                Operand::Const(IrConst::F64(v)) => *v,
+                Operand::Const(IrConst::F32(v)) => *v as f64,
+                Operand::Const(IrConst::LongDouble(v)) => *v,
+                _ => return None,
+            };
+            let base = args[0];
+
+            if exp == 0.0 {
+                // pow(x, 0.0) => 1.0 (C11 7.12.7.4: pow(x,+-0) returns 1 for all x, even NaN)
+                let one = if return_type == IrType::F32 {
+                    IrConst::F32(1.0)
+                } else {
+                    IrConst::F64(1.0)
+                };
+                return Some(Instruction::Copy { dest, src: Operand::Const(one) });
+            }
+            if exp == 1.0 {
+                // pow(x, 1.0) => x
+                return Some(Instruction::Copy { dest, src: base });
+            }
+            if exp == 2.0 {
+                // pow(x, 2.0) => x * x
+                return Some(Instruction::BinOp {
+                    dest,
+                    op: IrBinOp::Mul,
+                    lhs: base,
+                    rhs: base,
+                    ty: return_type,
+                });
+            }
+            if exp == -1.0 {
+                // pow(x, -1.0) => 1.0 / x
+                let one = if return_type == IrType::F32 {
+                    Operand::Const(IrConst::F32(1.0))
+                } else {
+                    Operand::Const(IrConst::F64(1.0))
+                };
+                return Some(Instruction::BinOp {
+                    dest,
+                    op: IrBinOp::SDiv, // float division
+                    lhs: one,
+                    rhs: base,
+                    ty: return_type,
+                });
+            }
+            if exp == 0.5 {
+                // pow(x, 0.5) => sqrt(x)
+                let sqrt_op = if return_type == IrType::F32 {
+                    IntrinsicOp::SqrtF32
+                } else {
+                    IntrinsicOp::SqrtF64
+                };
+                return Some(Instruction::Intrinsic {
+                    dest: Some(dest),
+                    op: sqrt_op,
+                    dest_ptr: None,
+                    args: vec![base],
+                });
+            }
+            None
+        }
+
+        // sqrt(x) => SqrtF64 intrinsic, sqrtf(x) => SqrtF32 intrinsic
+        "sqrt" => {
+            if args.len() != 1 { return None; }
+            Some(Instruction::Intrinsic {
+                dest: Some(dest),
+                op: IntrinsicOp::SqrtF64,
+                dest_ptr: None,
+                args: args.to_vec(),
+            })
+        }
+        "sqrtf" => {
+            if args.len() != 1 { return None; }
+            Some(Instruction::Intrinsic {
+                dest: Some(dest),
+                op: IntrinsicOp::SqrtF32,
+                dest_ptr: None,
+                args: args.to_vec(),
+            })
+        }
+
+        // fabs(x) => FabsF64 intrinsic, fabsf(x) => FabsF32 intrinsic
+        "fabs" => {
+            if args.len() != 1 { return None; }
+            Some(Instruction::Intrinsic {
+                dest: Some(dest),
+                op: IntrinsicOp::FabsF64,
+                dest_ptr: None,
+                args: args.to_vec(),
+            })
+        }
+        "fabsf" => {
+            if args.len() != 1 { return None; }
+            Some(Instruction::Intrinsic {
+                dest: Some(dest),
+                op: IntrinsicOp::FabsF32,
+                dest_ptr: None,
+                args: args.to_vec(),
+            })
+        }
+
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1179,5 +1312,199 @@ mod tests {
             ty: IrType::F64,
         };
         assert!(try_simplify(&inst, &empty_defs, &no_gep_defs()).is_none());
+    }
+
+    // === Math call simplification tests ===
+
+    fn make_call(func_name: &str, args: Vec<Operand>, return_type: IrType) -> Instruction {
+        Instruction::Call {
+            dest: Some(Value(10)),
+            func: func_name.to_string(),
+            args,
+            arg_types: vec![],
+            return_type,
+            is_variadic: false,
+            num_fixed_args: 0,
+            struct_arg_sizes: vec![],
+        }
+    }
+
+    #[test]
+    fn test_sqrt_to_intrinsic() {
+        let empty_defs = no_defs();
+        let inst = make_call("sqrt", vec![Operand::Value(Value(1))], IrType::F64);
+        let result = try_simplify(&inst, &empty_defs, &no_gep_defs()).unwrap();
+        match result {
+            Instruction::Intrinsic { op: IntrinsicOp::SqrtF64, args, .. } => {
+                assert_eq!(args.len(), 1);
+            }
+            _ => panic!("Expected SqrtF64 intrinsic, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_sqrtf_to_intrinsic() {
+        let empty_defs = no_defs();
+        let inst = make_call("sqrtf", vec![Operand::Value(Value(1))], IrType::F32);
+        let result = try_simplify(&inst, &empty_defs, &no_gep_defs()).unwrap();
+        match result {
+            Instruction::Intrinsic { op: IntrinsicOp::SqrtF32, args, .. } => {
+                assert_eq!(args.len(), 1);
+            }
+            _ => panic!("Expected SqrtF32 intrinsic, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_fabs_to_intrinsic() {
+        let empty_defs = no_defs();
+        let inst = make_call("fabs", vec![Operand::Value(Value(1))], IrType::F64);
+        let result = try_simplify(&inst, &empty_defs, &no_gep_defs()).unwrap();
+        match result {
+            Instruction::Intrinsic { op: IntrinsicOp::FabsF64, args, .. } => {
+                assert_eq!(args.len(), 1);
+            }
+            _ => panic!("Expected FabsF64 intrinsic, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_fabsf_to_intrinsic() {
+        let empty_defs = no_defs();
+        let inst = make_call("fabsf", vec![Operand::Value(Value(1))], IrType::F32);
+        let result = try_simplify(&inst, &empty_defs, &no_gep_defs()).unwrap();
+        match result {
+            Instruction::Intrinsic { op: IntrinsicOp::FabsF32, args, .. } => {
+                assert_eq!(args.len(), 1);
+            }
+            _ => panic!("Expected FabsF32 intrinsic, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_pow_x_zero() {
+        let empty_defs = no_defs();
+        let inst = make_call("pow", vec![
+            Operand::Value(Value(1)),
+            Operand::Const(IrConst::F64(0.0)),
+        ], IrType::F64);
+        let result = try_simplify(&inst, &empty_defs, &no_gep_defs()).unwrap();
+        match result {
+            Instruction::Copy { src: Operand::Const(IrConst::F64(v)), .. } => {
+                assert_eq!(v, 1.0);
+            }
+            _ => panic!("Expected Copy with 1.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_pow_x_one() {
+        let empty_defs = no_defs();
+        let inst = make_call("pow", vec![
+            Operand::Value(Value(1)),
+            Operand::Const(IrConst::F64(1.0)),
+        ], IrType::F64);
+        let result = try_simplify(&inst, &empty_defs, &no_gep_defs()).unwrap();
+        match result {
+            Instruction::Copy { src: Operand::Value(v), .. } => assert_eq!(v.0, 1),
+            _ => panic!("Expected Copy of base, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_pow_x_two() {
+        let empty_defs = no_defs();
+        let inst = make_call("pow", vec![
+            Operand::Value(Value(1)),
+            Operand::Const(IrConst::F64(2.0)),
+        ], IrType::F64);
+        let result = try_simplify(&inst, &empty_defs, &no_gep_defs()).unwrap();
+        match result {
+            Instruction::BinOp { op: IrBinOp::Mul, lhs: Operand::Value(a), rhs: Operand::Value(b), .. } => {
+                assert_eq!(a.0, 1);
+                assert_eq!(b.0, 1);
+            }
+            _ => panic!("Expected Mul x*x, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_pow_x_neg_one() {
+        let empty_defs = no_defs();
+        let inst = make_call("pow", vec![
+            Operand::Value(Value(1)),
+            Operand::Const(IrConst::F64(-1.0)),
+        ], IrType::F64);
+        let result = try_simplify(&inst, &empty_defs, &no_gep_defs()).unwrap();
+        match result {
+            Instruction::BinOp { op: IrBinOp::SDiv, lhs: Operand::Const(IrConst::F64(v)), .. } => {
+                assert_eq!(v, 1.0);
+            }
+            _ => panic!("Expected 1.0/x, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_pow_x_half() {
+        let empty_defs = no_defs();
+        let inst = make_call("pow", vec![
+            Operand::Value(Value(1)),
+            Operand::Const(IrConst::F64(0.5)),
+        ], IrType::F64);
+        let result = try_simplify(&inst, &empty_defs, &no_gep_defs()).unwrap();
+        match result {
+            Instruction::Intrinsic { op: IntrinsicOp::SqrtF64, .. } => {}
+            _ => panic!("Expected SqrtF64 intrinsic, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_pow_non_special_exponent() {
+        let empty_defs = no_defs();
+        let inst = make_call("pow", vec![
+            Operand::Value(Value(1)),
+            Operand::Const(IrConst::F64(3.0)),
+        ], IrType::F64);
+        assert!(try_simplify(&inst, &empty_defs, &no_gep_defs()).is_none());
+    }
+
+    #[test]
+    fn test_math_call_wrong_arg_count() {
+        let empty_defs = no_defs();
+        // sqrt with 0 args should not simplify
+        let inst = make_call("sqrt", vec![], IrType::F64);
+        assert!(try_simplify(&inst, &empty_defs, &no_gep_defs()).is_none());
+    }
+
+    #[test]
+    fn test_unknown_func_no_simplify() {
+        let empty_defs = no_defs();
+        let inst = make_call("sin", vec![Operand::Value(Value(1))], IrType::F64);
+        assert!(try_simplify(&inst, &empty_defs, &no_gep_defs()).is_none());
+    }
+
+    #[test]
+    fn test_pow_variable_exponent_no_simplify() {
+        let empty_defs = no_defs();
+        // pow(x, y) where y is a variable should not simplify
+        let inst = make_call("pow", vec![
+            Operand::Value(Value(1)),
+            Operand::Value(Value(2)),
+        ], IrType::F64);
+        assert!(try_simplify(&inst, &empty_defs, &no_gep_defs()).is_none());
+    }
+
+    #[test]
+    fn test_powf_x_two_f32() {
+        let empty_defs = no_defs();
+        let inst = make_call("powf", vec![
+            Operand::Value(Value(1)),
+            Operand::Const(IrConst::F32(2.0)),
+        ], IrType::F32);
+        let result = try_simplify(&inst, &empty_defs, &no_gep_defs()).unwrap();
+        match result {
+            Instruction::BinOp { op: IrBinOp::Mul, ty: IrType::F32, .. } => {}
+            _ => panic!("Expected F32 Mul, got {:?}", result),
+        }
     }
 }

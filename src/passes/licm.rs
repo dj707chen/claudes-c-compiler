@@ -201,7 +201,7 @@ fn is_hoistable(inst: &Instruction) -> bool {
             | Instruction::Copy { .. }
             | Instruction::GlobalAddr { .. }
             | Instruction::Select { .. }
-    )
+    ) || matches!(inst, Instruction::Intrinsic { op, .. } if op.is_pure())
 }
 
 /// Information about allocas in a function, used for load hoisting analysis.
@@ -413,6 +413,9 @@ fn instruction_operand_values(inst: &Instruction) -> Vec<u32> {
             collect_op(cond, &mut vals);
             collect_op(true_val, &mut vals);
             collect_op(false_val, &mut vals);
+        }
+        Instruction::Intrinsic { args, .. } => {
+            for a in args { collect_op(a, &mut vals); }
         }
         // All other instructions are non-hoistable and should never reach here.
         _ => unreachable!("instruction_operand_values called on non-hoistable instruction")

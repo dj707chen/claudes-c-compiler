@@ -920,6 +920,50 @@ impl ArmCodegen {
                     }
                 }
             }
+            IntrinsicOp::SqrtF64 => {
+                self.operand_to_x0(&args[0]);
+                self.state.emit("    fmov d0, x0");
+                self.state.emit("    fsqrt d0, d0");
+                self.state.emit("    fmov x0, d0");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.emit_store_to_sp("x0", slot.0, "str");
+                    }
+                }
+            }
+            IntrinsicOp::SqrtF32 => {
+                self.operand_to_x0(&args[0]);
+                self.state.emit("    fmov s0, w0");
+                self.state.emit("    fsqrt s0, s0");
+                self.state.emit("    fmov w0, s0");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.emit_store_to_sp("w0", slot.0, "str");
+                    }
+                }
+            }
+            IntrinsicOp::FabsF64 => {
+                self.operand_to_x0(&args[0]);
+                self.state.emit("    fmov d0, x0");
+                self.state.emit("    fabs d0, d0");
+                self.state.emit("    fmov x0, d0");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.emit_store_to_sp("x0", slot.0, "str");
+                    }
+                }
+            }
+            IntrinsicOp::FabsF32 => {
+                self.operand_to_x0(&args[0]);
+                self.state.emit("    fmov s0, w0");
+                self.state.emit("    fabs s0, s0");
+                self.state.emit("    fmov w0, s0");
+                if let Some(d) = dest {
+                    if let Some(slot) = self.state.get_slot(d.0) {
+                        self.emit_store_to_sp("w0", slot.0, "str");
+                    }
+                }
+            }
         }
     }
 }

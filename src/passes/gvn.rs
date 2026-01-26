@@ -373,6 +373,7 @@ mod tests {
             next_value_id: 4,
             section: None,
             visibility: None,
+            is_weak: false,
         };
 
         let mut module = IrModule {
@@ -435,6 +436,7 @@ mod tests {
             next_value_id: 4,
             section: None,
             visibility: None,
+            is_weak: false,
         };
 
         let mut module = IrModule {
@@ -488,6 +490,7 @@ mod tests {
             next_value_id: 2,
             section: None,
             visibility: None,
+            is_weak: false,
         };
 
         let mut module = IrModule {
@@ -547,6 +550,7 @@ mod tests {
             next_value_id: 3,
             section: None,
             visibility: None,
+            is_weak: false,
         };
 
         let mut module = IrModule {
@@ -606,6 +610,7 @@ mod tests {
             next_value_id: 4,
             section: None,
             visibility: None,
+            is_weak: false,
         };
 
         let mut module = IrModule {
@@ -669,6 +674,7 @@ mod tests {
             next_value_id: 4,
             section: None,
             visibility: None,
+            is_weak: false,
         };
 
         let mut module = IrModule {
@@ -759,6 +765,7 @@ mod tests {
             next_value_id: 4,
             section: None,
             visibility: None,
+            is_weak: false,
         };
 
         let mut module = IrModule {

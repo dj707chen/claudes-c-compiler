@@ -284,6 +284,21 @@ impl<'a> SemaConstEval<'a> {
                                 None
                             }
                         }
+                        "__builtin_bswap16" => {
+                            let val = self.eval_const_expr(args.first()?)?;
+                            let v = val.to_i64()? as u16;
+                            Some(IrConst::I32(v.swap_bytes() as i32))
+                        }
+                        "__builtin_bswap32" => {
+                            let val = self.eval_const_expr(args.first()?)?;
+                            let v = val.to_i64()? as u32;
+                            Some(IrConst::I32(v.swap_bytes() as i32))
+                        }
+                        "__builtin_bswap64" => {
+                            let val = self.eval_const_expr(args.first()?)?;
+                            let v = val.to_i64()? as u64;
+                            Some(IrConst::I64(v.swap_bytes() as i64))
+                        }
                         _ => None,
                     }
                 } else {

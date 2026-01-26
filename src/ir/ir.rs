@@ -942,6 +942,25 @@ pub enum IntrinsicOp {
     FrameAddress,
     /// __builtin_return_address(0) - returns current return address
     ReturnAddress,
+    /// Scalar square root: sqrtsd/sqrtss on x86, fsqrt on ARM/RISC-V
+    /// args[0] = input float value; dest = sqrt result
+    SqrtF32,
+    SqrtF64,
+    /// Scalar absolute value: bitwise AND with sign mask on x86, fabs on ARM/RISC-V
+    /// args[0] = input float value; dest = |x|
+    FabsF32,
+    FabsF64,
+}
+
+impl IntrinsicOp {
+    /// Returns true if this intrinsic is a pure function (no side effects, result depends
+    /// only on inputs). Pure intrinsics can be dead-code eliminated if their result is unused.
+    pub fn is_pure(&self) -> bool {
+        matches!(self,
+            IntrinsicOp::SqrtF32 | IntrinsicOp::SqrtF64 |
+            IntrinsicOp::FabsF32 | IntrinsicOp::FabsF64
+        )
+    }
 }
 
 impl Instruction {
@@ -973,6 +992,11 @@ impl Instruction {
             Instruction::Copy { .. } => None, // unknown without tracking
             Instruction::Phi { ty, .. } => Some(*ty),
             Instruction::Select { ty, .. } => Some(*ty),
+            Instruction::Intrinsic { op, .. } => match op {
+                IntrinsicOp::SqrtF32 | IntrinsicOp::FabsF32 => Some(IrType::F32),
+                IntrinsicOp::SqrtF64 | IntrinsicOp::FabsF64 => Some(IrType::F64),
+                _ => None,
+            },
             _ => None,
         }
     }

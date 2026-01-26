@@ -720,6 +720,42 @@ impl RiscvCodegen {
                     self.store_t0_to(d);
                 }
             }
+            IntrinsicOp::SqrtF64 => {
+                self.operand_to_t0(&args[0]);
+                self.state.emit("    fmv.d.x ft0, t0");
+                self.state.emit("    fsqrt.d ft0, ft0");
+                self.state.emit("    fmv.x.d t0, ft0");
+                if let Some(d) = dest {
+                    self.store_t0_to(d);
+                }
+            }
+            IntrinsicOp::SqrtF32 => {
+                self.operand_to_t0(&args[0]);
+                self.state.emit("    fmv.w.x ft0, t0");
+                self.state.emit("    fsqrt.s ft0, ft0");
+                self.state.emit("    fmv.x.w t0, ft0");
+                if let Some(d) = dest {
+                    self.store_t0_to(d);
+                }
+            }
+            IntrinsicOp::FabsF64 => {
+                self.operand_to_t0(&args[0]);
+                self.state.emit("    fmv.d.x ft0, t0");
+                self.state.emit("    fabs.d ft0, ft0");
+                self.state.emit("    fmv.x.d t0, ft0");
+                if let Some(d) = dest {
+                    self.store_t0_to(d);
+                }
+            }
+            IntrinsicOp::FabsF32 => {
+                self.operand_to_t0(&args[0]);
+                self.state.emit("    fmv.w.x ft0, t0");
+                self.state.emit("    fabs.s ft0, ft0");
+                self.state.emit("    fmv.x.w t0, ft0");
+                if let Some(d) = dest {
+                    self.store_t0_to(d);
+                }
+            }
         }
     }
 
