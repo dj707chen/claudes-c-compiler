@@ -639,18 +639,19 @@ impl Lowerer {
             return info.ty.size();
         }
         if let Some(ginfo) = self.globals.get(name) {
+            // For structs, prefer CType size (returns the type size without
+            // flexible array member data, matching C standard sizeof semantics).
+            if let Some(ref ct) = ginfo.c_type {
+                let ct_size = self.ctype_size(ct);
+                if ct_size > 0 {
+                    return ct_size;
+                }
+            }
             if ginfo.is_array || ginfo.is_struct {
                 for g in &self.module.globals {
                     if g.name == *name {
                         return g.size;
                     }
-                }
-            }
-            // Use CType size if available
-            if let Some(ref ct) = ginfo.c_type {
-                let ct_size = self.ctype_size(ct);
-                if ct_size > 0 {
-                    return ct_size;
                 }
             }
             return ginfo.ty.size();
