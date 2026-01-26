@@ -1,0 +1,24 @@
+Fix compound literal function pointer relocations in global initializers
+========================================================================
+Status: in_progress
+Date: 2026-01-26
+
+Problem:
+When a global array is initialized with a compound literal containing a function
+pointer, e.g.:
+  struct Wrap global_wrap[] = { ((struct Wrap) {inc_global}), inc_global };
+The first element (compound literal) gets zeroed instead of properly relocating
+the function pointer address. The second element (direct function pointer) works.
+
+Root cause:
+In global_init_compound.rs, emit_struct_field_init_compound passes the entire
+CompoundLiteral expression to write_expr_to_bytes_or_ptrs, which then calls
+resolve_ptr_field_init / eval_global_addr_expr. None of these functions know
+how to unwrap CompoundLiteral expressions to extract the inner initializer.
+
+Fix:
+1. Add CompoundLiteral handling in eval_global_addr_expr (const_eval.rs)
+2. Add CompoundLiteral unwrapping in emit_struct_field_init_compound or
+   write_expr_to_bytes_or_ptrs (global_init_compound.rs)
+
+Affected tests: c_testsuite_00216 (segfaults on all 3 architectures)
