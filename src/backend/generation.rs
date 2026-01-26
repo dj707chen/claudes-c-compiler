@@ -133,6 +133,44 @@ fn build_gep_fold_map(func: &IrFunction, use_counts: &[u32]) -> FxHashMap<u32, G
     gep_map
 }
 
+/// Build a map from Value IDs to global symbol names (with optional offsets).
+/// Maps values produced by `GlobalAddr { name }` to `"name"`, and values
+/// produced by `GEP(GlobalAddr { name }, const_offset)` to `"name+offset"`.
+/// Used to emit direct symbol(%rip) references for segment-overridden loads/stores.
+fn build_global_addr_map(func: &IrFunction) -> FxHashMap<u32, String> {
+    let mut map: FxHashMap<u32, String> = FxHashMap::default();
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            match inst {
+                Instruction::GlobalAddr { dest, name } => {
+                    map.insert(dest.0, name.clone());
+                }
+                Instruction::GetElementPtr { dest, base, offset: Operand::Const(c), .. } => {
+                    if let Some(base_name) = map.get(&base.0) {
+                        let offset_val = match c {
+                            IrConst::I64(n) => *n,
+                            IrConst::I32(n) => *n as i64,
+                            IrConst::I16(n) => *n as i64,
+                            IrConst::I8(n) => *n as i64,
+                            _ => continue,
+                        };
+                        let sym = if offset_val == 0 {
+                            base_name.clone()
+                        } else if offset_val > 0 {
+                            format!("{}+{}", base_name, offset_val)
+                        } else {
+                            format!("{}{}", base_name, offset_val)
+                        };
+                        map.insert(dest.0, sym);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    map
+}
+
 /// Returns the number of times each IR Value is used as an operand in
 /// instructions or terminators. Indexed by Value ID; used to identify
 /// single-use values eligible for compare-branch fusion.
@@ -454,6 +492,10 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
     // Load/Store addressing modes, eliminating the GEP instruction entirely.
     let gep_fold_map = build_gep_fold_map(func, &value_use_counts);
 
+    // Pre-scan: map Value IDs to global symbol names (with offsets from GEP).
+    // Used to emit direct symbol(%rip) references for segment-overridden loads/stores.
+    let global_addr_map = build_global_addr_map(func);
+
     for block in &func.blocks {
         if Some(block.label) != entry_label {
             // Invalidate register cache at block boundaries: a value in a register
@@ -484,7 +526,7 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
                     continue;
                 }
             }
-            generate_instruction(cg, inst, &gep_fold_map);
+            generate_instruction(cg, inst, &gep_fold_map, &global_addr_map);
         }
 
         if let Some(fi) = fuse_idx {
@@ -516,7 +558,7 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
 ///
 /// Instructions that clobber the accumulator unpredictably (calls, stores, atomics,
 /// inline asm, va_arg, memcpy, etc.) invalidate the cache after execution.
-fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_map: &FxHashMap<u32, GepFoldInfo>) {
+fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_map: &FxHashMap<u32, GepFoldInfo>, global_addr_map: &FxHashMap<u32, String>) {
     match inst {
         Instruction::Alloca { .. } => {
             // Space already allocated in prologue; does not touch registers
@@ -545,9 +587,15 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
 
         Instruction::Load { dest, ptr, ty, seg_override } => {
             if *seg_override != AddressSpace::Default {
-                // Segment-overridden load: load pointer into a register, then
-                // emit a load with segment prefix (e.g., %gs:(%reg)).
-                cg.emit_seg_load(dest, ptr, *ty, *seg_override);
+                // Segment-overridden load: if the pointer is a global address,
+                // emit a direct symbol(%rip) reference (e.g., %gs:symbol(%rip))
+                // instead of loading into a register (which would use the absolute
+                // address as a segment offset, corrupting memory).
+                if let Some(sym) = global_addr_map.get(&ptr.0) {
+                    cg.emit_seg_load_symbol(dest, sym, *ty, *seg_override);
+                } else {
+                    cg.emit_seg_load(dest, ptr, *ty, *seg_override);
+                }
                 return;
             }
             // Check if the ptr comes from a foldable GEP with constant offset.
@@ -625,7 +673,11 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
                 Instruction::DynAlloca { dest, size, align } => cg.emit_dyn_alloca(dest, size, *align),
                 Instruction::Store { val, ptr, ty, seg_override } => {
                     if *seg_override != AddressSpace::Default {
-                        cg.emit_seg_store(val, ptr, *ty, *seg_override);
+                        if let Some(sym) = global_addr_map.get(&ptr.0) {
+                            cg.emit_seg_store_symbol(val, sym, *ty, *seg_override);
+                        } else {
+                            cg.emit_seg_store(val, ptr, *ty, *seg_override);
+                        }
                     } else if let Some(gep_info) = gep_fold_map.get(&ptr.0) {
                         // Check if the ptr comes from a foldable GEP with constant offset.
                         // Only fold for alloca bases (see Load comment above).

@@ -88,9 +88,23 @@ pub trait ArchCodegen {
         panic!("segment override loads only supported on x86");
     }
 
+    /// Emit a segment-overridden load using a direct symbol(%rip) reference.
+    /// Used when the pointer is a global address, avoiding register-indirect
+    /// addressing which would use the absolute address as a segment offset.
+    fn emit_seg_load_symbol(&mut self, _dest: &Value, _sym: &str, _ty: IrType, _seg: AddressSpace) {
+        panic!("segment override loads only supported on x86");
+    }
+
     /// Emit a store with a segment override prefix (e.g., %gs: or %fs:).
     /// Default: panics (only x86 supports segment overrides).
     fn emit_seg_store(&mut self, _val: &Operand, _ptr: &Value, _ty: IrType, _seg: AddressSpace) {
+        panic!("segment override stores only supported on x86");
+    }
+
+    /// Emit a segment-overridden store using a direct symbol(%rip) reference.
+    /// Used when the pointer is a global address, avoiding register-indirect
+    /// addressing which would use the absolute address as a segment offset.
+    fn emit_seg_store_symbol(&mut self, _val: &Operand, _sym: &str, _ty: IrType, _seg: AddressSpace) {
         panic!("segment override stores only supported on x86");
     }
 

@@ -1309,6 +1309,7 @@ impl Lowerer {
         // Process output operands and synthetic "+" inputs
         let mut plus_input_types = Vec::new();
         let mut plus_input_segs = Vec::new();
+        let mut plus_input_symbols: Vec<Option<String>> = Vec::new();
         for out in outputs {
             let mut constraint = out.constraint.clone();
             let name = out.name.clone();
@@ -1379,6 +1380,14 @@ impl Lowerer {
                 ir_inputs.push((constraint.replace('+', "").to_string(), input_operand, name.clone()));
                 plus_input_types.push(out_ty);
                 plus_input_segs.push(out_seg);
+                // For "+m" constraints, extract the symbol name so the backend can emit
+                // direct symbol(%rip) references instead of register-indirect addressing.
+                let stripped_constraint = constraint.replace('+', "");
+                if constraint_is_memory_only(&stripped_constraint) {
+                    plus_input_symbols.push(self.extract_mem_operand_symbol(&out.expr));
+                } else {
+                    plus_input_symbols.push(None);
+                }
             }
             ir_outputs.push((constraint, ptr, name));
             operand_types.push(out_ty);
@@ -1392,7 +1401,9 @@ impl Lowerer {
         }
 
         // Process input operands
-        let mut input_symbols: Vec<Option<String>> = Vec::new();
+        // Start with symbols for synthetic "+" inputs (from output operands),
+        // since those appear first in ir_inputs.
+        let mut input_symbols: Vec<Option<String>> = plus_input_symbols;
         for inp in inputs {
             let mut constraint = inp.constraint.clone();
             let name = inp.name.clone();
@@ -1417,6 +1428,11 @@ impl Lowerer {
                     self.lower_expr(&inp.expr)
                 }
             } else if constraint_is_memory_only(&constraint) {
+                // For memory-only constraints, also try to extract the symbol name.
+                // This allows the backend to emit direct symbol(%rip) references
+                // instead of loading addresses into registers, which is critical
+                // when the inline asm template adds a segment prefix like %%gs:.
+                sym_name = self.extract_mem_operand_symbol(&inp.expr);
                 if let Some(lv) = self.lower_lvalue(&inp.expr) {
                     let ptr = match lv {
                         LValue::Variable(v) | LValue::Address(v, _) => v,
@@ -1489,6 +1505,41 @@ impl Lowerer {
                 }
             }
             Expr::Cast(_, inner, _) => self.extract_symbol_name(inner),
+            _ => None,
+        }
+    }
+
+    /// Extract a global symbol name (with optional offset) from an expression used
+    /// as a memory ("m") constraint operand in inline assembly.
+    /// The expression is typically a dereference like `*(type*)(uintptr_t)(&global.field)`.
+    /// We look through dereferences and casts to find the underlying address expression,
+    /// then try to resolve it to a symbol+offset.
+    fn extract_mem_operand_symbol(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            // Dereference: look at the pointer expression
+            Expr::Deref(inner, _) => {
+                // The inner expression is a pointer. Try to get its symbol name as an address.
+                self.extract_symbol_from_global_addr_expr(inner)
+                    .or_else(|| self.extract_mem_operand_symbol(inner))
+            }
+            // Cast: look through it
+            Expr::Cast(_, inner, _) => self.extract_mem_operand_symbol(inner),
+            // Direct identifier: if it's a global, return its name
+            Expr::Identifier(name, _) => {
+                if self.is_global_or_function(name) {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            }
+            // Address-of: try to resolve as global address expression
+            Expr::AddressOf(_, _) => self.extract_symbol_from_global_addr_expr(expr),
+            // Member access on a global struct
+            Expr::MemberAccess(base, _, _) | Expr::PointerMemberAccess(base, _, _) => {
+                // Try to resolve the full expression as a global address (will include offset)
+                self.extract_symbol_from_global_addr_expr(&Expr::AddressOf(Box::new(expr.clone()), expr.span()))
+                    .or_else(|| self.extract_mem_operand_symbol(base))
+            }
             _ => None,
         }
     }

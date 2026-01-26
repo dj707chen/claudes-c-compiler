@@ -1874,6 +1874,20 @@ impl ArchCodegen for X86Codegen {
         self.emit_store_result(dest);
     }
 
+    /// Emit a segment-overridden load using a direct symbol(%rip) reference.
+    /// Emits: movl %gs:symbol(%rip), %eax  (or appropriate sized variant).
+    fn emit_seg_load_symbol(&mut self, dest: &Value, sym: &str, ty: IrType, seg: AddressSpace) {
+        let seg_prefix = match seg {
+            AddressSpace::SegGs => "%gs:",
+            AddressSpace::SegFs => "%fs:",
+            AddressSpace::Default => unreachable!(),
+        };
+        let load_instr = Self::mov_load_for_type(ty);
+        let dest_reg = Self::load_dest_reg(ty);
+        self.state.emit_fmt(format_args!("    {} {}{}(%rip), {}", load_instr, seg_prefix, sym, dest_reg));
+        self.emit_store_result(dest);
+    }
+
     /// Emit a store with x86 segment override prefix (%gs: or %fs:).
     /// Used for GCC named address space: *(typeof(x) __seg_gs *)addr = val
     /// Emits: movl %edx, %gs:(%rcx)  (or appropriate sized variant).
@@ -1893,6 +1907,20 @@ impl ArchCodegen for X86Codegen {
         let store_instr = Self::mov_store_for_type(ty);
         let store_reg = Self::reg_for_type("rdx", ty);
         self.state.emit_fmt(format_args!("    {} %{}, {}(%rcx)", store_instr, store_reg, seg_prefix));
+    }
+
+    /// Emit a segment-overridden store using a direct symbol(%rip) reference.
+    /// Emits: movl %edx, %gs:symbol(%rip)  (or appropriate sized variant).
+    fn emit_seg_store_symbol(&mut self, val: &Operand, sym: &str, ty: IrType, seg: AddressSpace) {
+        let seg_prefix = match seg {
+            AddressSpace::SegGs => "%gs:",
+            AddressSpace::SegFs => "%fs:",
+            AddressSpace::Default => unreachable!(),
+        };
+        self.emit_load_operand(val);
+        let store_instr = Self::mov_store_for_type(ty);
+        let store_reg = Self::reg_for_type("rax", ty);
+        self.state.emit_fmt(format_args!("    {} %{}, {}{}(%rip)", store_instr, store_reg, seg_prefix, sym));
     }
 
     /// Override emit_store_with_const_offset to handle F128 (long double) via x87.
@@ -3701,6 +3729,15 @@ impl InlineAsmEmitter for X86Codegen {
         // If mem_addr is already set (alloca case), nothing to do
         if !op.mem_addr.is_empty() {
             return false;
+        }
+        // If we have a symbol name for this memory operand, use a direct RIP-relative
+        // symbol reference. This is critical for correctness when the inline asm template
+        // adds a segment prefix (e.g., %%gs:) before the operand — using a register
+        // indirect like (%rcx) would use the absolute address as a segment offset,
+        // but a direct symbol(%rip) reference provides the correct per-CPU offset.
+        if let Some(ref sym) = op.imm_symbol {
+            op.mem_addr = format!("{}(%rip)", sym);
+            return false; // no scratch register used
         }
         // Load the pointer value into a temporary register for indirect addressing.
         // Each memory operand gets its own unique register via assign_scratch_reg,

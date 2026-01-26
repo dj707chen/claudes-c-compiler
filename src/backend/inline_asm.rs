@@ -340,6 +340,24 @@ pub fn emit_inline_asm_common_impl(
         }
     }
 
+    // For "+" read-write constraints, the synthetic input's symbol also applies to
+    // the output operand. Copy imm_symbol from synthetic inputs to their corresponding
+    // outputs so resolve_memory_operand can emit direct symbol(%rip) references.
+    {
+        let mut plus_idx = 0;
+        for (i, (constraint, _, _)) in outputs.iter().enumerate() {
+            if constraint.contains('+') {
+                let plus_input_idx = outputs.len() + plus_idx;
+                if plus_input_idx < operands.len() {
+                    if let Some(ref sym) = operands[plus_input_idx].imm_symbol.clone() {
+                        operands[i].imm_symbol = Some(sym.clone());
+                    }
+                }
+                plus_idx += 1;
+            }
+        }
+    }
+
     // For Immediate operands that have neither an imm_value nor an imm_symbol,
     // the value is a runtime expression (e.g., &struct.member) that couldn't be
     // resolved to a constant or symbol.

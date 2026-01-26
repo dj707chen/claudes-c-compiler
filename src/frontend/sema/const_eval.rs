@@ -371,41 +371,54 @@ impl<'a> SemaConstEval<'a> {
     }
 
     /// Evaluate the offsetof pattern: &((type*)0)->member
+    /// Also handles nested member access like &((type*)0)->data.x
     fn eval_offsetof_pattern(&self, expr: &Expr) -> Option<IrConst> {
+        let (offset, _ty) = self.eval_offsetof_pattern_with_type(expr)?;
+        Some(IrConst::I64(offset as i64))
+    }
+
+    /// Evaluate an offsetof sub-expression, returning both the accumulated byte offset
+    /// and the CType of the resulting expression (needed for chained member access).
+    fn eval_offsetof_pattern_with_type(&self, expr: &Expr) -> Option<(usize, CType)> {
         match expr {
             Expr::PointerMemberAccess(base, field_name, _) => {
                 let (type_spec, base_offset) = self.extract_null_pointer_cast_with_offset(base)?;
                 let layout = self.get_struct_layout_for_type(&type_spec)?;
-                let (field_offset, _field_ty) = layout.field_offset(field_name, self.types)?;
-                Some(IrConst::I64((base_offset + field_offset) as i64))
+                let (field_offset, field_ty) = layout.field_offset(field_name, self.types)?;
+                Some((base_offset + field_offset, field_ty))
             }
             Expr::MemberAccess(base, field_name, _) => {
+                // First try: base is *((type*)0) (deref pattern)
                 if let Expr::Deref(inner, _) = base.as_ref() {
                     let (type_spec, base_offset) = self.extract_null_pointer_cast_with_offset(inner)?;
                     let layout = self.get_struct_layout_for_type(&type_spec)?;
-                    let (field_offset, _field_ty) = layout.field_offset(field_name, self.types)?;
-                    Some(IrConst::I64((base_offset + field_offset) as i64))
-                } else {
-                    None
+                    let (field_offset, field_ty) = layout.field_offset(field_name, self.types)?;
+                    return Some((base_offset + field_offset, field_ty));
                 }
+                // Second try: base is itself an offsetof sub-expression (chained access)
+                // e.g., ((type*)0)->data.x where base = ((type*)0)->data
+                let (base_offset, base_type) = self.eval_offsetof_pattern_with_type(base)?;
+                let struct_key = match &base_type {
+                    CType::Struct(key) | CType::Union(key) => key.clone(),
+                    _ => return None,
+                };
+                let layout = self.types.struct_layouts.get(&*struct_key)?;
+                let (field_offset, field_ty) = layout.field_offset(field_name, self.types)?;
+                Some((base_offset + field_offset, field_ty))
             }
             Expr::ArraySubscript(base, index, _) => {
-                let base_offset = self.eval_offsetof_pattern(base)?;
-                if let IrConst::I64(boff) = base_offset {
-                    if let Some(idx_val) = self.eval_const_expr(index) {
-                        if let IrConst::I64(idx) = idx_val {
-                            // Get element size from the base expression's type
-                            if let Some(ctype) = self.infer_expr_ctype(base) {
-                                let elem_size = match &ctype {
-                                    CType::Array(elem, _) => elem.size_ctx(&self.types.struct_layouts),
-                                    _ => return None,
-                                };
-                                return Some(IrConst::I64(boff + idx * elem_size as i64));
-                            }
-                        }
-                    }
-                }
-                None
+                let (base_offset, base_type) = self.eval_offsetof_pattern_with_type(base)?;
+                let idx_val = self.eval_const_expr(index)?;
+                let idx = idx_val.to_i64()?;
+                let elem_size = match &base_type {
+                    CType::Array(elem, _) => elem.size_ctx(&self.types.struct_layouts),
+                    _ => return None,
+                };
+                let elem_ty = match &base_type {
+                    CType::Array(elem, _) => (**elem).clone(),
+                    _ => return None,
+                };
+                Some(((base_offset as i64 + idx * elem_size as i64) as usize, elem_ty))
             }
             _ => None,
         }
