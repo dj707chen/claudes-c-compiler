@@ -1,5 +1,5 @@
 Task: fix_bitfield_struct_layout_packing
-Status: in_progress
+Status: completed
 Description: Fix SysV ABI bitfield layout when bitfields follow or precede non-bitfield struct members.
 
 Bug: CCC always aligned the first bitfield in a sequence to its declared type's natural alignment,

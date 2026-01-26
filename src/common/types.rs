@@ -360,13 +360,24 @@ impl StructLayout {
                     };
 
                     let placed_abs_bit: u64;
-                    if !in_bitfield || straddles {
-                        // Start a new storage unit: advance past previous bitfield region
-                        if in_bitfield {
-                            offset = bf_unit_offset + bf_unit_size;
+                    if !in_bitfield {
+                        // First bitfield after a non-bitfield field.
+                        // Try placing at the current offset (abs_bit_pos) first.
+                        // Per the SysV ABI, a bitfield can share storage with preceding
+                        // bytes as long as it doesn't straddle a sizeof(T)*8-bit boundary.
+                        if straddles {
+                            // Would straddle at current position, so advance to
+                            // the next type-aligned boundary
+                            let aligned_offset = align_up(offset, field_align);
+                            placed_abs_bit = (aligned_offset as u64) * 8;
+                        } else {
+                            // Fits without straddling -- pack into existing storage unit
+                            placed_abs_bit = abs_bit_pos;
                         }
-                        // Align to the field's natural alignment and advance to the
-                        // next type-aligned boundary
+                    } else if straddles {
+                        // Continuing a bitfield sequence but would straddle --
+                        // advance past the current storage unit to a new aligned one
+                        offset = bf_unit_offset + bf_unit_size;
                         let aligned_offset = align_up(offset, field_align);
                         placed_abs_bit = (aligned_offset as u64) * 8;
                     } else {
@@ -412,13 +423,11 @@ impl StructLayout {
             } else {
                 // Regular (non-bitfield) field
                 if in_bitfield {
-                    if is_packed_1 {
-                        // For pack(1), advance past all bits used
-                        let total_bits = (bf_unit_offset * 8) as u32 + bf_bit_pos;
-                        offset = (total_bits as usize + 7) / 8; // round up to next byte
-                    } else {
-                        offset = bf_unit_offset + bf_unit_size;
-                    }
+                    // Advance past all bits used, rounding up to the next byte boundary.
+                    // This allows subsequent fields to pack into the remaining bytes
+                    // of the bitfield's storage unit (matching GCC/SysV ABI behavior).
+                    let total_bits = (bf_unit_offset * 8) as u32 + bf_bit_pos;
+                    offset = (total_bits as usize + 7) / 8; // round up to next byte
                     in_bitfield = false;
                 }
 
