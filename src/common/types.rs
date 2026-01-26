@@ -102,6 +102,11 @@ pub enum CType {
     /// Uses Rc<str> for cheap cloning (reference count bump vs heap allocation).
     Union(RcStr),
     Enum(EnumType),
+    /// GCC vector extension type: __attribute__((vector_size(N))).
+    /// Stores (element_type, total_size_in_bytes).
+    /// E.g., `typedef int v4si __attribute__((vector_size(16)))` -> Vector(Int, 16)
+    /// has 4 elements of type int, total size 16 bytes.
+    Vector(Box<CType>, usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -895,6 +900,7 @@ impl CType {
                 ctx.get_struct_layout(key).map(|l| l.size).unwrap_or(0)
             }
             CType::Enum(e) => e.packed_size(),
+            CType::Vector(_, total_size) => *total_size,
         }
     }
 
@@ -921,6 +927,8 @@ impl CType {
                 ctx.get_struct_layout(key).map(|l| l.align).unwrap_or(1)
             }
             CType::Enum(e) => e.packed_size(),
+            // GCC caps vector alignment at 16 bytes on x86-64
+            CType::Vector(_, total_size) => (*total_size).min(16),
         }
     }
 
@@ -976,6 +984,27 @@ impl CType {
     /// Whether this is a floating-point type (float, double, long double).
     pub fn is_floating(&self) -> bool {
         matches!(self, CType::Float | CType::Double | CType::LongDouble)
+    }
+
+    /// Whether this is a GCC vector extension type.
+    pub fn is_vector(&self) -> bool {
+        matches!(self, CType::Vector(_, _))
+    }
+
+    /// For a vector type, returns (element_type, num_elements).
+    /// Returns None for non-vector types.
+    pub fn vector_info(&self) -> Option<(&CType, usize)> {
+        match self {
+            CType::Vector(elem, total_size) => {
+                let elem_size = elem.size();
+                if elem_size > 0 {
+                    Some((elem.as_ref(), total_size / elem_size))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Apply C integer promotion rules (C11 6.3.1.1):
@@ -1339,6 +1368,8 @@ impl IrType {
             CType::ComplexFloat | CType::ComplexDouble | CType::ComplexLongDouble => IrType::Ptr,
             CType::Pointer(_, _) | CType::Array(_, _) | CType::Function(_) => IrType::Ptr,
             CType::Struct(_) | CType::Union(_) => IrType::Ptr,
+            // Vectors are treated as aggregate types (pointer to stack slot)
+            CType::Vector(_, _) => IrType::Ptr,
         }
     }
 }

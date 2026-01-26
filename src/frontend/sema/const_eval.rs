@@ -458,6 +458,7 @@ impl<'a> SemaConstEval<'a> {
     fn eval_const_binop(&self, op: &BinOp, lhs: &IrConst, rhs: &IrConst, lhs_ctype: Option<&CType>, rhs_ctype: Option<&CType>) -> Option<IrConst> {
         let lhs_size = lhs_ctype.map_or(4, |ct| self.ctype_size(ct).max(4));
         let lhs_unsigned = lhs_ctype.map_or(false, |ct| ct.is_unsigned());
+        let rhs_unsigned = rhs_ctype.map_or(false, |ct| ct.is_unsigned());
 
         let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
 
@@ -467,7 +468,6 @@ impl<'a> SemaConstEval<'a> {
             (lhs_size <= 4, lhs_unsigned)
         } else {
             let rhs_size = rhs_ctype.map_or(4, |ct| self.ctype_size(ct).max(4));
-            let rhs_unsigned = rhs_ctype.map_or(false, |ct| ct.is_unsigned());
             let result_size = lhs_size.max(rhs_size);
             let is_unsigned = if lhs_size == rhs_size {
                 lhs_unsigned || rhs_unsigned
@@ -478,7 +478,7 @@ impl<'a> SemaConstEval<'a> {
             };
             (result_size <= 4, is_unsigned)
         };
-        const_arith::eval_const_binop(op, lhs, rhs, is_32bit, is_unsigned)
+        const_arith::eval_const_binop(op, lhs, rhs, is_32bit, is_unsigned, lhs_unsigned, rhs_unsigned)
     }
 
     /// Evaluate the offsetof pattern: &((type*)0)->member

@@ -121,6 +121,9 @@ pub struct Parser {
     pub(super) pragma_default_visibility: Option<String>,
     /// Count of parse errors encountered (invalid tokens at top level, etc.)
     pub error_count: usize,
+    /// Set when __attribute__((vector_size(N))) is encountered on a typedef.
+    /// Holds the total vector size in bytes. Consumed during typedef processing.
+    pub(super) parsing_vector_size: Option<usize>,
     /// Set to the address space when __seg_gs or __seg_fs qualifier is encountered.
     /// Reset after being consumed by pointer type construction.
     pub(super) parsing_address_space: AddressSpace,
@@ -164,6 +167,7 @@ impl Parser {
             pragma_visibility_stack: Vec::new(),
             pragma_default_visibility: None,
             error_count: 0,
+            parsing_vector_size: None,
             parsing_address_space: AddressSpace::Default,
             enum_constants: FxHashMap::default(),
         }
@@ -565,6 +569,22 @@ impl Parser {
                                             // Skip to closing paren
                                             while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
                                                 self.advance();
+                                            }
+                                            if matches!(self.peek(), TokenKind::RParen) {
+                                                self.advance();
+                                            }
+                                        }
+                                    }
+                                    TokenKind::Identifier(name) if name == "vector_size" || name == "__vector_size__" => {
+                                        self.advance();
+                                        if matches!(self.peek(), TokenKind::LParen) {
+                                            self.advance(); // consume (
+                                            // Parse the vector size expression (must be a constant)
+                                            // TODO: Validate vector_size is a power of 2 and element type is numeric
+                                            let expr = self.parse_assignment_expr();
+                                            let enums = if self.enum_constants.is_empty() { None } else { Some(&self.enum_constants) };
+                                            if let Some(size) = Self::eval_const_int_expr_with_enums(&expr, enums) {
+                                                self.parsing_vector_size = Some(size as usize);
                                             }
                                             if matches!(self.peek(), TokenKind::RParen) {
                                                 self.advance();

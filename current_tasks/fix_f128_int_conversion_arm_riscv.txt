@@ -1,0 +1,28 @@
+Fix F128 (long double) integer conversion precision on ARM and RISC-V backends
+
+Problem:
+- On ARM and RISC-V, i64<->f128 conversions go through f64, losing precision
+- classify_cast() in cast.rs reduces F128 to F64 unconditionally
+- ARM/RISC-V emit_cast_instrs uses hardware f64 conversion instructions
+  (scvtf/fcvtzs on ARM, fcvt.d.l/fcvt.l.d on RISC-V) instead of calling
+  softfloat library functions
+- This causes 0x7FFFFFFFFFFFFFFF to convert to 2^63 instead of exact value
+- x86 is unaffected since it intercepts F128 casts and uses x87 FPU (80-bit)
+
+Fix:
+- Intercept F128<->integer casts in ARM and RISC-V emit_cast_instrs
+- Call compiler-rt softfloat functions:
+  __floatditf (i64 -> f128)
+  __floatunditf (u64 -> f128)
+  __floatsitf (i32 -> f128)
+  __floatunsitf (u32 -> f128)
+  __fixtfdi (f128 -> i64)
+  __fixunstfdi (f128 -> u64)
+  __fixtfsi (f128 -> i32)
+  __fixunstfsi (f128 -> u32)
+- Also handle f32<->f128 via __extendsftf2/__trunctfsf2
+
+Failing tests: compiler_suite_0132_0237, compiler_suite_0094_0000 (RISC-V),
+  compiler_suite_0147_0047 (ARM), and others
+
+Status: in_progress

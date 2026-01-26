@@ -272,6 +272,16 @@ impl Lowerer {
             self.lower_struct_copy_init(expr, alloca, da);
         } else if is_complex {
             self.lower_complex_var_init(expr, alloca, da, decl);
+        } else if let Some(ref ct) = da.c_type {
+            if ct.is_vector() {
+                // Vector init from expression: memcpy from source to destination
+                let src = self.lower_expr(expr);
+                let src_val = self.operand_to_value(src);
+                let total_size = ct.size();
+                self.emit(Instruction::Memcpy { dest: alloca, src: src_val, size: total_size });
+            } else {
+                self.lower_scalar_init_expr(expr, alloca, da, decl);
+            }
         } else {
             self.lower_scalar_init_expr(expr, alloca, da, decl);
         }
@@ -424,6 +434,13 @@ impl Lowerer {
             self.lower_struct_init_list(items, alloca, declarator_name);
         } else if da.is_array && da.elem_size > 0 {
             self.lower_array_init_list_dispatch(items, alloca, da, complex_elem_ctype, decl, declarator_name);
+        } else if let Some(ref ct) = da.c_type {
+            if let Some((elem_ct, num_elems)) = ct.vector_info() {
+                self.lower_vector_init_list(items, alloca, elem_ct, num_elems);
+            } else {
+                // Scalar with braces: int x = { 1 };
+                self.lower_scalar_braced_init(items, alloca, da);
+            }
         } else {
             // Scalar with braces: int x = { 1 };
             self.lower_scalar_braced_init(items, alloca, da);
@@ -863,6 +880,31 @@ impl Lowerer {
                 }
             }
             current_idx += 1;
+        }
+    }
+
+    /// Vector init list: `v4hi a = {1, 2, 3, 4};`
+    /// Stores each element at elem_size * index offset from the alloca.
+    pub(super) fn lower_vector_init_list(&mut self, items: &[InitializerItem], alloca: Value, elem_ct: &CType, num_elems: usize) {
+        let elem_ir_ty = IrType::from_ctype(elem_ct);
+        let elem_size = elem_ct.size();
+        // Zero-init first if fewer initializers than elements
+        if items.len() < num_elems {
+            self.zero_init_alloca(alloca, elem_size * num_elems);
+        }
+        for (idx, item) in items.iter().enumerate() {
+            if idx >= num_elems { break; }
+            let init_expr = match &item.init {
+                Initializer::Expr(e) => Some(e),
+                Initializer::List(sub_items) => Self::unwrap_nested_init_expr(sub_items),
+            };
+            if let Some(e) = init_expr {
+                let val = self.lower_expr(e);
+                let expr_ty = self.get_expr_type(e);
+                let val = self.emit_implicit_cast(val, expr_ty, elem_ir_ty);
+                let offset = idx * elem_size;
+                self.emit_array_element_store(alloca, val, offset, elem_ir_ty);
+            }
         }
     }
 

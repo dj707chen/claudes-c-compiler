@@ -246,18 +246,25 @@ pub fn eval_const_binop_float(op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Optio
 ///
 /// Called when at least one operand is I128. Uses native Rust i128/u128 arithmetic
 /// to avoid the truncation that occurs when using the i64 path.
-pub fn eval_const_binop_i128(op: &BinOp, lhs: &IrConst, rhs: &IrConst, is_unsigned: bool) -> Option<IrConst> {
-    // When the operation is unsigned, operands that are smaller than 128-bit
-    // must be zero-extended (not sign-extended) to 128 bits.
-    // E.g., u64 0xCAFEBABE12345678 should become u128 0x00000000_00000000_CAFEBABE12345678,
-    // not 0xFFFFFFFF_FFFFFFFF_CAFEBABE12345678 (which is what sign-extension gives).
-    let l = if is_unsigned && !matches!(lhs, IrConst::I128(_)) {
+///
+/// `is_unsigned` is the signedness of the result type (for div/rem/shift/cmp).
+/// `lhs_unsigned` and `rhs_unsigned` are the signedness of each operand's original
+/// C type, used to correctly zero-extend or sign-extend when widening to i128.
+/// Per C11 6.3.1.3, converting unsigned long long to __int128 preserves the value
+/// (zero-extends), while converting signed long long sign-extends.
+pub fn eval_const_binop_i128(op: &BinOp, lhs: &IrConst, rhs: &IrConst, is_unsigned: bool, lhs_unsigned: bool, rhs_unsigned: bool) -> Option<IrConst> {
+    // When widening a non-I128 operand to 128-bit, use the operand's own signedness
+    // to decide zero-extend vs sign-extend. This is critical for cases like:
+    //   (i128)x << 64 | 0xFEDCBA9876543210ULL
+    // where the RHS is unsigned long long (zero-extend) but the result type is
+    // signed __int128.
+    let l = if lhs_unsigned && !matches!(lhs, IrConst::I128(_)) {
         // Zero-extend: treat the i64 bit pattern as u64, then widen to u128
         (lhs.to_i64()? as u64 as u128) as i128
     } else {
         lhs.to_i128()?
     };
-    let r = if is_unsigned && !matches!(rhs, IrConst::I128(_)) {
+    let r = if rhs_unsigned && !matches!(rhs, IrConst::I128(_)) {
         (rhs.to_i64()? as u64 as u128) as i128
     } else {
         rhs.to_i128()?
@@ -325,7 +332,9 @@ pub fn eval_const_binop_i128(op: &BinOp, lhs: &IrConst, rhs: &IrConst, is_unsign
 ///
 /// This is the top-level entry point for constant binary evaluation.
 /// The caller provides `is_32bit` and `is_unsigned` for the integer path.
-pub fn eval_const_binop(op: &BinOp, lhs: &IrConst, rhs: &IrConst, is_32bit: bool, is_unsigned: bool) -> Option<IrConst> {
+/// `lhs_unsigned` and `rhs_unsigned` indicate the signedness of each operand's
+/// original C type, used for correct widening to i128.
+pub fn eval_const_binop(op: &BinOp, lhs: &IrConst, rhs: &IrConst, is_32bit: bool, is_unsigned: bool, lhs_unsigned: bool, rhs_unsigned: bool) -> Option<IrConst> {
     let lhs_is_float = matches!(lhs, IrConst::F32(_) | IrConst::F64(_) | IrConst::LongDouble(..));
     let rhs_is_float = matches!(rhs, IrConst::F32(_) | IrConst::F64(_) | IrConst::LongDouble(..));
 
@@ -335,7 +344,7 @@ pub fn eval_const_binop(op: &BinOp, lhs: &IrConst, rhs: &IrConst, is_32bit: bool
 
     // Use native i128 arithmetic when either operand is I128 to avoid truncation.
     if matches!(lhs, IrConst::I128(_)) || matches!(rhs, IrConst::I128(_)) {
-        return eval_const_binop_i128(op, lhs, rhs, is_unsigned);
+        return eval_const_binop_i128(op, lhs, rhs, is_unsigned, lhs_unsigned, rhs_unsigned);
     }
 
     let l = lhs.to_i64()?;

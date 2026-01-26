@@ -1331,6 +1331,7 @@ mod tests {
             is_variadic: false,
             num_fixed_args: 0,
             struct_arg_sizes: vec![],
+            struct_arg_classes: Vec::new(),
         }
     }
 

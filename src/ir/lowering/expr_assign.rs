@@ -9,13 +9,18 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{AddressSpace, IrType};
+use crate::common::types::{AddressSpace, CType, IrType};
 use super::lowering::Lowerer;
 
 impl Lowerer {
     pub(super) fn lower_assign(&mut self, lhs: &Expr, rhs: &Expr) -> Operand {
-        // Complex assignment: copy real/imag parts
+        // Vector assignment: memcpy the whole vector
         let lhs_ct = self.expr_ctype(lhs);
+        if let Some((_, _num_elems)) = lhs_ct.vector_info() {
+            return self.lower_vector_assign(lhs, rhs, &lhs_ct);
+        }
+
+        // Complex assignment: copy real/imag parts
         if lhs_ct.is_complex() {
             return self.lower_complex_assign(lhs, rhs, &lhs_ct);
         }
@@ -356,8 +361,13 @@ impl Lowerer {
     // -----------------------------------------------------------------------
 
     pub(super) fn lower_compound_assign(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> Operand {
-        // Complex compound assignment
+        // Vector compound assignment (element-wise)
         let lhs_ct = self.expr_ctype(lhs);
+        if lhs_ct.is_vector() {
+            return self.lower_vector_compound_assign(op, lhs, rhs, &lhs_ct);
+        }
+
+        // Complex compound assignment
         if lhs_ct.is_complex() && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
             return self.lower_complex_compound_assign(op, lhs, rhs, &lhs_ct);
         }
@@ -595,5 +605,130 @@ impl Lowerer {
         } else {
             result
         }
+    }
+
+    // ===== Vector type helpers =====
+
+    /// Get the IR type for a vector element CType.
+    fn vector_elem_ir_type(elem_ct: &CType) -> IrType {
+        IrType::from_ctype(elem_ct)
+    }
+
+    /// Lower vector assignment (a = b): memcpy the whole vector.
+    fn lower_vector_assign(&mut self, lhs: &Expr, rhs: &Expr, lhs_ct: &CType) -> Operand {
+        let (_, total_size) = match lhs_ct {
+            CType::Vector(_, total_size) => ((), *total_size),
+            _ => unreachable!(),
+        };
+        let lhs_ptr = self.lower_expr(lhs);
+        let lhs_ptr_val = self.operand_to_value(lhs_ptr);
+        let rhs_ptr = self.lower_expr(rhs);
+        let rhs_ptr_val = self.operand_to_value(rhs_ptr);
+        self.emit(Instruction::Memcpy { dest: lhs_ptr_val, src: rhs_ptr_val, size: total_size });
+        Operand::Value(lhs_ptr_val)
+    }
+
+    /// Lower vector compound assignment (a += b, a -= b, etc.): element-wise operation.
+    fn lower_vector_compound_assign(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr, lhs_ct: &CType) -> Operand {
+        let (elem_ct, num_elems) = match lhs_ct.vector_info() {
+            Some((elem_ct, num_elems)) => (elem_ct.clone(), num_elems),
+            None => return Operand::Const(IrConst::I64(0)),
+        };
+        let elem_ir_ty = Self::vector_elem_ir_type(&elem_ct);
+        let elem_size = elem_ct.size();
+        let is_unsigned = elem_ct.is_unsigned();
+
+        // Get the IR binary operation
+        let ir_op = Self::binop_to_ir(op.clone(), is_unsigned);
+
+        // Get pointers to LHS and RHS vectors
+        let lhs_ptr = self.lower_expr(lhs);
+        let lhs_ptr_val = self.operand_to_value(lhs_ptr);
+        let rhs_ptr = self.lower_expr(rhs);
+        let rhs_ptr_val = self.operand_to_value(rhs_ptr);
+
+        // Element-wise operation
+        for i in 0..num_elems {
+            let offset = i * elem_size;
+            // GEP to element i for LHS
+            let lhs_elem_ptr = if offset > 0 {
+                self.emit_binop_val(IrBinOp::Add, Operand::Value(lhs_ptr_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+            } else {
+                lhs_ptr_val
+            };
+            // GEP to element i for RHS
+            let rhs_elem_ptr = if offset > 0 {
+                self.emit_binop_val(IrBinOp::Add, Operand::Value(rhs_ptr_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+            } else {
+                rhs_ptr_val
+            };
+            // Load both elements
+            let lhs_elem = self.fresh_value();
+            self.emit(Instruction::Load { dest: lhs_elem, ptr: lhs_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
+            let rhs_elem = self.fresh_value();
+            self.emit(Instruction::Load { dest: rhs_elem, ptr: rhs_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
+            // Compute result
+            let result_elem = self.emit_binop_val(ir_op, Operand::Value(lhs_elem), Operand::Value(rhs_elem), elem_ir_ty);
+            // Store back to LHS
+            self.emit(Instruction::Store { val: Operand::Value(result_elem), ptr: lhs_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
+        }
+
+        Operand::Value(lhs_ptr_val)
+    }
+
+    /// Lower vector binary operation (a + b, a - b, etc.): element-wise, returns new alloca.
+    pub(super) fn lower_vector_binary_op(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr, vec_ct: &CType) -> Operand {
+        let (elem_ct, num_elems) = match vec_ct.vector_info() {
+            Some((elem_ct, num_elems)) => (elem_ct.clone(), num_elems),
+            None => return Operand::Const(IrConst::I64(0)),
+        };
+        let elem_ir_ty = Self::vector_elem_ir_type(&elem_ct);
+        let elem_size = elem_ct.size();
+        let total_size = match vec_ct {
+            CType::Vector(_, ts) => *ts,
+            _ => unreachable!(),
+        };
+        let is_unsigned = elem_ct.is_unsigned();
+        let ir_op = Self::binop_to_ir(op.clone(), is_unsigned);
+
+        // Allocate result vector on stack
+        let result_alloca = self.emit_entry_alloca(IrType::Ptr, total_size, total_size, false);
+
+        // Get pointers to LHS and RHS vectors
+        let lhs_ptr = self.lower_expr(lhs);
+        let lhs_ptr_val = self.operand_to_value(lhs_ptr);
+        let rhs_ptr = self.lower_expr(rhs);
+        let rhs_ptr_val = self.operand_to_value(rhs_ptr);
+
+        // Element-wise operation
+        for i in 0..num_elems {
+            let offset = i * elem_size;
+            let lhs_elem_ptr = if offset > 0 {
+                self.emit_binop_val(IrBinOp::Add, Operand::Value(lhs_ptr_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+            } else {
+                lhs_ptr_val
+            };
+            let rhs_elem_ptr = if offset > 0 {
+                self.emit_binop_val(IrBinOp::Add, Operand::Value(rhs_ptr_val), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+            } else {
+                rhs_ptr_val
+            };
+            let result_elem_ptr = if offset > 0 {
+                self.emit_binop_val(IrBinOp::Add, Operand::Value(result_alloca), Operand::Const(IrConst::I64(offset as i64)), IrType::I64)
+            } else {
+                result_alloca
+            };
+            // Load both elements
+            let lhs_elem = self.fresh_value();
+            self.emit(Instruction::Load { dest: lhs_elem, ptr: lhs_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
+            let rhs_elem = self.fresh_value();
+            self.emit(Instruction::Load { dest: rhs_elem, ptr: rhs_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
+            // Compute result
+            let result_elem = self.emit_binop_val(ir_op, Operand::Value(lhs_elem), Operand::Value(rhs_elem), elem_ir_ty);
+            // Store to result
+            self.emit(Instruction::Store { val: Operand::Value(result_elem), ptr: result_elem_ptr, ty: elem_ir_ty, seg_override: AddressSpace::Default });
+        }
+
+        Operand::Value(result_alloca)
     }
 }

@@ -117,6 +117,7 @@ impl Parser {
                 alignas_type: None,
                 alignment_sizeof_type: None,
                 address_space: self.parsing_address_space,
+                vector_size: self.parsing_vector_size.take(),
                 span: start,
             }));
         }
@@ -554,6 +555,7 @@ impl Parser {
             alignas_type,
             alignment_sizeof_type,
             address_space: self.parsing_address_space,
+            vector_size: self.parsing_vector_size.take(),
             span: start,
         }))
     }
@@ -579,7 +581,7 @@ impl Parser {
         // Handle bare type with semicolon (struct/enum/union definition)
         if matches!(self.peek(), TokenKind::Semicolon) {
             self.advance();
-            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union: false, alignment: None, alignas_type: None, alignment_sizeof_type: None, address_space: self.parsing_address_space, span: start });
+            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union: false, alignment: None, alignas_type: None, alignment_sizeof_type: None, address_space: self.parsing_address_space, vector_size: self.parsing_vector_size.take(), span: start });
         }
 
         let mut mode_kind: Option<ModeKind> = None;
@@ -661,7 +663,7 @@ impl Parser {
         let alignment_sizeof_type = self.parsed_alignment_sizeof_type.take();
         let is_transparent_union = self.parsing_transparent_union;
         self.parsing_transparent_union = false;
-        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union, alignment, alignas_type, alignment_sizeof_type, address_space: self.parsing_address_space, span: start })
+        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union, alignment, alignas_type, alignment_sizeof_type, address_space: self.parsing_address_space, vector_size: self.parsing_vector_size.take(), span: start })
     }
 
     /// Parse an initializer: either a braced initializer list or a single expression.

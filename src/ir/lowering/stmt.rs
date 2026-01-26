@@ -92,6 +92,7 @@ impl Lowerer {
                 alignas_type: decl.alignas_type.clone(),
                 alignment_sizeof_type: decl.alignment_sizeof_type.clone(),
                 address_space: decl.address_space,
+                vector_size: decl.vector_size,
                 span: decl.span,
             };
             &resolved_decl
@@ -108,7 +109,11 @@ impl Lowerer {
                         self.types.func_ptr_typedefs.insert(declarator.name.clone());
                         self.types.func_ptr_typedef_info.insert(declarator.name.clone(), fti);
                     }
-                    let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                    let mut resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                    // Apply __attribute__((vector_size(N))): wrap base type in Vector
+                    if let Some(vs) = decl.vector_size {
+                        resolved_ctype = CType::Vector(Box::new(resolved_ctype), vs);
+                    }
                     self.types.insert_typedef_scoped(declarator.name.clone(), resolved_ctype);
 
                     // Preserve alignment override from __attribute__((aligned(N))) on the typedef.

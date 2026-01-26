@@ -93,6 +93,9 @@ pub struct Declaration {
     /// E.g., `extern const struct pcpu_hot __seg_gs const_pcpu_hot;` has SegGs.
     /// Used for x86 per-CPU variable access with %gs:/%fs: segment prefixes.
     pub address_space: AddressSpace,
+    /// GCC __attribute__((vector_size(N))): total vector size in bytes.
+    /// When present on a typedef, wraps the base type in CType::Vector.
+    pub vector_size: Option<usize>,
     pub span: Span,
 }
 
@@ -113,6 +116,7 @@ impl Declaration {
             alignas_type: None,
             alignment_sizeof_type: None,
             address_space: AddressSpace::Default,
+            vector_size: None,
             span: Span::dummy(),
         }
     }

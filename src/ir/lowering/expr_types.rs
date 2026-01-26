@@ -1080,6 +1080,7 @@ impl Lowerer {
         let ctype = self.type_spec_to_ctype(ts);
         match &ctype {
             CType::Array(elem_ct, _) => self.ctype_size(elem_ct).max(1),
+            CType::Vector(elem_ct, _) => elem_ct.size().max(1),
             _ => self.sizeof_type(ts),
         }
     }

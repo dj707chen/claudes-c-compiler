@@ -390,6 +390,7 @@ mod tests {
             aliases: vec![],
             toplevel_asm: vec![],
             symbol_attrs: vec![],
+            char16_string_literals: vec![],
         };
 
         let eliminated = run(&mut module);
@@ -457,6 +458,7 @@ mod tests {
             aliases: vec![],
             toplevel_asm: vec![],
             symbol_attrs: vec![],
+            char16_string_literals: vec![],
         };
 
         let eliminated = run(&mut module);
@@ -515,6 +517,7 @@ mod tests {
             aliases: vec![],
             toplevel_asm: vec![],
             symbol_attrs: vec![],
+            char16_string_literals: vec![],
         };
 
         let eliminated = run(&mut module);
@@ -579,6 +582,7 @@ mod tests {
             aliases: vec![],
             toplevel_asm: vec![],
             symbol_attrs: vec![],
+            char16_string_literals: vec![],
         };
 
         let eliminated = run(&mut module);
@@ -643,6 +647,7 @@ mod tests {
             aliases: vec![],
             toplevel_asm: vec![],
             symbol_attrs: vec![],
+            char16_string_literals: vec![],
         };
 
         let eliminated = run(&mut module);
@@ -711,6 +716,7 @@ mod tests {
             aliases: vec![],
             toplevel_asm: vec![],
             symbol_attrs: vec![],
+            char16_string_literals: vec![],
         };
 
         let eliminated = run(&mut module);
@@ -806,6 +812,7 @@ mod tests {
             aliases: vec![],
             toplevel_asm: vec![],
             symbol_attrs: vec![],
+            char16_string_literals: vec![],
         };
 
         let eliminated = run(&mut module);

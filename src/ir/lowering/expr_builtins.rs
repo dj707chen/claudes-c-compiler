@@ -1400,5 +1400,6 @@ fn classify_ctype(ty: &CType) -> i64 {
         CType::Function(_) => 5,     // function decays to pointer
         CType::Struct(_) => 12,      // record_type_class
         CType::Union(_) => 13,       // union_type_class
+        CType::Vector(_, _) => 14,   // array_type_class (GCC classifies vectors here)
     }
 }

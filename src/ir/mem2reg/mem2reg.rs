@@ -868,6 +868,7 @@ mod tests {
                     is_variadic: false,
                     num_fixed_args: 1,
                     struct_arg_sizes: vec![None],
+                    struct_arg_classes: Vec::new(),
                 },
                 Instruction::Load { dest: Value(1), ptr: Value(0), ty: IrType::I32 , seg_override: AddressSpace::Default },
             ],

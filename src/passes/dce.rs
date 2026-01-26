@@ -330,6 +330,7 @@ mod tests {
                     is_variadic: true,
                     num_fixed_args: 0,
                     struct_arg_sizes: vec![],
+                    struct_arg_classes: Vec::new(),
                 },
             ],
             terminator: Terminator::Return(None),

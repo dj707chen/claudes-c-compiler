@@ -1011,12 +1011,26 @@ impl ArmCodegen {
                         self.emit_load_from_sp("x1", slot.0 + 8, "ldr");
                     } else {
                         // Non-i128 value (e.g. shift amount): load 8 bytes, zero high
-                        self.emit_load_from_sp("x0", slot.0, "ldr");
+                        // Check register allocation first, since register-allocated values
+                        // may not have their stack slot written.
+                        if let Some(&reg) = self.reg_assignments.get(&v.0) {
+                            let reg_name = callee_saved_name(reg);
+                            self.state.emit_fmt(format_args!("    mov x0, {}", reg_name));
+                        } else {
+                            self.emit_load_from_sp("x0", slot.0, "ldr");
+                        }
                         self.state.emit("    mov x1, #0");
                     }
                 } else {
-                    self.state.emit("    mov x0, #0");
-                    self.state.emit("    mov x1, #0");
+                    // No stack slot: check register allocation
+                    if let Some(&reg) = self.reg_assignments.get(&v.0) {
+                        let reg_name = callee_saved_name(reg);
+                        self.state.emit_fmt(format_args!("    mov x0, {}", reg_name));
+                        self.state.emit("    mov x1, #0");
+                    } else {
+                        self.state.emit("    mov x0, #0");
+                        self.state.emit("    mov x1, #0");
+                    }
                 }
             }
         }

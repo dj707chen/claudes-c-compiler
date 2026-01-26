@@ -1418,7 +1418,11 @@ impl Lowerer {
             let is_enum_type = self.is_enum_type_spec(&decl.type_spec);
             for declarator in &decl.declarators {
                 if !declarator.name.is_empty() {
-                    let resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                    let mut resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                    // Apply __attribute__((vector_size(N))): wrap base type in Vector
+                    if let Some(vs) = decl.vector_size {
+                        resolved_ctype = CType::Vector(Box::new(resolved_ctype), vs);
+                    }
                     self.types.typedefs.insert(declarator.name.clone(), resolved_ctype);
                     if is_enum_type && declarator.derived.is_empty() {
                         self.types.enum_typedefs.insert(declarator.name.clone());

@@ -180,7 +180,7 @@ impl Lowerer {
             return Operand::Value(addr);
         }
         if let Some(ref ct) = ginfo.c_type {
-            if ct.is_complex() {
+            if ct.is_complex() || ct.is_vector() {
                 return Operand::Value(addr);
             }
             // Function names in expression context decay to function pointers (addresses).
@@ -211,12 +211,13 @@ impl Lowerer {
             let is_array = info.is_array;
             let is_struct = info.is_struct;
             let is_complex = info.c_type.as_ref().map_or(false, |ct| ct.is_complex());
+            let is_vector = info.c_type.as_ref().map_or(false, |ct| ct.is_vector());
             let static_global_name = info.static_global_name.clone();
 
             if let Some(global_name) = static_global_name {
                 let addr = self.fresh_value();
                 self.emit(Instruction::GlobalAddr { dest: addr, name: global_name });
-                if is_array || is_struct {
+                if is_array || is_struct || is_vector {
                     return Operand::Value(addr);
                 }
                 let dest = self.fresh_value();
@@ -226,7 +227,7 @@ impl Lowerer {
             if is_array || is_struct {
                 return Operand::Value(alloca);
             }
-            if is_complex {
+            if is_complex || is_vector {
                 return Operand::Value(alloca);
             }
             let dest = self.fresh_value();
@@ -288,6 +289,15 @@ impl Lowerer {
                 if let Some(val) = self.eval_const_expr_from_parts(op, lhs, rhs) {
                     return Operand::Const(val);
                 }
+            }
+        }
+
+        // Vector arithmetic (element-wise)
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+            | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr) {
+            let lhs_ct = self.expr_ctype(lhs);
+            if lhs_ct.is_vector() {
+                return self.lower_vector_binary_op(op, lhs, rhs, &lhs_ct);
             }
         }
 
@@ -881,7 +891,7 @@ impl Lowerer {
         let alloca = self.alloc_and_init_compound_literal(type_spec, init, ty, size);
 
         let struct_layout = self.get_struct_layout_for_type(type_spec);
-        let is_scalar = struct_layout.is_none() && !matches!(ctype, CType::Array(_, _));
+        let is_scalar = struct_layout.is_none() && !matches!(ctype, CType::Array(_, _)) && !ctype.is_vector();
         if is_scalar {
             let loaded = self.fresh_value();
             self.emit(Instruction::Load { dest: loaded, ptr: alloca, ty , seg_override: AddressSpace::Default });
@@ -896,6 +906,15 @@ impl Lowerer {
         ty: IrType, size: usize,
     ) {
         let elem_size = self.compound_literal_elem_size(type_spec);
+
+        // For vector types, determine the correct element IR type (e.g. F32 for float vectors)
+        let vector_elem_ir_ty = {
+            let ctype = self.type_spec_to_ctype(type_spec);
+            match ctype {
+                CType::Vector(elem_ct, _) => Some(IrType::from_ctype(&elem_ct)),
+                _ => None,
+            }
+        };
 
         // For char/unsigned char array compound literals with a single string literal,
         // copy the string bytes directly instead of storing a pointer.
@@ -918,7 +937,9 @@ impl Lowerer {
         };
 
         let has_designators = items.iter().any(|item| !item.designators.is_empty());
-        if has_designators {
+        // Zero-init if there are designators, or for vectors with fewer initializers than elements
+        let needs_zero = has_designators || (vector_elem_ir_ty.is_some() && items.len() * elem_size < size);
+        if needs_zero {
             self.zero_init_alloca(alloca, size);
         }
 
@@ -935,6 +956,13 @@ impl Lowerer {
             match &item.init {
                 Initializer::Expr(expr) => {
                     let val = self.lower_expr(expr);
+                    // For vector compound literals, cast each element to the vector element type
+                    let val = if let Some(vec_elem_ty) = vector_elem_ir_ty {
+                        let expr_ty = self.get_expr_type(expr);
+                        Operand::Value(self.emit_cast_val(val, expr_ty, vec_elem_ty))
+                    } else {
+                        val
+                    };
                     if current_idx == 0 && items.len() == 1 && elem_size == size {
                         self.emit(Instruction::Store { val, ptr: alloca, ty , seg_override: AddressSpace::Default });
                     } else {
@@ -943,7 +971,7 @@ impl Lowerer {
                         self.emit(Instruction::GetElementPtr {
                             dest: elem_ptr, base: alloca, offset: offset_val, ty,
                         });
-                        let store_ty = Self::ir_type_for_size(elem_size);
+                        let store_ty = vector_elem_ir_ty.unwrap_or_else(|| Self::ir_type_for_size(elem_size));
                         self.emit(Instruction::Store { val, ptr: elem_ptr, ty: store_ty , seg_override: AddressSpace::Default });
                     }
                 }
@@ -1213,11 +1241,14 @@ impl Lowerer {
                 }
             }
             Initializer::List(items) => {
-                // Check if the type is an array — even arrays of structs should
-                // use the array init path, not emit_struct_init.
+                // Check if the type is an array or vector
                 let ctype = self.type_spec_to_ctype(type_spec);
                 let is_array = matches!(ctype, CType::Array(_, _));
-                if !is_array {
+                // For vector compound literals, use the vector init list path
+                if let Some((elem_ct, num_elems)) = ctype.vector_info() {
+                    let elem_ct = elem_ct.clone();
+                    self.lower_vector_init_list(items, alloca, &elem_ct, num_elems);
+                } else if !is_array {
                     if let Some(ref layout) = struct_layout {
                         self.zero_init_alloca(alloca, layout.size);
                         self.emit_struct_init(items, alloca, layout, 0);
@@ -1508,7 +1539,8 @@ impl Lowerer {
     fn is_aggregate_or_complex(ct: &CType) -> bool {
         matches!(ct,
             CType::Array(_, _) | CType::Struct(_) | CType::Union(_) |
-            CType::ComplexFloat | CType::ComplexDouble | CType::ComplexLongDouble)
+            CType::ComplexFloat | CType::ComplexDouble | CType::ComplexLongDouble |
+            CType::Vector(_, _))
     }
 
     // -----------------------------------------------------------------------
