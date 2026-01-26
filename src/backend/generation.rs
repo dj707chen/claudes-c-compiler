@@ -732,11 +732,15 @@ fn compute_value_use_blocks(func: &IrFunction) -> FxHashMap<u32, Vec<usize>> {
 /// slots for allocas and value results. Arch-specific offset direction is handled
 /// by the `assign_slot` closure.
 ///
-/// Includes stack slot coalescing: values that are only active within a single
-/// non-entry basic block share stack space with values from other blocks. This
-/// dramatically reduces frame size for functions with large switch statements
-/// (e.g., bison parsers, Lua's VM interpreter) where thousands of case blocks
-/// each produce many block-local values that never coexist.
+/// Allocas always get permanent (non-coalesced) slots because they represent
+/// addressable memory accessed via derived GEP pointers that may span multiple
+/// basic blocks.
+///
+/// Non-alloca SSA temporaries may be coalesced: values defined and used only
+/// within a single non-entry basic block share stack space with temporaries from
+/// other blocks. This dramatically reduces frame size for functions with large
+/// switch statements (e.g., bison parsers, Lua's VM interpreter) where thousands
+/// of case blocks each produce many block-local temporaries that never coexist.
 ///
 /// `initial_offset`: starting offset (e.g., 0 for x86, 16 for ARM/RISC-V to skip saved regs)
 /// `assign_slot`: maps (current_space, raw_alloca_size, alignment) -> (slot_offset, new_space)
@@ -775,71 +779,32 @@ pub fn calculate_stack_space_common(
         }
     }
 
-    // Collect parameter alloca IDs.
-    let param_alloca_ids: FxHashSet<u32> = if coalesce {
-        let param_count = func.params.len();
-        func.blocks.first()
-            .map(|b| b.instructions.iter()
-                .filter_map(|inst| if let Instruction::Alloca { dest, .. } = inst { Some(dest.0) } else { None })
-                .take(param_count)
-                .collect())
-            .unwrap_or_default()
-    } else {
-        FxHashSet::default()
-    };
-
-    // Helper: determine if a value can be assigned to a block-local pool slot.
-    //
-    // For allocas (always in entry block):
-    //   Coalescable if the alloca pointer is used in exactly ONE non-entry block.
-    //   Returns Some(block_idx) of the single use block.
-    //
-    // For non-alloca values:
-    //   Coalescable if defined in a non-entry block and only used in that same block.
-    //   Returns Some(def_block_idx).
-    let single_use_block = |val_id: u32, is_alloca: bool, is_param: bool, has_over_align: bool| -> Option<usize> {
-        if !coalesce || is_param || has_over_align {
+    // Determine if a non-alloca value can be assigned to a block-local pool slot.
+    // Returns Some(def_block_idx) if the value is defined and used only within a
+    // single non-entry block, making it safe to share stack space with values
+    // from other blocks.
+    let single_use_block = |val_id: u32| -> Option<usize> {
+        if !coalesce {
             return None;
         }
-        if is_alloca {
-            // Alloca is defined in block 0. Check where its pointer is used.
+        // Non-alloca value: coalescable if defined and used in the same single non-entry block.
+        if let Some(&def_blk) = def_block.get(&val_id) {
+            if def_blk == 0 {
+                return None; // Entry block values are never coalesced.
+            }
             if let Some(blocks) = use_blocks_map.get(&val_id) {
-                // Deduplicate the block list
                 let mut unique: Vec<usize> = blocks.clone();
                 unique.sort_unstable();
                 unique.dedup();
-                // Remove block 0 (entry) - allocas defined there aren't "used" there
-                // unless other instructions in block 0 reference them.
-                // Actually, we need to be precise: if block 0 references the alloca
-                // (beyond the alloca instruction itself), it's used in block 0.
-                // The use_blocks_map already only records actual uses.
-                if unique.len() == 1 && unique[0] != 0 {
-                    return Some(unique[0]);
+                // Must only be used in its defining block.
+                if unique.len() == 1 && unique[0] == def_blk {
+                    return Some(def_blk);
+                }
+                if unique.is_empty() {
+                    return Some(def_blk); // Dead value, safe to coalesce.
                 }
             } else {
-                // No uses at all - dead alloca, don't coalesce.
-                return None;
-            }
-        } else {
-            // Non-alloca value: coalescable if defined and used in the same single non-entry block.
-            if let Some(&def_blk) = def_block.get(&val_id) {
-                if def_blk == 0 {
-                    return None; // Entry block values are never coalesced.
-                }
-                if let Some(blocks) = use_blocks_map.get(&val_id) {
-                    let mut unique: Vec<usize> = blocks.clone();
-                    unique.sort_unstable();
-                    unique.dedup();
-                    // Must only be used in its defining block.
-                    if unique.len() == 1 && unique[0] == def_blk {
-                        return Some(def_blk);
-                    }
-                    if unique.is_empty() {
-                        return Some(def_blk); // Dead value, safe to coalesce.
-                    }
-                } else {
-                    return Some(def_blk); // No uses - dead value.
-                }
+                return Some(def_blk); // No uses - dead value.
             }
         }
         None
@@ -855,7 +820,6 @@ pub fn calculate_stack_space_common(
         dest_id: u32,
         size: i64,
         align: i64,
-        target_block: usize,
         block_offset: i64,
     }
 
@@ -867,7 +831,7 @@ pub fn calculate_stack_space_common(
     let mut block_space: FxHashMap<usize, i64> = FxHashMap::default();
     let mut max_block_local_space: i64 = 0;
 
-    for (block_idx, block) in func.blocks.iter().enumerate() {
+    for (_block_idx, block) in func.blocks.iter().enumerate() {
         for inst in &block.instructions {
             if let Instruction::Alloca { dest, size, ty, align, .. } = inst {
                 let effective_align = *align;
@@ -880,24 +844,12 @@ pub fn calculate_stack_space_common(
                     state.alloca_alignments.insert(dest.0, effective_align);
                 }
 
-                let is_param = param_alloca_ids.contains(&dest.0);
-                if let Some(target_blk) = single_use_block(dest.0, true, is_param, extra > 0) {
-                    let bs = block_space.entry(target_blk).or_insert(0);
-                    let before = *bs;
-                    let (_, new_space) = assign_slot(*bs, raw_size, *align as i64);
-                    *bs = new_space;
-                    if new_space > max_block_local_space {
-                        max_block_local_space = new_space;
-                    }
-                    deferred_slots.push(DeferredSlot {
-                        dest_id: dest.0, size: raw_size, align: *align as i64,
-                        target_block: target_blk, block_offset: before,
-                    });
-                } else {
-                    let (slot, new_space) = assign_slot(non_local_space, raw_size + extra as i64, *align as i64);
-                    state.value_locations.insert(dest.0, StackSlot(slot));
-                    non_local_space = new_space;
-                }
+                // Allocas always get permanent (non-coalesced) slots because they
+                // represent addressable memory accessed via derived GEP pointers
+                // that may span multiple basic blocks.
+                let (slot, new_space) = assign_slot(non_local_space, raw_size + extra as i64, *align as i64);
+                state.value_locations.insert(dest.0, StackSlot(slot));
+                non_local_space = new_space;
             } else if let Some(dest) = inst.dest() {
                 let is_i128 = matches!(inst.result_type(), Some(IrType::I128) | Some(IrType::U128));
                 let slot_size: i64 = if is_i128 { 16 } else { 8 };
@@ -906,7 +858,7 @@ pub fn calculate_stack_space_common(
                     state.i128_values.insert(dest.0);
                 }
 
-                if let Some(target_blk) = single_use_block(dest.0, false, false, false) {
+                if let Some(target_blk) = single_use_block(dest.0) {
                     let bs = block_space.entry(target_blk).or_insert(0);
                     let before = *bs;
                     let (_, new_space) = assign_slot(*bs, slot_size, 0);
@@ -916,7 +868,7 @@ pub fn calculate_stack_space_common(
                     }
                     deferred_slots.push(DeferredSlot {
                         dest_id: dest.0, size: slot_size, align: 0,
-                        target_block: target_blk, block_offset: before,
+                        block_offset: before,
                     });
                 } else {
                     let (slot, new_space) = assign_slot(non_local_space, slot_size, 0);
