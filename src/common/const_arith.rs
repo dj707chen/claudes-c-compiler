@@ -141,42 +141,104 @@ pub fn eval_const_binop_int(op: &BinOp, l: i64, r: i64, is_32bit: bool, is_unsig
 
 /// Evaluate a constant floating-point binary operation.
 ///
-/// Promotes both operands to f64 for computation, then wraps the result in
-/// the appropriate float variant: LongDouble if either operand is LongDouble,
-/// F32 if both are F32, otherwise F64.
+/// For LongDouble operands, uses full x87 80-bit precision arithmetic via
+/// inline assembly (on x86-64 hosts) to avoid precision loss from f64 truncation.
+/// For F32/F64, uses native Rust arithmetic.
 ///
 /// Comparison and logical operations always return `IrConst::I64`.
 pub fn eval_const_binop_float(op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Option<IrConst> {
+    use crate::common::long_double;
+
     let use_long_double = matches!(lhs, IrConst::LongDouble(..)) || matches!(rhs, IrConst::LongDouble(..));
     let use_f32 = matches!(lhs, IrConst::F32(_)) && matches!(rhs, IrConst::F32(_));
 
-    let l = lhs.to_f64()?;
-    let r = rhs.to_f64()?;
+    // For long double arithmetic, use full x87 precision on the raw bytes
+    if use_long_double {
+        let la = lhs.x87_bytes();
+        let ra = rhs.x87_bytes();
 
-    let make_float = |v: f64| -> IrConst {
-        if use_long_double {
-            IrConst::long_double(v)
-        } else if use_f32 {
-            IrConst::F32(v as f32)
-        } else {
-            IrConst::F64(v)
+        match op {
+            BinOp::Add => {
+                let result_bytes = long_double::x87_add(&la, &ra);
+                let approx = long_double::x87_to_f64(&result_bytes);
+                Some(IrConst::long_double_with_bytes(approx, result_bytes))
+            }
+            BinOp::Sub => {
+                let result_bytes = long_double::x87_sub(&la, &ra);
+                let approx = long_double::x87_to_f64(&result_bytes);
+                Some(IrConst::long_double_with_bytes(approx, result_bytes))
+            }
+            BinOp::Mul => {
+                let result_bytes = long_double::x87_mul(&la, &ra);
+                let approx = long_double::x87_to_f64(&result_bytes);
+                Some(IrConst::long_double_with_bytes(approx, result_bytes))
+            }
+            BinOp::Div => {
+                let result_bytes = long_double::x87_div(&la, &ra);
+                let approx = long_double::x87_to_f64(&result_bytes);
+                Some(IrConst::long_double_with_bytes(approx, result_bytes))
+            }
+            BinOp::Mod => {
+                let result_bytes = long_double::x87_rem(&la, &ra);
+                let approx = long_double::x87_to_f64(&result_bytes);
+                Some(IrConst::long_double_with_bytes(approx, result_bytes))
+            }
+            // Comparisons use x87 compare for full precision
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                let cmp = long_double::x87_cmp(&la, &ra);
+                let result = match op {
+                    BinOp::Eq => cmp == 0,
+                    BinOp::Ne => cmp != 0,
+                    BinOp::Lt => cmp == -1,
+                    BinOp::Gt => cmp == 1,
+                    BinOp::Le => cmp == -1 || cmp == 0,
+                    BinOp::Ge => cmp == 1 || cmp == 0,
+                    _ => unreachable!(),
+                };
+                Some(IrConst::I64(if result { 1 } else { 0 }))
+            }
+            BinOp::LogicalAnd | BinOp::LogicalOr => {
+                // For logical ops, check if values are nonzero using x87 compare with zero
+                let zero = [0u8; 16];
+                let l_nonzero = long_double::x87_cmp(&la, &zero) != 0;
+                let r_nonzero = long_double::x87_cmp(&ra, &zero) != 0;
+                let result = match op {
+                    BinOp::LogicalAnd => l_nonzero && r_nonzero,
+                    BinOp::LogicalOr => l_nonzero || r_nonzero,
+                    _ => unreachable!(),
+                };
+                Some(IrConst::I64(if result { 1 } else { 0 }))
+            }
+            _ => None,
         }
-    };
+    } else {
+        // F32/F64 path: use native Rust arithmetic
+        let l = lhs.to_f64()?;
+        let r = rhs.to_f64()?;
 
-    match op {
-        BinOp::Add => Some(make_float(l + r)),
-        BinOp::Sub => Some(make_float(l - r)),
-        BinOp::Mul => Some(make_float(l * r)),
-        BinOp::Div => Some(make_float(l / r)), // IEEE 754: div by zero -> inf/NaN
-        BinOp::Eq => Some(IrConst::I64(if l == r { 1 } else { 0 })),
-        BinOp::Ne => Some(IrConst::I64(if l != r { 1 } else { 0 })),
-        BinOp::Lt => Some(IrConst::I64(if l < r { 1 } else { 0 })),
-        BinOp::Gt => Some(IrConst::I64(if l > r { 1 } else { 0 })),
-        BinOp::Le => Some(IrConst::I64(if l <= r { 1 } else { 0 })),
-        BinOp::Ge => Some(IrConst::I64(if l >= r { 1 } else { 0 })),
-        BinOp::LogicalAnd => Some(IrConst::I64(if l != 0.0 && r != 0.0 { 1 } else { 0 })),
-        BinOp::LogicalOr => Some(IrConst::I64(if l != 0.0 || r != 0.0 { 1 } else { 0 })),
-        _ => None, // Bitwise/shift not valid on floats
+        let make_float = |v: f64| -> IrConst {
+            if use_f32 {
+                IrConst::F32(v as f32)
+            } else {
+                IrConst::F64(v)
+            }
+        };
+
+        match op {
+            BinOp::Add => Some(make_float(l + r)),
+            BinOp::Sub => Some(make_float(l - r)),
+            BinOp::Mul => Some(make_float(l * r)),
+            BinOp::Div => Some(make_float(l / r)),
+            BinOp::Eq => Some(IrConst::I64(if l == r { 1 } else { 0 })),
+            BinOp::Ne => Some(IrConst::I64(if l != r { 1 } else { 0 })),
+            BinOp::Lt => Some(IrConst::I64(if l < r { 1 } else { 0 })),
+            BinOp::Gt => Some(IrConst::I64(if l > r { 1 } else { 0 })),
+            BinOp::Le => Some(IrConst::I64(if l <= r { 1 } else { 0 })),
+            BinOp::Ge => Some(IrConst::I64(if l >= r { 1 } else { 0 })),
+            BinOp::LogicalAnd => Some(IrConst::I64(if l != 0.0 && r != 0.0 { 1 } else { 0 })),
+            BinOp::LogicalOr => Some(IrConst::I64(if l != 0.0 || r != 0.0 { 1 } else { 0 })),
+            _ => None,
+        }
     }
 }
 
@@ -280,7 +342,12 @@ pub fn negate_const(val: IrConst) -> Option<IrConst> {
         IrConst::I16(v) => Some(IrConst::I32((v as i32).wrapping_neg())),
         IrConst::F64(v) => Some(IrConst::F64(-v)),
         IrConst::F32(v) => Some(IrConst::F32(-v)),
-        IrConst::LongDouble(v, _) => Some(IrConst::long_double(-v)),
+        IrConst::LongDouble(v, bytes) => {
+            // Negate by flipping the sign bit in the x87 bytes directly,
+            // preserving full 80-bit precision
+            let neg_bytes = crate::common::long_double::x87_neg(&bytes);
+            Some(IrConst::long_double_with_bytes(-v, neg_bytes))
+        }
         _ => None,
     }
 }

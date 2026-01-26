@@ -591,6 +591,23 @@ impl IrConst {
         }
     }
 
+    /// Get the x87 80-bit byte representation for any float constant.
+    /// For LongDouble, returns the stored full-precision bytes.
+    /// For F64/F32, converts to x87 format (widening, zero-fills lower mantissa bits).
+    /// For integer types, converts to f64 first then to x87 bytes.
+    pub fn x87_bytes(&self) -> [u8; 16] {
+        match self {
+            IrConst::LongDouble(_, bytes) => *bytes,
+            _ => {
+                if let Some(v) = self.to_f64() {
+                    crate::common::long_double::f64_to_x87_bytes_simple(v)
+                } else {
+                    [0u8; 16]
+                }
+            }
+        }
+    }
+
     /// Returns true if this constant is one (integer only).
     pub fn is_one(&self) -> bool {
         matches!(self, IrConst::I8(1) | IrConst::I16(1) | IrConst::I32(1) | IrConst::I64(1) | IrConst::I128(1))

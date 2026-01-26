@@ -497,7 +497,8 @@ impl Lowerer {
                     *idx
                 }
                 InitFieldResolution::AnonymousMember { anon_field_idx, inner_name } => {
-                    if let Some(res) = h::resolve_anonymous_member(layout, *anon_field_idx, inner_name, &item.init, &self.types.struct_layouts) {
+                    let extra_desigs = if item.designators.len() > 1 { &item.designators[1..] } else { &[] };
+                    if let Some(res) = h::resolve_anonymous_member(layout, *anon_field_idx, inner_name, &item.init, extra_desigs, &self.types.struct_layouts) {
                         let sub_base = self.emit_gep_offset(base, res.anon_offset, IrType::Ptr);
                         self.lower_local_struct_init(&[res.sub_item], sub_base, &res.sub_layout);
                     }

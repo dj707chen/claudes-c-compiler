@@ -50,9 +50,16 @@ impl Lowerer {
                 Some(InitFieldResolution::Direct(idx)) => *idx,
                 Some(InitFieldResolution::AnonymousMember { anon_field_idx, inner_name }) => {
                     // Designator targets a field inside an anonymous member.
-                    // Create a synthetic init item with the inner designator.
+                    // Create a synthetic init item with the inner designator,
+                    // preserving any remaining nested designators from the original item.
+                    // e.g., for `.base.cra_name = "val"` where `base` is inside an anonymous
+                    // union, the synthetic item must be `.base.cra_name = "val"` (not just `.base`).
+                    let mut synth_desigs = vec![Designator::Field(inner_name.clone())];
+                    if item.designators.len() > 1 {
+                        synth_desigs.extend(item.designators[1..].iter().cloned());
+                    }
                     let synth_item = InitializerItem {
-                        designators: vec![Designator::Field(inner_name.clone())],
+                        designators: synth_desigs,
                         init: item.init.clone(),
                     };
                     anon_synth_items.push((*anon_field_idx, synth_item));
@@ -977,7 +984,8 @@ impl Lowerer {
                 Some(InitFieldResolution::AnonymousMember { anon_field_idx, inner_name }) => {
                     // Designator targets a field inside an anonymous struct/union member.
                     // Recursively fill the anonymous member's sub-layout.
-                    if let Some(res) = h::resolve_anonymous_member(layout, *anon_field_idx, inner_name, &sub_item.init, &self.types.struct_layouts) {
+                    let extra_desigs = if sub_item.designators.len() > 1 { &sub_item.designators[1..] } else { &[] };
+                    if let Some(res) = h::resolve_anonymous_member(layout, *anon_field_idx, inner_name, &sub_item.init, extra_desigs, &self.types.struct_layouts) {
                         let anon_offset = base_offset + res.anon_offset;
                         self.fill_struct_fields_from_items(
                             &[res.sub_item], &res.sub_layout, anon_offset, bytes, ptr_ranges,
@@ -1215,7 +1223,8 @@ impl Lowerer {
                 Some(InitFieldResolution::Direct(idx)) => *idx,
                 Some(InitFieldResolution::AnonymousMember { anon_field_idx, inner_name }) => {
                     // Designator targets a field inside an anonymous struct/union member.
-                    if let Some(res) = h::resolve_anonymous_member(layout, *anon_field_idx, inner_name, &item.init, &self.types.struct_layouts) {
+                    let extra_desigs = if item.designators.len() > remaining_desigs_start { &item.designators[remaining_desigs_start..] } else { &[] };
+                    if let Some(res) = h::resolve_anonymous_member(layout, *anon_field_idx, inner_name, &item.init, extra_desigs, &self.types.struct_layouts) {
                         let anon_offset = elem_base + res.anon_offset;
                         self.fill_struct_fields_from_items(
                             &[res.sub_item], &res.sub_layout, anon_offset, bytes, ptr_ranges,

@@ -119,6 +119,16 @@ fn try_fold_with_map(inst: &Instruction, const_map: &[Option<ConstMapEntry>]) ->
             }
             // Try float folding first
             if ty.is_float() {
+                // For F128 (long double), use full x87 precision arithmetic
+                if *ty == IrType::F128 {
+                    let lc = resolve_const(lhs, const_map)?;
+                    let rc = resolve_const(rhs, const_map)?;
+                    let result = fold_f128_binop(*op, &lc, &rc)?;
+                    return Some(Instruction::Copy {
+                        dest: *dest,
+                        src: Operand::Const(result),
+                    });
+                }
                 let l = as_f64_const_mapped(lhs, const_map)?;
                 let r = as_f64_const_mapped(rhs, const_map)?;
                 let result = fold_float_binop(*op, l, r)?;
@@ -149,6 +159,15 @@ fn try_fold_with_map(inst: &Instruction, const_map: &[Option<ConstMapEntry>]) ->
             }
             // Try float unary folding
             if ty.is_float() {
+                // For F128 (long double), preserve full x87 precision on negation
+                if *ty == IrType::F128 && *op == IrUnaryOp::Neg {
+                    let sc = resolve_const(src, const_map)?;
+                    let result = fold_f128_neg(&sc);
+                    return Some(Instruction::Copy {
+                        dest: *dest,
+                        src: Operand::Const(result),
+                    });
+                }
                 let s = as_f64_const_mapped(src, const_map)?;
                 let result = fold_float_unaryop(*op, s)?;
                 return Some(Instruction::Copy {
@@ -173,6 +192,16 @@ fn try_fold_with_map(inst: &Instruction, const_map: &[Option<ConstMapEntry>]) ->
             }
             // Try float comparison folding
             if ty.is_float() {
+                // For F128 (long double), use full x87 precision comparison
+                if *ty == IrType::F128 {
+                    let lc = resolve_const(lhs, const_map)?;
+                    let rc = resolve_const(rhs, const_map)?;
+                    let result = fold_f128_cmp(*op, &lc, &rc);
+                    return Some(Instruction::Copy {
+                        dest: *dest,
+                        src: Operand::Const(IrConst::I32(result as i32)),
+                    });
+                }
                 let l = as_f64_const_mapped(lhs, const_map)?;
                 let r = as_f64_const_mapped(rhs, const_map)?;
                 let result = fold_float_cmp(*op, l, r);
@@ -348,6 +377,60 @@ fn fold_float_cmp(op: IrCmpOp, lhs: f64, rhs: f64) -> bool {
         IrCmpOp::Sle | IrCmpOp::Ule => lhs <= rhs,
         IrCmpOp::Sgt | IrCmpOp::Ugt => lhs > rhs,
         IrCmpOp::Sge | IrCmpOp::Uge => lhs >= rhs,
+    }
+}
+
+/// Fold a binary operation on two F128 (long double) constants using full x87 80-bit precision.
+/// This avoids the precision loss that occurs when extracting f64 and computing with f64.
+///
+/// Note: const_arith.rs has a similar path in eval_const_binop_float() for the frontend
+/// const evaluator. These are separate because the IR pass operates on IrConst/IrBinOp
+/// while const_arith uses AST BinOp. Both delegate to the same x87_* functions in long_double.rs.
+fn fold_f128_binop(op: IrBinOp, lhs: &IrConst, rhs: &IrConst) -> Option<IrConst> {
+    use crate::common::long_double;
+
+    let la = lhs.x87_bytes();
+    let ra = rhs.x87_bytes();
+
+    let result_bytes = match op {
+        IrBinOp::Add => long_double::x87_add(&la, &ra),
+        IrBinOp::Sub => long_double::x87_sub(&la, &ra),
+        IrBinOp::Mul => long_double::x87_mul(&la, &ra),
+        IrBinOp::SDiv | IrBinOp::UDiv => long_double::x87_div(&la, &ra),
+        IrBinOp::SRem | IrBinOp::URem => long_double::x87_rem(&la, &ra),
+        _ => return None,
+    };
+
+    let approx = long_double::x87_to_f64(&result_bytes);
+    Some(IrConst::long_double_with_bytes(approx, result_bytes))
+}
+
+/// Negate an F128 (long double) constant with full precision by flipping the sign bit.
+fn fold_f128_neg(src: &IrConst) -> IrConst {
+    use crate::common::long_double;
+
+    let bytes = src.x87_bytes();
+    let neg_bytes = long_double::x87_neg(&bytes);
+    let approx = long_double::x87_to_f64(&neg_bytes);
+    IrConst::long_double_with_bytes(approx, neg_bytes)
+}
+
+/// Compare two F128 (long double) constants using full x87 80-bit precision.
+fn fold_f128_cmp(op: IrCmpOp, lhs: &IrConst, rhs: &IrConst) -> bool {
+    use crate::common::long_double;
+
+    let la = lhs.x87_bytes();
+    let ra = rhs.x87_bytes();
+    let cmp = long_double::x87_cmp(&la, &ra);
+
+    // cmp: -1 = a<b, 0 = a==b, 1 = a>b, i32::MIN = unordered (NaN)
+    match op {
+        IrCmpOp::Eq => cmp == 0,
+        IrCmpOp::Ne => cmp != 0, // NaN != NaN is true per IEEE 754 (unordered gives i32::MIN which is != 0)
+        IrCmpOp::Slt | IrCmpOp::Ult => cmp == -1,
+        IrCmpOp::Sle | IrCmpOp::Ule => cmp == -1 || cmp == 0,
+        IrCmpOp::Sgt | IrCmpOp::Ugt => cmp == 1,
+        IrCmpOp::Sge | IrCmpOp::Uge => cmp == 1 || cmp == 0,
     }
 }
 

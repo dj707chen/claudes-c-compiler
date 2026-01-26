@@ -831,10 +831,11 @@ fn compute_value_use_blocks(func: &IrFunction) -> FxHashMap<u32, Vec<usize>> {
 /// basic blocks.
 ///
 /// Non-alloca SSA temporaries may be coalesced: values defined and used only
-/// within a single non-entry basic block share stack space with temporaries from
-/// other blocks. This dramatically reduces frame size for functions with large
-/// switch statements (e.g., bison parsers, Lua's VM interpreter) where thousands
-/// of case blocks each produce many block-local temporaries that never coexist.
+/// within a single basic block (including the entry block) share stack space
+/// with temporaries from other blocks. This dramatically reduces frame size for
+/// functions with large switch statements (e.g., bison parsers, Lua's VM
+/// interpreter) where thousands of case blocks each produce many block-local
+/// temporaries that never coexist.
 ///
 /// `initial_offset`: starting offset (e.g., 0 for x86, 16 for ARM/RISC-V to skip saved regs)
 /// `assign_slot`: maps (current_space, raw_alloca_size, alignment) -> (slot_offset, new_space)
@@ -848,12 +849,21 @@ pub fn calculate_stack_space_common(
     let total_instructions: usize = func.blocks.iter().map(|b| b.instructions.len()).sum();
     let num_blocks = func.blocks.len();
 
-    // Only enable coalescing for functions with enough complexity to benefit.
-    // Thresholds: >=8 blocks and >=64 instructions filters out small functions
-    // where coalescing overhead (use-block analysis) isn't worthwhile, while
-    // still catching medium-sized switch statements. Bison parsers typically have
-    // thousands of blocks and millions of instructions.
-    let coalesce = num_blocks >= 8 && total_instructions >= 64 && !func.has_inlined_calls;
+    // Enable block-local coalescing (Tier 3) for all multi-block functions.
+    // Enable liveness-based packing (Tier 2) only for large functions.
+    //
+    // Tier 3 is safe for all functions: single-block values share stack space
+    // across different blocks since only one block's values are live at a time.
+    // Tier 2 uses liveness intervals to pack multi-block values into shared slots;
+    // this is only enabled for large functions (>= 8 blocks && >= 64 instructions)
+    // where the overhead is justified and the analysis is well-tested.
+    //
+    // Even small functions benefit from Tier 3: a 3-block function with 20
+    // intermediates can save 100+ bytes of frame space by sharing slots, which
+    // matters for recursive functions where per-frame savings compound (e.g.,
+    // PostgreSQL plpgsql recursion triggers stack depth limit with large frames).
+    let coalesce = num_blocks >= 2 && !func.has_inlined_calls;
+    let enable_tier2 = num_blocks >= 8 && total_instructions >= 64;
 
     // Build use-block map: for each value, which blocks reference it.
     let use_blocks_map = if coalesce {
@@ -885,8 +895,8 @@ pub fn calculate_stack_space_common(
 
     // Determine if a non-alloca value can be assigned to a block-local pool slot.
     // Returns Some(def_block_idx) if the value is defined and used only within a
-    // single non-entry block, making it safe to share stack space with values
-    // from other blocks (since only one block's values are live at a time).
+    // single block (including the entry block), making it safe to share stack
+    // space with values from other blocks (since only one block executes at a time).
     let coalescable_group = |val_id: u32| -> Option<usize> {
         if !coalesce {
             return None;
@@ -897,9 +907,6 @@ pub fn calculate_stack_space_common(
             return None;
         }
         if let Some(&def_blk) = def_block.get(&val_id) {
-            if def_blk == 0 {
-                return None; // Entry block values are never coalesced.
-            }
             if let Some(blocks) = use_blocks_map.get(&val_id) {
                 let mut unique: Vec<usize> = blocks.clone();
                 unique.sort_unstable();
@@ -909,7 +916,14 @@ pub fn calculate_stack_space_common(
                     return Some(def_blk); // Dead value, safe to coalesce.
                 }
 
-                // Check 1: Single-block value (defined and used in the same block).
+                // Single-block value (defined and used in the same block).
+                // Safe to share a pool slot: each block gets its own pool, and
+                // pools from different blocks share the same stack offset because
+                // only one block executes at a time.
+                // This includes entry block (def_blk == 0) values that are purely
+                // local to the entry block -- these are common intermediate results
+                // (sign extensions, casts, arithmetic) that don't cross block
+                // boundaries and can safely share pool slots.
                 if unique.len() == 1 && unique[0] == def_blk {
                     return Some(def_blk);
                 }
@@ -1010,7 +1024,8 @@ pub fn calculate_stack_space_common(
     // Tier 2: Liveness-based stack slot packing for multi-block values.
     // Use live intervals to identify non-overlapping values that can share
     // the same stack slot, reducing frame size significantly.
-    if !multi_block_values.is_empty() && coalesce {
+    // Only enabled for large functions where the liveness analysis is well-tested.
+    if !multi_block_values.is_empty() && enable_tier2 {
         // Compute live intervals (reuses the same analysis as register allocation).
         let liveness = compute_live_intervals(func);
 

@@ -174,6 +174,10 @@ pub(super) struct AnonMemberResolution {
 /// member, this function looks up the sub-layout and creates a synthetic
 /// initializer item that re-targets the inner field name.
 ///
+/// `extra_designators` contains any remaining designators from the original item
+/// beyond the first one (e.g., for `.base.cra_name`, extra_designators would be
+/// `[Field("cra_name")]`). These are appended to preserve nested designator chains.
+///
 /// Returns `None` if the anonymous field's type is not a struct/union or
 /// if the layout cannot be found.
 pub(super) fn resolve_anonymous_member(
@@ -181,6 +185,7 @@ pub(super) fn resolve_anonymous_member(
     anon_field_idx: usize,
     inner_name: &str,
     init: &Initializer,
+    extra_designators: &[Designator],
     layouts: &crate::common::fx_hash::FxHashMap<String, RcLayout>,
 ) -> Option<AnonMemberResolution> {
     let anon_field = &layout.fields[anon_field_idx];
@@ -190,8 +195,10 @@ pub(super) fn resolve_anonymous_member(
         _ => return None,
     };
     let sub_layout = layouts.get(key.as_ref())?.clone(); // Rc::clone, not deep clone
+    let mut synth_desigs = vec![Designator::Field(inner_name.to_string())];
+    synth_desigs.extend(extra_designators.iter().cloned());
     let sub_item = InitializerItem {
-        designators: vec![Designator::Field(inner_name.to_string())],
+        designators: synth_desigs,
         init: init.clone(),
     };
     Some(AnonMemberResolution {

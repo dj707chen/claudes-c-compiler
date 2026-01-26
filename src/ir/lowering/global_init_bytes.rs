@@ -55,7 +55,8 @@ impl Lowerer {
             let field_idx = match &resolution {
                 Some(crate::common::types::InitFieldResolution::Direct(idx)) => *idx,
                 Some(crate::common::types::InitFieldResolution::AnonymousMember { anon_field_idx, inner_name }) => {
-                    if let Some(res) = h::resolve_anonymous_member(layout, *anon_field_idx, inner_name, &item.init, &self.types.struct_layouts) {
+                    let extra_desigs = if item.designators.len() > 1 { &item.designators[1..] } else { &[] };
+                    if let Some(res) = h::resolve_anonymous_member(layout, *anon_field_idx, inner_name, &item.init, extra_desigs, &self.types.struct_layouts) {
                         self.fill_struct_global_bytes(&[res.sub_item], &res.sub_layout, bytes, base_offset + res.anon_offset);
                     }
                     item_idx += 1;

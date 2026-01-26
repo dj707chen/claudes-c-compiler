@@ -980,6 +980,243 @@ pub fn x87_bytes_to_u128(bytes: &[u8; 16]) -> Option<u128> {
     }
 }
 
+// ============================================================================
+// x87 full-precision arithmetic on raw 80-bit bytes
+// ============================================================================
+//
+// These functions perform arithmetic on x87 80-bit extended precision values
+// stored as [u8; 16] byte arrays (10 bytes of x87 data + 6 padding bytes).
+// Since the compiler runs on x86-64, we use inline assembly to invoke the
+// actual x87 FPU instructions, giving us correct 80-bit precision results
+// that match what the generated code will produce at runtime.
+
+/// Perform an x87 binary operation on two 80-bit extended precision values.
+/// `op` selects the operation: 0=add, 1=sub, 2=mul, 3=div.
+#[cfg(target_arch = "x86_64")]
+fn x87_binop(a: &[u8; 16], b: &[u8; 16], op: u8) -> [u8; 16] {
+    let mut result = [0u8; 16];
+    // SAFETY: The inline assembly loads two 80-bit x87 values from valid [u8; 16] arrays
+    // via `fld tbyte ptr`, performs a single x87 arithmetic operation, and stores the
+    // result via `fstp tbyte ptr`. The x87 stack is balanced (2 loads, 1 fXXXp pop, 1 fstp).
+    // The input arrays are borrowed immutably and the result array is exclusively owned.
+    // No memory aliasing issues. The `nostack` option is correct since x87 FPU operations
+    // do not touch the CPU stack.
+    unsafe {
+        // x87 stack operations:
+        // faddp/fmulp: ST(1) op ST(0), pop => commutative, order doesn't matter
+        // fsubp: ST(1) - ST(0), pop => need ST(1)=a, ST(0)=b => load a first, then b
+        // fdivp: ST(1) / ST(0), pop => need ST(1)=a, ST(0)=b => load a first, then b
+        match op {
+            0 => {
+                // add: result = a + b (commutative)
+                std::arch::asm!(
+                    "fld tbyte ptr [{a}]",
+                    "fld tbyte ptr [{b}]",
+                    "faddp",
+                    "fstp tbyte ptr [{res}]",
+                    a = in(reg) a.as_ptr(),
+                    b = in(reg) b.as_ptr(),
+                    res = in(reg) result.as_mut_ptr(),
+                    options(nostack),
+                );
+            }
+            1 => {
+                // sub: result = a - b
+                // Load a first (goes to ST(0)), then load b (pushes a to ST(1))
+                // fsubp: ST(1) - ST(0) = a - b
+                std::arch::asm!(
+                    "fld tbyte ptr [{a}]",
+                    "fld tbyte ptr [{b}]",
+                    "fsubp",
+                    "fstp tbyte ptr [{res}]",
+                    a = in(reg) a.as_ptr(),
+                    b = in(reg) b.as_ptr(),
+                    res = in(reg) result.as_mut_ptr(),
+                    options(nostack),
+                );
+            }
+            2 => {
+                // mul: result = a * b (commutative)
+                std::arch::asm!(
+                    "fld tbyte ptr [{a}]",
+                    "fld tbyte ptr [{b}]",
+                    "fmulp",
+                    "fstp tbyte ptr [{res}]",
+                    a = in(reg) a.as_ptr(),
+                    b = in(reg) b.as_ptr(),
+                    res = in(reg) result.as_mut_ptr(),
+                    options(nostack),
+                );
+            }
+            3 => {
+                // div: result = a / b
+                // Load a first (goes to ST(0)), then load b (pushes a to ST(1))
+                // fdivp: ST(1) / ST(0) = a / b
+                std::arch::asm!(
+                    "fld tbyte ptr [{a}]",
+                    "fld tbyte ptr [{b}]",
+                    "fdivp",
+                    "fstp tbyte ptr [{res}]",
+                    a = in(reg) a.as_ptr(),
+                    b = in(reg) b.as_ptr(),
+                    res = in(reg) result.as_mut_ptr(),
+                    options(nostack),
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+    result
+}
+
+/// Fallback for non-x86 hosts: use f64 arithmetic (lossy).
+// TODO: Cross-compilation from non-x86 hosts will produce imprecise long double
+// constant folding results (53-bit instead of 64-bit mantissa). To fix this,
+// implement software 80-bit float arithmetic using the existing BigUint infrastructure.
+#[cfg(not(target_arch = "x86_64"))]
+fn x87_binop(a: &[u8; 16], b: &[u8; 16], op: u8) -> [u8; 16] {
+    let fa = x87_bytes_to_f64(a);
+    let fb = x87_bytes_to_f64(b);
+    let result = match op {
+        0 => fa + fb,
+        1 => fa - fb,
+        2 => fa * fb,
+        3 => fa / fb,
+        _ => unreachable!(),
+    };
+    f64_to_x87_bytes_simple(result)
+}
+
+/// Add two x87 80-bit extended precision values with full precision.
+pub fn x87_add(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    x87_binop(a, b, 0)
+}
+
+/// Subtract two x87 80-bit extended precision values with full precision.
+pub fn x87_sub(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    x87_binop(a, b, 1)
+}
+
+/// Multiply two x87 80-bit extended precision values with full precision.
+pub fn x87_mul(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    x87_binop(a, b, 2)
+}
+
+/// Divide two x87 80-bit extended precision values with full precision.
+pub fn x87_div(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    x87_binop(a, b, 3)
+}
+
+/// Negate an x87 80-bit extended precision value by flipping the sign bit.
+/// This preserves full precision since it only changes one bit.
+pub fn x87_neg(a: &[u8; 16]) -> [u8; 16] {
+    let mut result = *a;
+    result[9] ^= 0x80; // flip the sign bit (bit 15 of exponent+sign word)
+    result
+}
+
+/// Compute the remainder of two x87 80-bit extended precision values.
+#[cfg(target_arch = "x86_64")]
+pub fn x87_rem(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    let mut result = [0u8; 16];
+    // SAFETY: Same safety rationale as x87_binop. Additionally, fprem may require
+    // multiple iterations (checked via C2 status bit), but the loop always terminates
+    // because the quotient has finite magnitude. The extra `fstp st(0)` pops the
+    // divisor left on the stack, maintaining x87 stack balance.
+    unsafe {
+        // x87 fprem: ST(0) = ST(0) mod ST(1)
+        // We need to loop since fprem may produce partial results for large quotients.
+        std::arch::asm!(
+            "fld tbyte ptr [{b}]",
+            "fld tbyte ptr [{a}]",
+            "2:",
+            "fprem",
+            "fnstsw ax",
+            "test ax, 0x400",
+            "jnz 2b",
+            "fstp tbyte ptr [{res}]",
+            "fstp st(0)",
+            a = in(reg) a.as_ptr(),
+            b = in(reg) b.as_ptr(),
+            res = in(reg) result.as_mut_ptr(),
+            out("ax") _,
+            options(nostack),
+        );
+    }
+    result
+}
+
+// TODO: Lossy on non-x86 hosts (see x87_binop fallback comment above).
+#[cfg(not(target_arch = "x86_64"))]
+pub fn x87_rem(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    let fa = x87_bytes_to_f64(a);
+    let fb = x87_bytes_to_f64(b);
+    f64_to_x87_bytes_simple(fa % fb)
+}
+
+/// Compare two x87 80-bit extended precision values.
+/// Returns: -1 if a < b, 0 if a == b, 1 if a > b, i32::MIN if unordered (NaN).
+#[cfg(target_arch = "x86_64")]
+pub fn x87_cmp(a: &[u8; 16], b: &[u8; 16]) -> i32 {
+    let status: u16;
+    // SAFETY: Loads two 80-bit values, fucompp compares and pops both (stack balanced).
+    // fnstsw ax stores the FPU status word into the ax register for condition code inspection.
+    // No memory writes except to the `status` output variable.
+    unsafe {
+        // fucompp compares ST(0) and ST(1) and pops both
+        std::arch::asm!(
+            "fld tbyte ptr [{b}]",
+            "fld tbyte ptr [{a}]",
+            "fucompp",
+            "fnstsw ax",
+            a = in(reg) a.as_ptr(),
+            b = in(reg) b.as_ptr(),
+            out("ax") status,
+            options(nostack),
+        );
+    }
+    // x87 status word bits: C3=ZF(bit 14), C2=PF(bit 10), C0=CF(bit 8)
+    let c0 = (status >> 8) & 1;
+    let c2 = (status >> 10) & 1;
+    let c3 = (status >> 14) & 1;
+
+    if c2 == 1 {
+        // Unordered (NaN)
+        i32::MIN
+    } else if c3 == 1 && c0 == 0 {
+        // Equal: C3=1, C0=0
+        0
+    } else if c0 == 1 {
+        // a < b: C0=1, C3=0
+        -1
+    } else {
+        // a > b: C0=0, C3=0
+        1
+    }
+}
+
+// TODO: Lossy on non-x86 hosts (see x87_binop fallback comment above).
+#[cfg(not(target_arch = "x86_64"))]
+pub fn x87_cmp(a: &[u8; 16], b: &[u8; 16]) -> i32 {
+    let fa = x87_bytes_to_f64(a);
+    let fb = x87_bytes_to_f64(b);
+    if fa.is_nan() || fb.is_nan() {
+        i32::MIN
+    } else if fa < fb {
+        -1
+    } else if fa > fb {
+        1
+    } else {
+        0
+    }
+}
+
+/// Get the f64 approximation from x87 bytes, for use when we still need f64.
+/// This is a convenience alias for x87_bytes_to_f64.
+pub fn x87_to_f64(bytes: &[u8; 16]) -> f64 {
+    x87_bytes_to_f64(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
