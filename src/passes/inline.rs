@@ -354,6 +354,11 @@ fn build_callee_map(module: &IrModule) -> HashMap<String, CalleeData> {
         if func.is_declaration {
             continue;
         }
+        // __attribute__((noinline)) takes precedence: never inline these functions
+        if func.is_noinline {
+            continue;
+        }
+
         // Determine if this is an always_inline function
         let is_always_inline = func.is_always_inline;
 

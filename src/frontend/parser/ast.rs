@@ -33,6 +33,9 @@ pub struct FunctionDef {
     /// True when __attribute__((always_inline)) is present.
     /// These functions must always be inlined and should not be emitted as standalone.
     pub is_always_inline: bool,
+    /// True when __attribute__((noinline)) is present.
+    /// These functions must never be inlined by the optimizer.
+    pub is_noinline: bool,
     pub is_kr: bool,
     pub is_constructor: bool,
     pub is_destructor: bool,

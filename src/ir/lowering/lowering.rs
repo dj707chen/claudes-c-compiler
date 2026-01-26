@@ -1173,6 +1173,7 @@ impl Lowerer {
             is_variadic: func.variadic, is_declaration: false, is_static,
             is_inline: func.is_inline,
             is_always_inline: func.is_always_inline,
+            is_noinline: func.is_noinline,
             stack_size: 0,
             next_value_id: next_val,
             section: func.section.clone(),

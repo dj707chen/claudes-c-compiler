@@ -144,6 +144,9 @@ pub struct IrFunction {
     /// True when __attribute__((always_inline)) is present.
     /// These functions must always be inlined at call sites.
     pub is_always_inline: bool,
+    /// True when __attribute__((noinline)) is present.
+    /// These functions must never be inlined.
+    pub is_noinline: bool,
     pub stack_size: usize,
     /// Cached upper bound on Value IDs: all Value IDs in this function are < next_value_id.
     /// Set by lowering/mem2reg/phi_eliminate to avoid expensive full-IR scans.
@@ -1163,6 +1166,7 @@ impl IrFunction {
             is_static: false,
             is_inline: false,
             is_always_inline: false,
+            is_noinline: false,
             stack_size: 0,
             next_value_id: 0,
             section: None,
