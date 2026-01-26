@@ -358,14 +358,30 @@ impl Lowerer {
                         });
                         let mut current_idx = 0usize;
                         for item in items {
-                            if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
-                                if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
-                                    current_idx = idx;
+                            // Collect all index designators for multi-dimensional support
+                            // e.g., [1][3] = val gives index_designators = [1, 3]
+                            let index_designators: Vec<usize> = item.designators.iter().filter_map(|d| {
+                                if let Designator::Index(ref idx_expr) = d {
+                                    self.eval_const_expr(idx_expr).and_then(|c| c.to_usize())
+                                } else {
+                                    None
                                 }
+                            }).collect();
+
+                            if !index_designators.is_empty() {
+                                current_idx = index_designators[0];
                             }
+
                             // For structured init (nested lists), each item spans outer_stride
                             // flat positions. For flat init, each item is one flat position.
-                            let flat_idx = if is_structured {
+                            let flat_idx = if index_designators.len() > 1 {
+                                // Multi-dimensional designator: compute flat index from all dimensions
+                                // e.g., for table[3][4], [1][2] -> 1*4 + 2 = 6
+                                self.compute_flat_index_from_designators(
+                                    &index_designators, array_dim_strides,
+                                    elem_size.max(base_ty.size().max(1))
+                                )
+                            } else if is_structured {
                                 current_idx * outer_stride
                             } else {
                                 current_idx
