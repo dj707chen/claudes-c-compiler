@@ -168,7 +168,73 @@ pub fn eval_const_binop_float(op: &BinOp, lhs: &IrConst, rhs: &IrConst) -> Optio
     }
 }
 
-/// Evaluate a constant binary operation, dispatching to int or float as needed.
+/// Evaluate a constant 128-bit integer binary operation.
+///
+/// Called when at least one operand is I128. Uses native Rust i128/u128 arithmetic
+/// to avoid the truncation that occurs when using the i64 path.
+pub fn eval_const_binop_i128(op: &BinOp, lhs: &IrConst, rhs: &IrConst, is_unsigned: bool) -> Option<IrConst> {
+    let l = lhs.to_i128()?;
+    let r = rhs.to_i128()?;
+
+    let bool_result = |b: bool| -> Option<IrConst> {
+        Some(IrConst::I64(if b { 1 } else { 0 }))
+    };
+
+    match op {
+        BinOp::Add => Some(IrConst::I128(l.wrapping_add(r))),
+        BinOp::Sub => Some(IrConst::I128(l.wrapping_sub(r))),
+        BinOp::Mul => Some(IrConst::I128(l.wrapping_mul(r))),
+        BinOp::Div => {
+            if r == 0 { return None; }
+            if is_unsigned {
+                Some(IrConst::I128((l as u128).wrapping_div(r as u128) as i128))
+            } else {
+                Some(IrConst::I128(l.wrapping_div(r)))
+            }
+        }
+        BinOp::Mod => {
+            if r == 0 { return None; }
+            if is_unsigned {
+                Some(IrConst::I128((l as u128).wrapping_rem(r as u128) as i128))
+            } else {
+                Some(IrConst::I128(l.wrapping_rem(r)))
+            }
+        }
+        BinOp::BitAnd => Some(IrConst::I128(l & r)),
+        BinOp::BitOr => Some(IrConst::I128(l | r)),
+        BinOp::BitXor => Some(IrConst::I128(l ^ r)),
+        BinOp::Shl => Some(IrConst::I128(l.wrapping_shl(r as u32))),
+        BinOp::Shr => {
+            if is_unsigned {
+                Some(IrConst::I128((l as u128).wrapping_shr(r as u32) as i128))
+            } else {
+                Some(IrConst::I128(l.wrapping_shr(r as u32)))
+            }
+        }
+        BinOp::Eq => bool_result(l == r),
+        BinOp::Ne => bool_result(l != r),
+        BinOp::Lt => {
+            if is_unsigned { bool_result((l as u128) < (r as u128)) }
+            else { bool_result(l < r) }
+        }
+        BinOp::Gt => {
+            if is_unsigned { bool_result((l as u128) > (r as u128)) }
+            else { bool_result(l > r) }
+        }
+        BinOp::Le => {
+            if is_unsigned { bool_result((l as u128) <= (r as u128)) }
+            else { bool_result(l <= r) }
+        }
+        BinOp::Ge => {
+            if is_unsigned { bool_result((l as u128) >= (r as u128)) }
+            else { bool_result(l >= r) }
+        }
+        BinOp::LogicalAnd => bool_result(l != 0 && r != 0),
+        BinOp::LogicalOr => bool_result(l != 0 || r != 0),
+    }
+}
+
+/// Evaluate a constant binary operation, dispatching to int, i128, or float as needed.
 ///
 /// This is the top-level entry point for constant binary evaluation.
 /// The caller provides `is_32bit` and `is_unsigned` for the integer path.
@@ -178,6 +244,11 @@ pub fn eval_const_binop(op: &BinOp, lhs: &IrConst, rhs: &IrConst, is_32bit: bool
 
     if lhs_is_float || rhs_is_float {
         return eval_const_binop_float(op, lhs, rhs);
+    }
+
+    // Use native i128 arithmetic when either operand is I128 to avoid truncation.
+    if matches!(lhs, IrConst::I128(_)) || matches!(rhs, IrConst::I128(_)) {
+        return eval_const_binop_i128(op, lhs, rhs, is_unsigned);
     }
 
     let l = lhs.to_i64()?;
@@ -190,6 +261,7 @@ pub fn eval_const_binop(op: &BinOp, lhs: &IrConst, rhs: &IrConst, is_32bit: bool
 /// Uses wrapping negation to handle MIN values (e.g. -(-2^63) wraps to -2^63 in C).
 pub fn negate_const(val: IrConst) -> Option<IrConst> {
     match val {
+        IrConst::I128(v) => Some(IrConst::I128(v.wrapping_neg())),
         IrConst::I64(v) => Some(IrConst::I64(v.wrapping_neg())),
         IrConst::I32(v) => Some(IrConst::I32(v.wrapping_neg())),
         IrConst::I8(v) => Some(IrConst::I32((v as i32).wrapping_neg())),
@@ -205,6 +277,7 @@ pub fn negate_const(val: IrConst) -> Option<IrConst> {
 /// Sub-int types are promoted to i32 per C integer promotion rules.
 pub fn bitnot_const(val: IrConst) -> Option<IrConst> {
     match val {
+        IrConst::I128(v) => Some(IrConst::I128(!v)),
         IrConst::I64(v) => Some(IrConst::I64(!v)),
         IrConst::I32(v) => Some(IrConst::I32(!v)),
         IrConst::I8(v) => Some(IrConst::I32(!(v as i32))),

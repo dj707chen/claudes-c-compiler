@@ -495,7 +495,7 @@ impl<'a> SemaConstEval<'a> {
                     let int_val = if target_signed { bits as i64 as f64 } else { bits as u64 as f64 };
                     IrConst::LongDouble(int_val)
                 } else {
-                    IrConst::I64(bits as i64) // fallback for __int128 etc
+                    IrConst::I128(bits as i128) // __int128 / unsigned __int128
                 }
             }
             _ => {

@@ -610,6 +610,20 @@ impl IrConst {
         }
     }
 
+    /// Extract as i128 (integer constants only; floats return None).
+    /// Unlike to_i64(), this preserves the full 128-bit value.
+    pub fn to_i128(&self) -> Option<i128> {
+        match self {
+            IrConst::I8(v) => Some(*v as i128),
+            IrConst::I16(v) => Some(*v as i128),
+            IrConst::I32(v) => Some(*v as i128),
+            IrConst::I64(v) => Some(*v as i128),
+            IrConst::I128(v) => Some(*v),
+            IrConst::Zero => Some(0),
+            IrConst::F32(_) | IrConst::F64(_) | IrConst::LongDouble(_) => None,
+        }
+    }
+
     /// Extract as u64 (integer constants only; floats return None).
     pub fn to_u64(&self) -> Option<u64> {
         match self {
