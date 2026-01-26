@@ -90,6 +90,7 @@ impl Lowerer {
                 is_transparent_union: decl.is_transparent_union,
                 alignment: decl.alignment,
                 alignas_type: decl.alignas_type.clone(),
+                address_space: decl.address_space,
                 span: decl.span,
             };
             &resolved_decl
@@ -230,6 +231,7 @@ impl Lowerer {
                 );
             }
             let mut local_info = LocalInfo::from_analysis(&da, alloca);
+            local_info.var.address_space = decl.address_space;
             local_info.vla_size = vla_size;
             // For local VLAs with multiple dimensions, compute runtime strides
             // so that subscript operations use the correct element sizes.

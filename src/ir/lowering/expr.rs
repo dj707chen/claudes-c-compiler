@@ -175,7 +175,7 @@ impl Lowerer {
             }
         }
         let dest = self.fresh_value();
-        self.emit(Instruction::Load { dest, ptr: addr, ty: ginfo.ty , seg_override: AddressSpace::Default });
+        self.emit(Instruction::Load { dest, ptr: addr, ty: ginfo.ty, seg_override: ginfo.address_space });
         Operand::Value(dest)
     }
 
@@ -1364,11 +1364,12 @@ impl Lowerer {
             self.resolve_member_access_with_ctype(base_expr, field_name)
         };
 
-        // For p->field, extract address space from the pointer type
+        // Extract address space: for p->field from the pointer type,
+        // for s.field from the struct variable's address space qualifier.
         let addr_space = if is_pointer {
             self.get_addr_space_of_ptr_expr(base_expr)
         } else {
-            AddressSpace::Default
+            self.get_addr_space_of_struct_expr(base_expr)
         };
 
         let base_addr = if is_pointer {

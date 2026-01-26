@@ -532,6 +532,30 @@ impl Parser {
                                             }
                                         }
                                     }
+                                    TokenKind::Identifier(name) if name == "address_space" || name == "__address_space__" => {
+                                        self.advance();
+                                        // Parse address_space(__seg_gs) / address_space(__seg_fs)
+                                        if matches!(self.peek(), TokenKind::LParen) {
+                                            self.advance(); // consume (
+                                            match self.peek() {
+                                                TokenKind::SegGs => {
+                                                    self.advance();
+                                                    self.parsing_address_space = AddressSpace::SegGs;
+                                                }
+                                                TokenKind::SegFs => {
+                                                    self.advance();
+                                                    self.parsing_address_space = AddressSpace::SegFs;
+                                                }
+                                                _ => {
+                                                    // Unknown address space, skip
+                                                    self.advance();
+                                                }
+                                            }
+                                            if matches!(self.peek(), TokenKind::RParen) {
+                                                self.advance();
+                                            }
+                                        }
+                                    }
                                     TokenKind::Identifier(_) => {
                                         self.advance();
                                         if matches!(self.peek(), TokenKind::LParen) {

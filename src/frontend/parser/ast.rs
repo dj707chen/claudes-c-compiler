@@ -75,6 +75,10 @@ pub struct Declaration {
     /// The parser can't resolve typedef names, so when _Alignas takes a type argument,
     /// we store the type specifier here for proper resolution during lowering.
     pub alignas_type: Option<TypeSpecifier>,
+    /// Address space qualifier on the variable itself (not on a pointer).
+    /// E.g., `extern const struct pcpu_hot __seg_gs const_pcpu_hot;` has SegGs.
+    /// Used for x86 per-CPU variable access with %gs:/%fs: segment prefixes.
+    pub address_space: AddressSpace,
     pub span: Span,
 }
 
@@ -93,6 +97,7 @@ impl Declaration {
             is_transparent_union: false,
             alignment: None,
             alignas_type: None,
+            address_space: AddressSpace::Default,
             span: Span::dummy(),
         }
     }

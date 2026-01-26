@@ -686,6 +686,13 @@ impl Lowerer {
         };
         let dest = self.fresh_value();
         self.emit(Instruction::UnaryOp { dest, op: IrUnaryOp::Bswap, src: arg, ty });
+        // bswap16 returns uint16_t which is promoted to int in C.
+        // Zero-extend the 16-bit result to 32-bit to match the C return type
+        // and prevent sign-extension of values with the high bit set (e.g. 0xBBAA).
+        if ty == IrType::I16 {
+            let zext = self.emit_cast_val(Operand::Value(dest), IrType::U16, IrType::I32);
+            return Some(Operand::Value(zext));
+        }
         Some(Operand::Value(dest))
     }
 

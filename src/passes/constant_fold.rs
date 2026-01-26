@@ -453,7 +453,12 @@ fn fold_unaryop(op: IrUnaryOp, src: i64, ty: IrType) -> Option<i64> {
             }
         }
         IrUnaryOp::Bswap => {
-            if is_32bit {
+            // Bswap is width-sensitive: swapping 2 bytes vs 4 vs 8 produces
+            // different results, unlike CLZ/CTZ/Popcount where sub-32-bit
+            // values are implicitly zero-extended into 32 bits.
+            if ty == IrType::I16 || ty == IrType::U16 {
+                (src as u16).swap_bytes() as i64
+            } else if ty == IrType::I32 || ty == IrType::U32 {
                 (src as u32).swap_bytes() as i64
             } else {
                 (src as u64).swap_bytes() as i64

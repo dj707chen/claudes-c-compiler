@@ -38,10 +38,11 @@ impl Lowerer {
                     if ginfo.asm_register.is_some() {
                         return None;
                     }
+                    let addr_space = ginfo.address_space;
                     // Global variable: emit GlobalAddr to get its address
                     let addr = self.fresh_value();
                     self.emit(Instruction::GlobalAddr { dest: addr, name: name.clone() });
-                    Some(LValue::Address(addr, AddressSpace::Default))
+                    Some(LValue::Address(addr, addr_space))
                 } else {
                     None
                 }
@@ -67,6 +68,7 @@ impl Lowerer {
             }
             Expr::MemberAccess(base_expr, field_name, _) => {
                 // s.field as lvalue -> compute address of the field
+                let addr_space = self.get_addr_space_of_struct_expr(base_expr);
                 let (field_offset, _field_ty) = self.resolve_member_access(base_expr, field_name);
                 let base_addr = self.get_struct_base_addr(base_expr);
                 let field_addr = self.fresh_value();
@@ -76,7 +78,7 @@ impl Lowerer {
                     offset: Operand::Const(IrConst::I64(field_offset as i64)),
                     ty: IrType::Ptr,
                 });
-                Some(LValue::Address(field_addr, AddressSpace::Default))
+                Some(LValue::Address(field_addr, addr_space))
             }
             Expr::PointerMemberAccess(base_expr, field_name, _) => {
                 // p->field as lvalue -> load pointer, compute field address

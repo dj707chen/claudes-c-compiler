@@ -112,6 +112,7 @@ impl Parser {
                 is_transparent_union: false,
                 alignment: None,
                 alignas_type: None,
+                address_space: self.parsing_address_space,
                 span: start,
             }));
         }
@@ -526,6 +527,7 @@ impl Parser {
             is_transparent_union,
             alignment,
             alignas_type,
+            address_space: self.parsing_address_space,
             span: start,
         }))
     }
@@ -551,7 +553,7 @@ impl Parser {
         // Handle bare type with semicolon (struct/enum/union definition)
         if matches!(self.peek(), TokenKind::Semicolon) {
             self.advance();
-            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union: false, alignment: None, alignas_type: None, span: start });
+            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.parsing_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union: false, alignment: None, alignas_type: None, address_space: self.parsing_address_space, span: start });
         }
 
         let mut mode_kind: Option<ModeKind> = None;
@@ -628,7 +630,7 @@ impl Parser {
         let alignas_type = self.parsed_alignas_type.take();
         let is_transparent_union = self.parsing_transparent_union;
         self.parsing_transparent_union = false;
-        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union, alignment, alignas_type, span: start })
+        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.parsing_const, is_volatile: self.parsing_volatile, is_common: false, is_transparent_union, alignment, alignas_type, address_space: self.parsing_address_space, span: start })
     }
 
     /// Parse an initializer: either a braced initializer list or a single expression.

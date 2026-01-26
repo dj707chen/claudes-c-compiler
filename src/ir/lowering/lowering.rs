@@ -982,7 +982,7 @@ impl Lowerer {
 
         let name = orig_param.name.clone().unwrap_or_default();
         self.insert_local_scoped(name, LocalInfo {
-            var: VarInfo { ty, elem_size, is_array: false, pointee_type, struct_layout, is_struct: false, array_dim_strides, c_type, is_ptr_to_func_ptr },
+            var: VarInfo { ty, elem_size, is_array: false, pointee_type, struct_layout, is_struct: false, array_dim_strides, c_type, is_ptr_to_func_ptr, address_space: AddressSpace::Default },
             alloca, alloc_size: param_size, is_bool, static_global_name: None, vla_strides: vec![], vla_size: None, asm_register: None,
         });
 
@@ -1008,7 +1008,7 @@ impl Lowerer {
 
         let name = orig_param.name.clone().unwrap_or_default();
         self.insert_local_scoped(name, LocalInfo {
-            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: layout, is_struct: true, array_dim_strides: vec![], c_type, is_ptr_to_func_ptr: false },
+            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: layout, is_struct: true, array_dim_strides: vec![], c_type, is_ptr_to_func_ptr: false, address_space: AddressSpace::Default },
             alloca, alloc_size: size, is_bool: false, static_global_name: None, vla_strides: vec![], vla_size: None, asm_register: None,
         });
     }
@@ -1018,7 +1018,7 @@ impl Lowerer {
         let ct = self.type_spec_to_ctype(&orig_param.type_spec);
         let name = orig_param.name.clone().unwrap_or_default();
         self.insert_local_scoped(name, LocalInfo {
-            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: None, is_struct: true, array_dim_strides: vec![], c_type: Some(ct), is_ptr_to_func_ptr: false },
+            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: None, is_struct: true, array_dim_strides: vec![], c_type: Some(ct), is_ptr_to_func_ptr: false, address_space: AddressSpace::Default },
             alloca, alloc_size: 8, is_bool: false, static_global_name: None, vla_strides: vec![], vla_size: None, asm_register: None,
         });
     }
@@ -1045,7 +1045,7 @@ impl Lowerer {
 
         let name = orig_param.name.clone().unwrap_or_default();
         self.func_mut().locals.insert(name, LocalInfo {
-            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: None, is_struct: true, array_dim_strides: vec![], c_type: Some(ct), is_ptr_to_func_ptr: false },
+            var: VarInfo { ty: IrType::Ptr, elem_size: 0, is_array: false, pointee_type: None, struct_layout: None, is_struct: true, array_dim_strides: vec![], c_type: Some(ct), is_ptr_to_func_ptr: false, address_space: AddressSpace::Default },
             alloca: complex_alloca, alloc_size: complex_size, is_bool: false, static_global_name: None, vla_strides: vec![], vla_size: None, asm_register: None,
         });
     }
@@ -1330,6 +1330,7 @@ impl Lowerer {
                 let da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
                 let mut ginfo = GlobalInfo::from_analysis(&da);
                 ginfo.asm_register = Some(reg_name.clone());
+                ginfo.var.address_space = decl.address_space;
                 self.globals.insert(declarator.name.clone(), ginfo);
                 continue;
             }
@@ -1338,7 +1339,9 @@ impl Lowerer {
             if decl.is_extern && declarator.init.is_none() {
                 if !self.globals.contains_key(&declarator.name) {
                     let da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
-                    self.globals.insert(declarator.name.clone(), GlobalInfo::from_analysis(&da));
+                    let mut ginfo = GlobalInfo::from_analysis(&da);
+                    ginfo.var.address_space = decl.address_space;
+                    self.globals.insert(declarator.name.clone(), ginfo);
                 }
                 continue;
             }
@@ -1377,7 +1380,9 @@ impl Lowerer {
             // Register the global before evaluating its initializer so that
             // self-referential initializers (e.g., `struct Node n = {&n}`)
             // can resolve &n via eval_global_addr_expr.
-            self.globals.insert(declarator.name.clone(), GlobalInfo::from_analysis(&da));
+            let mut ginfo = GlobalInfo::from_analysis(&da);
+            ginfo.var.address_space = decl.address_space;
+            self.globals.insert(declarator.name.clone(), ginfo);
 
             let init = if let Some(ref initializer) = declarator.init {
                 // For pointer globals (char *p = ...) and pointer arrays (char *a[] = ...),

@@ -42,6 +42,10 @@ pub(super) struct VarInfo {
     /// Whether this is a pointer-to-function-pointer (e.g., int (**fpp)(int, int)).
     /// Distinguished from direct function pointers despite similar CType representation.
     pub is_ptr_to_func_ptr: bool,
+    /// Address space qualifier on the variable itself (not on a pointer type).
+    /// E.g., `extern struct pcpu_hot __seg_gs const_pcpu_hot` has SegGs.
+    /// Used to emit %gs:/%fs: segment prefixes on member access loads/stores.
+    pub address_space: AddressSpace,
 }
 
 /// Information about a local variable stored in an alloca.
@@ -294,6 +298,7 @@ impl VarInfo {
             array_dim_strides: da.array_dim_strides.clone(),
             c_type: da.c_type.clone(),
             is_ptr_to_func_ptr: da.is_ptr_to_func_ptr,
+            address_space: AddressSpace::Default,
         }
     }
 }

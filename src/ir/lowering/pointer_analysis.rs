@@ -476,4 +476,30 @@ impl Lowerer {
         }
         AddressSpace::Default
     }
+
+    /// Get the address space of a struct/union variable expression (for `.` member access).
+    /// Walks through the expression to find the underlying variable and returns its
+    /// address space qualifier (e.g., SegGs for `__seg_gs` per-CPU variables).
+    pub(super) fn get_addr_space_of_struct_expr(&self, expr: &Expr) -> AddressSpace {
+        match expr {
+            Expr::Identifier(name, _) => {
+                if let Some(info) = self.lookup_var_info(name) {
+                    return info.address_space;
+                }
+                AddressSpace::Default
+            }
+            // Nested member access: s.inner.field — propagate from outermost base
+            Expr::MemberAccess(base, _, _) => self.get_addr_space_of_struct_expr(base),
+            // Dereference of a __seg_gs pointer: (*p).field
+            Expr::Deref(inner, _) => self.get_addr_space_of_ptr_expr(inner),
+            // Cast expression: check if the cast target has an address space
+            Expr::Cast(type_spec, _, _) => {
+                if let TypeSpecifier::Pointer(_, addr_space) = type_spec {
+                    return *addr_space;
+                }
+                AddressSpace::Default
+            }
+            _ => AddressSpace::Default,
+        }
+    }
 }
