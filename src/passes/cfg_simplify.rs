@@ -494,10 +494,18 @@ fn remove_dead_blocks(func: &mut IrFunction) -> usize {
                         worklist.push(*label);
                     }
                 }
-                if let Instruction::InlineAsm { goto_labels, .. } = inst {
-                    for (_, label) in goto_labels {
-                        if reachable.insert(*label) {
-                            worklist.push(*label);
+                if let Instruction::InlineAsm { goto_labels, template, inputs, input_symbols, .. } = inst {
+                    // If this asm goto will be skipped at codegen time (because it has
+                    // unsatisfiable immediate constraints and uses .pushsection), don't
+                    // mark the goto label blocks as reachable. This prevents objtool
+                    // "unreachable instruction" errors for dead code that was only
+                    // reachable through the skipped asm's jump targets.
+                    let skip = !goto_labels.is_empty() && asm_goto_will_be_skipped(template, inputs, input_symbols);
+                    if !skip {
+                        for (_, label) in goto_labels {
+                            if reachable.insert(*label) {
+                                worklist.push(*label);
+                            }
                         }
                     }
                 }
@@ -585,6 +593,75 @@ fn get_terminator_targets(term: &Terminator) -> Vec<BlockId> {
         Terminator::IndirectBranch { possible_targets, .. } => possible_targets.clone(),
         Terminator::Return(_) | Terminator::Unreachable => vec![],
     }
+}
+
+/// Check whether an inline asm goto will be skipped at codegen time.
+///
+/// The backend skips asm templates that have unsatisfiable immediate ("i") constraints
+/// AND contain `.pushsection` directives. This is a heuristic to avoid emitting corrupt
+/// kernel metadata (e.g., __jump_table entries with null key pointers).
+///
+/// When such an asm goto is skipped, its goto label targets become unreachable dead code.
+/// This function allows the dead block elimination pass to avoid marking those goto label
+/// blocks as reachable, so they get properly removed and don't cause objtool
+/// "unreachable instruction" errors.
+fn asm_goto_will_be_skipped(
+    template: &str,
+    inputs: &[(String, Operand, Option<String>)],
+    input_symbols: &[Option<String>],
+) -> bool {
+    // Check if template uses .pushsection (the skip is only triggered for pushsection asm)
+    if !template.contains(".pushsection") {
+        return false;
+    }
+
+    // Check if any input has an unsatisfiable immediate-only constraint:
+    // - The constraint must be purely immediate (e.g., "i", "n") with no register/memory alternatives
+    // - The operand must be a runtime Value (not a compile-time constant)
+    // - There must be no symbol name for this operand
+    // Note: Only inputs are checked because output constraints have "=" prefix and are never
+    // classified as Immediate by the backend, so they can't trigger the skip condition.
+    for (i, (constraint, operand, _name)) in inputs.iter().enumerate() {
+        if is_immediate_only_constraint(constraint) {
+            let is_const = matches!(operand, Operand::Const(_));
+            let has_symbol = input_symbols.get(i).map_or(false, |s| s.is_some());
+            if !is_const && !has_symbol {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check whether a constraint string is purely immediate (no register or memory alternatives).
+/// This mirrors the logic in `backend::inline_asm::constraint_is_immediate_only`.
+/// TODO: Deduplicate with backend::inline_asm::constraint_is_immediate_only by moving
+/// to a shared module (e.g., common/) that both passes/ and backend/ can import.
+fn is_immediate_only_constraint(constraint: &str) -> bool {
+    let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+    if stripped.is_empty() {
+        return false;
+    }
+    if stripped.starts_with('[') && stripped.ends_with(']') {
+        return false;
+    }
+    // Must have at least one immediate letter
+    let has_imm = stripped.chars().any(|c| matches!(c,
+        'i' | 'I' | 'n' | 'N' | 'e' | 'E' | 'K' | 'M' | 'G' | 'H' | 'J' | 'L' | 'O'
+    ));
+    if !has_imm {
+        return false;
+    }
+    // Must NOT have any register or memory alternative
+    let has_reg_or_mem = stripped.chars().any(|c| matches!(c,
+        'r' | 'q' | 'R' | 'l' |           // GP register
+        'g' |                              // general (reg + mem + imm)
+        'x' | 'v' | 'Y' |                 // FP register
+        'a' | 'b' | 'c' | 'd' | 'S' | 'D' | // specific register
+        'm' | 'o' | 'V' | 'p' | 'Q'       // memory
+    ));
+    !has_reg_or_mem && !stripped.chars().any(|c| c.is_ascii_digit())
 }
 
 #[cfg(test)]
