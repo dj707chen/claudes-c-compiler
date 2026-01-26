@@ -848,6 +848,10 @@ impl<'a> SemaConstEval<'a> {
                 }
             }
             TypeSpecifier::TypeofType(inner) => self.sizeof_type_spec(inner),
+            TypeSpecifier::Typeof(expr) => {
+                let ctype = self.infer_expr_ctype(expr)?;
+                Some(ctype.size_ctx(&self.types.struct_layouts))
+            }
             _ => None,
         }
     }
@@ -959,6 +963,13 @@ impl<'a> SemaConstEval<'a> {
                 }
             }
             TypeSpecifier::TypeofType(inner) => self.alignof_type_spec(inner),
+            TypeSpecifier::Typeof(expr) => {
+                if let Some(ctype) = self.infer_expr_ctype(expr) {
+                    ctype.align_ctx(&self.types.struct_layouts)
+                } else {
+                    8 // fallback
+                }
+            }
             _ => 8,
         }
     }

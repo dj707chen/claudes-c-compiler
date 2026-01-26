@@ -591,6 +591,13 @@ impl Lowerer {
                 return ctype.size_ctx(&self.types);
             }
         }
+        // Handle typeof(expr) by resolving the expression's type
+        if let TypeSpecifier::Typeof(expr) = ts {
+            if let Some(ctype) = self.get_expr_ctype(expr) {
+                return ctype.size_ctx(&self.types.struct_layouts);
+            }
+            return 8; // fallback
+        }
         let ts = self.resolve_type_spec(ts);
         if let Some((size, _)) = Self::scalar_type_size_align(ts) {
             return size;
@@ -610,6 +617,13 @@ impl Lowerer {
         if let TypeSpecifier::TypedefName(name) = ts {
             if let Some(ctype) = self.types.typedefs.get(name) {
                 return self.ctype_align(ctype);
+            }
+            return 8; // fallback
+        }
+        // Handle typeof(expr) by resolving the expression's type
+        if let TypeSpecifier::Typeof(expr) = ts {
+            if let Some(ctype) = self.get_expr_ctype(expr) {
+                return self.ctype_align(&ctype);
             }
             return 8; // fallback
         }

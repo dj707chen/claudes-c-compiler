@@ -234,7 +234,39 @@ impl<'a> ExprTypeChecker<'a> {
             Expr::StmtExpr(compound, _) => {
                 if let Some(last) = compound.items.last() {
                     if let BlockItem::Statement(Stmt::Expr(Some(expr))) = last {
-                        return self.infer_expr_ctype(expr);
+                        if let Some(ctype) = self.infer_expr_ctype(expr) {
+                            return Some(ctype);
+                        }
+                        // If the last expr is an identifier not in the symbol table
+                        // (e.g., inside typeof where the stmt expr was never executed),
+                        // resolve it from declarations within this compound statement.
+                        if let Expr::Identifier(name, _) = expr {
+                            for item in &compound.items {
+                                if let BlockItem::Declaration(decl) = item {
+                                    for declarator in &decl.declarators {
+                                        if declarator.name == *name {
+                                            let mut ctype = self.resolve_type_spec(&decl.type_spec);
+                                            for derived in &declarator.derived {
+                                                match derived {
+                                                    DerivedDeclarator::Pointer => {
+                                                        ctype = CType::Pointer(Box::new(ctype), AddressSpace::Default);
+                                                    }
+                                                    DerivedDeclarator::Array(Some(size_expr)) => {
+                                                        let size = self.eval_const_expr(size_expr).unwrap_or(0) as usize;
+                                                        ctype = CType::Array(Box::new(ctype), Some(size));
+                                                    }
+                                                    DerivedDeclarator::Array(None) => {
+                                                        ctype = CType::Array(Box::new(ctype), None);
+                                                    }
+                                                    _ => {} // Function/FunctionPointer not expected here
+                                                }
+                                            }
+                                            return Some(ctype);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 None

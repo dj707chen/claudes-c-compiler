@@ -1302,6 +1302,31 @@ impl Lowerer {
             Expr::GenericSelection(controlling, associations, _) => {
                 self.resolve_generic_selection_ctype(controlling, associations)
             }
+            Expr::StmtExpr(compound, _) => {
+                // Statement expression: type is the type of the last expression statement
+                if let Some(last) = compound.items.last() {
+                    if let BlockItem::Statement(Stmt::Expr(Some(expr))) = last {
+                        if let Some(ctype) = self.get_expr_ctype(expr) {
+                            return Some(ctype);
+                        }
+                        // If the last expr is an identifier not in lowerer locals
+                        // (e.g., inside typeof where the stmt expr was never lowered),
+                        // resolve it from declarations within this compound statement.
+                        if let Expr::Identifier(name, _) = expr {
+                            for item in &compound.items {
+                                if let BlockItem::Declaration(decl) = item {
+                                    for declarator in &decl.declarators {
+                                        if declarator.name == *name {
+                                            return Some(self.build_full_ctype(&decl.type_spec, &declarator.derived));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
