@@ -498,7 +498,24 @@ impl Lowerer {
             Expr::GenericSelection(controlling, associations, _) => {
                 self.resolve_generic_selection_type(controlling, associations)
             }
-            Expr::FunctionCall(func, _, _) => {
+            Expr::FunctionCall(func, args, _) => {
+                // __builtin_choose_expr(const_expr, expr1, expr2): return type of
+                // the selected branch expression, not a fixed return type.
+                if let Expr::Identifier(name, _) = func.as_ref() {
+                    if name == "__builtin_choose_expr" && args.len() >= 3 {
+                        let cond = self.eval_const_expr(&args[0]);
+                        let is_nonzero = match cond {
+                            Some(IrConst::I64(v)) => v != 0,
+                            Some(IrConst::I32(v)) => v != 0,
+                            _ => true,
+                        };
+                        return if is_nonzero {
+                            self.get_expr_type(&args[1])
+                        } else {
+                            self.get_expr_type(&args[2])
+                        };
+                    }
+                }
                 self.get_call_return_type(func)
             }
             Expr::VaArg(_, type_spec, _) => self.resolve_va_arg_type(type_spec),
@@ -1165,8 +1182,23 @@ impl Lowerer {
             Expr::FloatLiteralLongDouble(_, _) => Some(CType::LongDouble),
             // Wide string literal L"..." has type wchar_t* (which is int* on all targets)
             Expr::WideStringLiteral(_, _) => Some(CType::Pointer(Box::new(CType::Int), AddressSpace::Default)),
-            Expr::FunctionCall(func, _, _) => {
+            Expr::FunctionCall(func, args, _) => {
                 if let Expr::Identifier(name, _) = func.as_ref() {
+                    // __builtin_choose_expr(const_expr, expr1, expr2): return CType
+                    // of the selected branch expression.
+                    if name == "__builtin_choose_expr" && args.len() >= 3 {
+                        let cond = self.eval_const_expr(&args[0]);
+                        let is_nonzero = match cond {
+                            Some(IrConst::I64(v)) => v != 0,
+                            Some(IrConst::I32(v)) => v != 0,
+                            _ => true,
+                        };
+                        return if is_nonzero {
+                            self.get_expr_ctype(&args[1])
+                        } else {
+                            self.get_expr_ctype(&args[2])
+                        };
+                    }
                     // First check lowerer's own func_meta (has ABI-adjusted return_ctype)
                     if let Some(ctype) = self.func_meta.sigs.get(name.as_str()).and_then(|s| s.return_ctype.as_ref()) {
                         return Some(ctype.clone());

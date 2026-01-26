@@ -209,7 +209,19 @@ impl<'a> ExprTypeChecker<'a> {
             Expr::Comma(_, rhs, _) => self.infer_expr_ctype(rhs),
 
             // Function call: determine return type
-            Expr::FunctionCall(func, _, _) => {
+            Expr::FunctionCall(func, args, _) => {
+                // __builtin_choose_expr(const_expr, expr1, expr2) has the type
+                // of the selected branch, not a fixed return type.
+                if let Expr::Identifier(name, _) = func.as_ref() {
+                    if name == "__builtin_choose_expr" && args.len() >= 3 {
+                        let cond = self.eval_const_expr(&args[0]).unwrap_or(1);
+                        return if cond != 0 {
+                            self.infer_expr_ctype(&args[1])
+                        } else {
+                            self.infer_expr_ctype(&args[2])
+                        };
+                    }
+                }
                 self.infer_call_return_ctype(func)
             }
 
