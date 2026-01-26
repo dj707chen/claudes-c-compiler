@@ -1850,8 +1850,13 @@ impl ArchCodegen for RiscvCodegen {
                         // t5 now points to the target address
                         self.emit_f128_store_to_addr_in_t5(val);
                     }
-                    SlotAddr::Indirect(_) => {
-                        unreachable!("emit_store_with_const_offset called for non-alloca base");
+                    SlotAddr::Indirect(slot) => {
+                        self.emit_load_ptr_from_slot(slot, base.0);
+                        if offset != 0 {
+                            self.emit_add_offset_to_addr_reg(offset);
+                        }
+                        // t5 now points to the target address
+                        self.emit_f128_store_to_addr_in_t5(val);
                     }
                 }
             }
@@ -1873,8 +1878,13 @@ impl ArchCodegen for RiscvCodegen {
                     let folded_slot = StackSlot(slot.0 + offset);
                     self.emit_typed_store_to_slot(store_instr, ty, folded_slot);
                 }
-                SlotAddr::Indirect(_) => {
-                    unreachable!("emit_store_with_const_offset called for non-alloca base");
+                SlotAddr::Indirect(slot) => {
+                    self.emit_save_acc();
+                    self.emit_load_ptr_from_slot(slot, base.0);
+                    if offset != 0 {
+                        self.emit_add_offset_to_addr_reg(offset);
+                    }
+                    self.emit_typed_store_indirect(store_instr, ty);
                 }
             }
         }
@@ -1898,8 +1908,12 @@ impl ArchCodegen for RiscvCodegen {
                         self.emit_add_offset_to_addr_reg(offset);
                         self.emit_f128_load_from_addr_in_t5();
                     }
-                    SlotAddr::Indirect(_) => {
-                        unreachable!("emit_load_with_const_offset called for non-alloca base");
+                    SlotAddr::Indirect(slot) => {
+                        self.emit_load_ptr_from_slot(slot, base.0);
+                        if offset != 0 {
+                            self.emit_add_offset_to_addr_reg(offset);
+                        }
+                        self.emit_f128_load_from_addr_in_t5();
                     }
                 }
                 // t0 now has f64 bits from __trunctfdf2
@@ -1921,8 +1935,12 @@ impl ArchCodegen for RiscvCodegen {
                     let folded_slot = StackSlot(slot.0 + offset);
                     self.emit_typed_load_from_slot(load_instr, folded_slot);
                 }
-                SlotAddr::Indirect(_) => {
-                    unreachable!("emit_load_with_const_offset called for non-alloca base");
+                SlotAddr::Indirect(slot) => {
+                    self.emit_load_ptr_from_slot(slot, base.0);
+                    if offset != 0 {
+                        self.emit_add_offset_to_addr_reg(offset);
+                    }
+                    self.emit_typed_load_indirect(load_instr);
                 }
             }
             self.emit_store_result(dest);

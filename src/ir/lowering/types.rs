@@ -189,6 +189,7 @@ impl Lowerer {
                             span: crate::common::source::Span::dummy(),
                             fptr_params: None,
                             is_const: false,
+                            vla_size_exprs: Vec::new(),
                         }
                     }).collect();
                     TypeSpecifier::FunctionPointer(Box::new(ret_ts), param_decls, ft.variadic)
@@ -234,6 +235,7 @@ impl Lowerer {
                         span: crate::common::source::Span::dummy(),
                         fptr_params: None,
                         is_const: false,
+                        vla_size_exprs: Vec::new(),
                     }
                 }).collect();
                 TypeSpecifier::FunctionPointer(Box::new(ret_ts), param_decls, ft.variadic)

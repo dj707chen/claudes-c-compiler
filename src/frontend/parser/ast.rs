@@ -60,6 +60,10 @@ pub struct ParamDecl {
     /// Whether this parameter's base type has a `const` qualifier.
     /// Used by _Generic matching to distinguish e.g. `const int *` from `int *`.
     pub is_const: bool,
+    /// VLA size expressions from the outermost array dimension that was decayed to pointer.
+    /// E.g., for `void foo(int a, int b[a++])`, the expression `a++` is stored here
+    /// so its side effects can be evaluated at function entry during IR lowering.
+    pub vla_size_exprs: Vec<Box<Expr>>,
 }
 
 /// A variable/type declaration.

@@ -2214,8 +2214,12 @@ impl ArchCodegen for X86Codegen {
                         }
                         self.state.emit("    fldt (%rcx)");
                     }
-                    SlotAddr::Indirect(_) => {
-                        unreachable!("emit_load_with_const_offset called for non-alloca base");
+                    SlotAddr::Indirect(slot) => {
+                        self.emit_load_ptr_from_slot(slot, base.0);
+                        if offset != 0 {
+                            self.state.emit_fmt(format_args!("    addq ${}, %rcx", offset));
+                        }
+                        self.state.emit("    fldt (%rcx)");
                     }
                 }
                 // ST0 has full 80-bit precision. Store to dest's 16-byte slot if available.
@@ -2250,8 +2254,12 @@ impl ArchCodegen for X86Codegen {
                     let folded_slot = StackSlot(slot.0 + offset);
                     self.emit_typed_load_from_slot(load_instr, folded_slot);
                 }
-                SlotAddr::Indirect(_) => {
-                    unreachable!("emit_load_with_const_offset called for non-alloca base");
+                SlotAddr::Indirect(slot) => {
+                    self.emit_load_ptr_from_slot(slot, base.0);
+                    if offset != 0 {
+                        self.emit_add_offset_to_addr_reg(offset);
+                    }
+                    self.emit_typed_load_indirect(load_instr);
                 }
             }
             self.emit_store_result(dest);
@@ -2365,8 +2373,19 @@ impl ArchCodegen for X86Codegen {
                             }
                             self.state.emit("    movq %rax, 8(%rcx)");
                         }
-                        SlotAddr::Indirect(_) => {
-                            unreachable!("emit_store_with_const_offset called for non-alloca base");
+                        SlotAddr::Indirect(slot) => {
+                            self.emit_load_ptr_from_slot(slot, base.0);
+                            if offset != 0 {
+                                self.state.emit_fmt(format_args!("    addq ${}, %rcx", offset));
+                            }
+                            self.state.out.emit_instr_imm_reg("    movabsq", lo as i64, "rax");
+                            self.state.emit("    movq %rax, (%rcx)");
+                            if hi != 0 {
+                                self.state.out.emit_instr_imm_reg("    movq", hi as i64, "rax");
+                            } else {
+                                self.state.emit("    xorq %rax, %rax");
+                            }
+                            self.state.emit("    movq %rax, 8(%rcx)");
                         }
                     }
                 }
@@ -2392,8 +2411,12 @@ impl ArchCodegen for X86Codegen {
                                     }
                                     self.state.emit("    fstpt (%rcx)");
                                 }
-                                SlotAddr::Indirect(_) => {
-                                    unreachable!("emit_store_with_const_offset called for non-alloca base");
+                                SlotAddr::Indirect(slot) => {
+                                    self.emit_load_ptr_from_slot(slot, base.0);
+                                    if offset != 0 {
+                                        self.state.emit_fmt(format_args!("    addq ${}, %rcx", offset));
+                                    }
+                                    self.state.emit("    fstpt (%rcx)");
                                 }
                             }
                             return;
@@ -2424,8 +2447,16 @@ impl ArchCodegen for X86Codegen {
                         self.state.emit("    addq $8, %rsp");
                         self.state.emit("    fstpt (%rcx)");
                     }
-                    SlotAddr::Indirect(_) => {
-                        unreachable!("emit_store_with_const_offset called for non-alloca base");
+                    SlotAddr::Indirect(slot) => {
+                        self.state.emit("    movq %rax, %rdx");
+                        self.emit_load_ptr_from_slot(slot, base.0);
+                        if offset != 0 {
+                            self.state.emit_fmt(format_args!("    addq ${}, %rcx", offset));
+                        }
+                        self.state.emit("    pushq %rdx");
+                        self.state.emit("    fldl (%rsp)");
+                        self.state.emit("    addq $8, %rsp");
+                        self.state.emit("    fstpt (%rcx)");
                     }
                 }
             }
@@ -2447,8 +2478,13 @@ impl ArchCodegen for X86Codegen {
                     let folded_slot = StackSlot(slot.0 + offset);
                     self.emit_typed_store_to_slot(store_instr, ty, folded_slot);
                 }
-                SlotAddr::Indirect(_) => {
-                    unreachable!("emit_store_with_const_offset called for non-alloca base");
+                SlotAddr::Indirect(slot) => {
+                    self.emit_save_acc();
+                    self.emit_load_ptr_from_slot(slot, base.0);
+                    if offset != 0 {
+                        self.emit_add_offset_to_addr_reg(offset);
+                    }
+                    self.emit_typed_store_indirect(store_instr, ty);
                 }
             }
         }

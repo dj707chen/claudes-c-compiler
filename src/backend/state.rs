@@ -135,6 +135,10 @@ pub struct CodegenState {
     pub code_model_kernel: bool,
     /// Whether to disable jump table emission for switch statements (-fno-jump-tables).
     pub no_jump_tables: bool,
+    /// Values that were assigned to callee-saved registers and have no stack slot.
+    /// Used by resolve_slot_addr to return a dummy Indirect slot for these values,
+    /// which is safe because all Indirect codepaths check reg_assignments first.
+    pub reg_assigned_values: FxHashSet<u32>,
 }
 
 impl CodegenState {
@@ -161,6 +165,7 @@ impl CodegenState {
             current_text_section: ".text".to_string(),
             code_model_kernel: false,
             no_jump_tables: false,
+            reg_assigned_values: FxHashSet::default(),
         }
     }
 
@@ -197,6 +202,7 @@ impl CodegenState {
         self.reg_cache.invalidate_all();
         self.f128_direct_slots.clear();
         self.f128_load_sources.clear();
+        self.reg_assigned_values.clear();
     }
 
     /// Get the over-alignment requirement for an alloca (> 16 bytes), or None.
@@ -250,17 +256,26 @@ pub enum SlotAddr {
 
 impl CodegenState {
     /// Classify how to access a value's effective address.
-    /// Returns `None` if the value has no assigned stack slot.
+    /// Returns `None` if the value has no assigned stack slot (and isn't register-assigned).
     pub fn resolve_slot_addr(&self, val_id: u32) -> Option<SlotAddr> {
-        let slot = self.get_slot(val_id)?;
-        if self.is_alloca(val_id) {
-            if self.alloca_over_align(val_id).is_some() {
-                Some(SlotAddr::OverAligned(slot, val_id))
+        if let Some(slot) = self.get_slot(val_id) {
+            if self.is_alloca(val_id) {
+                if self.alloca_over_align(val_id).is_some() {
+                    Some(SlotAddr::OverAligned(slot, val_id))
+                } else {
+                    Some(SlotAddr::Direct(slot))
+                }
             } else {
-                Some(SlotAddr::Direct(slot))
+                Some(SlotAddr::Indirect(slot))
             }
+        } else if self.reg_assigned_values.contains(&val_id) {
+            // Value lives in a callee-saved register with no stack slot.
+            // Return a dummy Indirect slot — all Indirect codepaths in both
+            // x86 and RISC-V backends check reg_assignments before accessing
+            // the slot, so the dummy offset is never actually used.
+            Some(SlotAddr::Indirect(StackSlot(0)))
         } else {
-            Some(SlotAddr::Indirect(slot))
+            None
         }
     }
 }

@@ -344,8 +344,14 @@ impl Parser {
                     type_spec = TypeSpecifier::Pointer(Box::new(type_spec), AddressSpace::Default);
                 }
 
-                // Array params: outermost dimension decays to pointer
+                // Array params: outermost dimension decays to pointer.
+                // Preserve the outermost dimension expression (if any) so side effects
+                // like `a++` in `int b[a++]` can be evaluated during IR lowering.
+                let mut vla_size_exprs = Vec::new();
                 if !array_dims.is_empty() {
+                    if let Some(Some(expr)) = array_dims.first() {
+                        vla_size_exprs.push(expr.clone());
+                    }
                     for dim in array_dims.iter().skip(1).rev() {
                         type_spec = TypeSpecifier::Array(Box::new(type_spec), dim.clone());
                     }
@@ -358,7 +364,7 @@ impl Parser {
                 }
 
                 self.parsing_const = saved_const;
-                params.push(ParamDecl { type_spec, name, span, fptr_params: fptr_param_decls, is_const: param_is_const });
+                params.push(ParamDecl { type_spec, name, span, fptr_params: fptr_param_decls, is_const: param_is_const, vla_size_exprs });
             } else {
                 break;
             }
@@ -386,6 +392,7 @@ impl Parser {
                     span,
                     fptr_params: None,
                     is_const: false,
+                    vla_size_exprs: Vec::new(),
                 });
             } else {
                 break;

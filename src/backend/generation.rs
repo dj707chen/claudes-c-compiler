@@ -526,10 +526,12 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
                 continue;
             }
             // Skip GEP instructions whose offset has been folded into Load/Store.
-            // Note: Only skip when the GEP's base is an alloca (Direct or OverAligned),
-            // because alloca slots are always valid %rbp-relative. For Indirect bases
-            // (pointer in stack slot), the GEP must still execute because the register
-            // allocator may reuse the base's register between the GEP and the Load/Store.
+            // Only skip when the GEP's base is an alloca (Direct or OverAligned),
+            // because alloca slots are stable and never reused by liveness packing.
+            // For non-alloca (Indirect) bases, the base pointer's slot might be
+            // reused by another value between the GEP definition and the Load/Store
+            // use point (due to Tier 2/3 slot coalescing), so we must eagerly
+            // compute the GEP result rather than deferring to the Load/Store point.
             if let Instruction::GetElementPtr { dest, base, .. } = inst {
                 if gep_fold_map.contains_key(&dest.0) && cg.state_ref().is_alloca(base.0) {
                     continue;
@@ -608,9 +610,9 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
                 return;
             }
             // Check if the ptr comes from a foldable GEP with constant offset.
-            // Only fold when the GEP's base is an alloca (Direct/OverAligned), where
-            // the slot address is always valid. For Indirect bases, the GEP was NOT
-            // skipped and already computed the address, so use normal load.
+            // Only fold when the GEP's base is an alloca, because alloca slots
+            // are stable and never reused by liveness packing. Non-alloca base
+            // slots may be overwritten between GEP definition and Load use.
             if let Some(gep_info) = gep_fold_map.get(&ptr.0) {
                 if !is_i128_type(*ty) && cg.state_ref().is_alloca(gep_info.base.0) {
                     cg.emit_load_with_const_offset(dest, &gep_info.base, gep_info.offset, *ty);
@@ -688,8 +690,7 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
                             cg.emit_seg_store(val, ptr, *ty, *seg_override);
                         }
                     } else if let Some(gep_info) = gep_fold_map.get(&ptr.0) {
-                        // Check if the ptr comes from a foldable GEP with constant offset.
-                        // Only fold for alloca bases (see Load comment above).
+                        // Fold GEP into store (alloca bases only; see Load comment).
                         if !is_i128_type(*ty) && cg.state_ref().is_alloca(gep_info.base.0) {
                             cg.emit_store_with_const_offset(val, &gep_info.base, gep_info.offset, *ty);
                         } else {
@@ -857,25 +858,24 @@ pub fn calculate_stack_space_common(
     let num_blocks = func.blocks.len();
 
     // Enable block-local coalescing (Tier 3) for all multi-block functions.
-    // Enable liveness-based packing (Tier 2) only for large functions.
+    // Enable liveness-based packing (Tier 2) for all multi-block functions.
     //
     // Tier 3 is safe for all functions: single-block values share stack space
     // across different blocks since only one block's values are live at a time.
     // Tier 2 uses liveness intervals to pack multi-block values into shared slots;
-    // this is only enabled for large functions (>= 8 blocks && >= 64 instructions)
-    // where the overhead is justified and the analysis is well-tested.
+    // values with non-overlapping live intervals share the same stack slot.
     //
-    // Even small functions benefit from Tier 3: a 3-block function with 20
-    // intermediates can save 100+ bytes of frame space by sharing slots, which
-    // matters for recursive functions where per-frame savings compound (e.g.,
-    // PostgreSQL plpgsql recursion triggers stack depth limit with large frames).
+    // Both tiers are enabled for any function with >= 2 blocks. Even small
+    // functions benefit: a 3-block function with 20 intermediates can save
+    // 100+ bytes of frame space by sharing slots. This is critical for
+    // recursive functions where per-frame savings compound (e.g., PostgreSQL
+    // plpgsql recursion triggers stack depth limit with large frames).
     //
-    // Note: coalescing is safe for functions with inlined calls -- the liveness
-    // analysis correctly tracks intervals regardless of inlining. Without this,
-    // functions that inline many helpers (e.g., kernel CPU init code) can have
-    // enormous stack frames (4KB+) that overflow the kernel's limited stack.
+    // The liveness analysis uses backward dataflow iteration which correctly
+    // handles loops (values live across back-edges have intervals extended).
+    // This is safe for all multi-block functions regardless of size.
     let coalesce = num_blocks >= 2;
-    let enable_tier2 = num_blocks >= 8 && total_instructions >= 64;
+    let enable_tier2 = num_blocks >= 2;
 
     // Build use-block map: for each value, which blocks reference it.
     let use_blocks_map = if coalesce {
@@ -966,6 +966,24 @@ pub fn calculate_stack_space_common(
         slot_size: i64,
     }
 
+    // Collect ALL Value IDs referenced as operands anywhere in the function body.
+    // Used for both dead param alloca detection and dead value elimination.
+    let used_values: FxHashSet<u32> = {
+        let mut used: FxHashSet<u32> = FxHashSet::default();
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                for_each_operand_in_instruction(inst, |op| {
+                    if let Operand::Value(v) = op { used.insert(v.0); }
+                });
+                for_each_value_use_in_instruction(inst, |v| { used.insert(v.0); });
+            }
+            for_each_operand_in_terminator(&block.terminator, |op| {
+                if let Operand::Value(v) = op { used.insert(v.0); }
+            });
+        }
+        used
+    };
+
     // Dead param alloca detection: find param allocas whose Value IDs are never
     // used in any instruction or terminator. These represent function parameters
     // that are completely unused in the function body, so we can skip allocating
@@ -974,28 +992,18 @@ pub fn calculate_stack_space_common(
         let mut dead = FxHashSet::default();
         if !func.param_alloca_values.is_empty() {
             let param_set: FxHashSet<u32> = func.param_alloca_values.iter().map(|v| v.0).collect();
-            // Collect ALL Value IDs referenced anywhere in the function body.
-            let mut used: FxHashSet<u32> = FxHashSet::default();
-            for block in &func.blocks {
-                for inst in &block.instructions {
-                    for_each_operand_in_instruction(inst, |op| {
-                        if let Operand::Value(v) = op { used.insert(v.0); }
-                    });
-                    for_each_value_use_in_instruction(inst, |v| { used.insert(v.0); });
-                }
-                for_each_operand_in_terminator(&block.terminator, |op| {
-                    if let Operand::Value(v) = op { used.insert(v.0); }
-                });
-            }
-            // Any param alloca whose Value ID never appears as a use is dead.
             for &pv in &param_set {
-                if !used.contains(&pv) {
+                if !used_values.contains(&pv) {
                     dead.insert(pv);
                 }
             }
         }
         dead
     };
+
+    // Tell CodegenState which values are register-assigned so that
+    // resolve_slot_addr can return a dummy Indirect slot for them.
+    state.reg_assigned_values = reg_assigned.clone();
 
     let mut non_local_space = initial_offset;
     let mut deferred_slots: Vec<DeferredSlot> = Vec::new();
@@ -1047,6 +1055,20 @@ pub fn calculate_stack_space_common(
                 // These values will live in callee-saved registers and never
                 // need a stack slot, saving significant frame space.
                 if reg_assigned.contains(&dest.0) {
+                    continue;
+                }
+
+                // Skip stack slot allocation for dead values (defined but never
+                // used as an operand). These are leftovers from DCE not catching
+                // all dead code, or side-effect-free instructions whose results
+                // are unused. Skipping their slots saves 8 bytes each, which
+                // compounds significantly in recursive functions.
+                //
+                // This is safe because store_rax_to / store_t0_to already check
+                // get_slot() and gracefully skip the store when no slot exists.
+                // The instruction still executes (preserving side effects for
+                // calls), but the result simply isn't persisted to the stack.
+                if !used_values.contains(&dest.0) {
                     continue;
                 }
 

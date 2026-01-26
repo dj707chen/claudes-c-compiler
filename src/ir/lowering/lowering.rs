@@ -852,13 +852,18 @@ impl Lowerer {
         self.func_mut().sret_ptr = None;
         self.allocate_function_params(func, &param_info);
 
-        // Step 4: K&R float promotion
+        // Step 4: Evaluate VLA parameter size expressions for side effects.
+        // E.g., `void foo(int a, int b[a++])` - the `a++` must be evaluated
+        // so that `a` is incremented before the function body runs.
+        self.evaluate_vla_param_side_effects(func);
+
+        // Step 5: K&R float promotion
         self.handle_kr_float_promotion(func);
 
-        // Step 5: Lower body
+        // Step 6: Lower body
         self.lower_compound_stmt(&func.body);
 
-        // Step 6: Finalize
+        // Step 7: Finalize
         self.finalize_function(func, return_type, param_info.params);
     }
 
@@ -1223,6 +1228,22 @@ impl Lowerer {
         self.module.functions.push(ir_func);
         self.pop_scope();
         self.func_state = None;
+    }
+
+    /// Evaluate VLA parameter size expressions for their side effects.
+    ///
+    /// In C, array parameter declarations like `void foo(int a, int b[a++])` have
+    /// the outermost dimension decayed to a pointer, but the size expression (here
+    /// `a++`) must still be evaluated for its side effects. The expression was
+    /// preserved in `ParamDecl::vla_size_exprs` during parsing; we evaluate it here
+    /// (discarding the result) so that side effects take effect before the body runs.
+    fn evaluate_vla_param_side_effects(&mut self, func: &FunctionDef) {
+        for param in &func.params {
+            for expr in &param.vla_size_exprs {
+                // Evaluate the expression for its side effects; discard the result.
+                let _ = self.lower_expr(expr);
+            }
+        }
     }
 
     /// For pointer-to-array function parameters with VLA (runtime) dimensions,

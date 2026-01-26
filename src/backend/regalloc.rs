@@ -148,23 +148,19 @@ pub fn allocate_registers(
         });
     }
 
-    // Exclude values used as pointers in GEP, Load, Store, CallIndirect, Memcpy,
-    // VaArg/VaStart/VaEnd/VaCopy, atomics, or StackRestore. These values are
-    // accessed through resolve_slot_addr() in codegen, which requires a valid
-    // stack slot. If such a value were register-assigned and its stack slot
-    // skipped, the codegen would read from an uninitialized stack offset.
+    // Exclude values used as pointers in CallIndirect, Memcpy,
+    // VaArg/VaStart/VaEnd/VaCopy, atomics, or StackRestore. These operations
+    // use resolve_slot_addr() in backend-specific codepaths that don't check
+    // reg_assignments before accessing the slot.
+    //
+    // Load/Store/GEP pointer values are NOT excluded: their Indirect codepaths
+    // (emit_load_ptr_from_slot, emit_slot_addr_to_secondary, emit_gep_indirect_const)
+    // all check reg_assignments first and use the register directly when available.
+    // resolve_slot_addr returns a dummy Indirect(StackSlot(0)) for register-assigned
+    // values, which is never actually dereferenced.
     for block in &func.blocks {
         for inst in &block.instructions {
             match inst {
-                Instruction::Load { ptr, .. } => {
-                    eligible.remove(&ptr.0);
-                }
-                Instruction::Store { ptr, .. } => {
-                    eligible.remove(&ptr.0);
-                }
-                Instruction::GetElementPtr { base, .. } => {
-                    eligible.remove(&base.0);
-                }
                 Instruction::CallIndirect { func_ptr, .. } => {
                     if let Operand::Value(v) = func_ptr {
                         eligible.remove(&v.0);

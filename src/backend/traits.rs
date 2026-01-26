@@ -108,16 +108,16 @@ pub trait ArchCodegen {
         panic!("segment override stores only supported on x86");
     }
 
-    /// Emit a load with a folded GEP constant offset: load from (alloca_base + const_offset).
+    /// Emit a load with a folded GEP constant offset: load from (base + const_offset).
     ///
     /// This is an optimization for the common pattern:
-    ///   %ptr = GEP %alloca_base, const_offset
+    ///   %ptr = GEP %base, const_offset
     ///   %val = Load %ptr
     /// The GEP instruction is skipped and the offset is folded into the load.
     ///
-    /// Precondition: Only called for alloca bases (Direct/OverAligned), where the slot address
-    /// is always valid %rbp-relative. Never called for Indirect bases because the GEP
-    /// would be skipped but the base register might be stale.
+    /// Works for alloca bases (Direct: folded into rbp-relative slot,
+    /// OverAligned: compute aligned addr + offset) and non-alloca bases
+    /// (Indirect: load base pointer, add offset, load through it).
     fn emit_load_with_const_offset(&mut self, dest: &Value, base: &Value, offset: i64, ty: IrType) {
         let addr = self.state_ref().resolve_slot_addr(base.0);
         if let Some(addr) = addr {
@@ -132,17 +132,24 @@ pub trait ArchCodegen {
                     let folded_slot = StackSlot(slot.0 + offset);
                     self.emit_typed_load_from_slot(load_instr, folded_slot);
                 }
-                SlotAddr::Indirect(_) => {
-                    unreachable!("emit_load_with_const_offset called for non-alloca base");
+                SlotAddr::Indirect(slot) => {
+                    // Non-alloca base: load the base pointer from its stack slot
+                    // to the addr register, add the constant offset, then load.
+                    self.emit_load_ptr_from_slot(slot, base.0);
+                    if offset != 0 {
+                        self.emit_add_offset_to_addr_reg(offset);
+                    }
+                    self.emit_typed_load_indirect(load_instr);
                 }
             }
             self.emit_store_result(dest);
         }
     }
 
-    /// Emit a store with a folded GEP constant offset: store val to (alloca_base + const_offset).
+    /// Emit a store with a folded GEP constant offset: store val to (base + const_offset).
     ///
-    /// Precondition: Only called for alloca bases. See emit_load_with_const_offset.
+    /// Works for both alloca bases (Direct: folded into rbp-relative slot) and
+    /// non-alloca bases (Indirect: load base pointer, add offset, store through it).
     fn emit_store_with_const_offset(&mut self, val: &Operand, base: &Value, offset: i64, ty: IrType) {
         self.emit_load_operand(val);
         let addr = self.state_ref().resolve_slot_addr(base.0);
@@ -159,8 +166,15 @@ pub trait ArchCodegen {
                     let folded_slot = StackSlot(slot.0 + offset);
                     self.emit_typed_store_to_slot(store_instr, ty, folded_slot);
                 }
-                SlotAddr::Indirect(_) => {
-                    unreachable!("emit_store_with_const_offset called for non-alloca base");
+                SlotAddr::Indirect(slot) => {
+                    // Non-alloca base: save the value, load the base pointer,
+                    // add the constant offset, then store through it.
+                    self.emit_save_acc();
+                    self.emit_load_ptr_from_slot(slot, base.0);
+                    if offset != 0 {
+                        self.emit_add_offset_to_addr_reg(offset);
+                    }
+                    self.emit_typed_store_indirect(store_instr, ty);
                 }
             }
         }
