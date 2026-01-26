@@ -1,0 +1,6 @@
+Task: fix_asm_immediate_string_literal
+Status: in_progress
+Description: Fix extract_symbol_name to handle Expr::StringLiteral for inline asm 'i' constraint operands. 
+Currently, string literal immediates (e.g., "i" (__FILE__)) cause has_unsatisfiable_imm to be true,
+which skips the entire asm body including .pushsection data. This causes NULL pointer crashes in the
+kernel PM trace subsystem (drivers/base/power/main.c).
