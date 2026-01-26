@@ -1,0 +1,18 @@
+Fix U32 constant sign-extension in 64-bit comparisons
+
+When comparing an int (-123) with an unsigned int literal (-123U), the
+compiler sign-extends the U32 constant to 64 bits instead of zero-extending it.
+
+Example: `int a = -123; return (a != -123U);`
+- -123U should be 0x00000000FFFFFF85 (4294967173 as U32, zero-extended to 64-bit)
+- But the compiler emits `movq $-123, %rax` which gives 0xFFFFFFFFFFFFFF85
+- Meanwhile, `a` is zero-extended via `movl %eax, %eax` to 0x00000000FFFFFF85
+- cmpq then compares different 64-bit values, giving wrong result
+
+Fix: When emitting a U32 constant for comparison, ensure the 64-bit immediate
+is zero-extended (masked to 0xFFFFFFFF), not sign-extended.
+
+This affects multiple test cases across all architectures including:
+- gcc_torture_bitfld_4
+- gcc_torture_20120111_1 (may be related)
+- and other comparison tests with unsigned literals
