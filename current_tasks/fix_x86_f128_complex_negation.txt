@@ -1,0 +1,11 @@
+Fix x86 long double (F128) unary negation for complex numbers.
+
+The bug: emit_float_neg used xorpd to flip the sign bit of the f64 approximation
+in rax, but F128 values are stored as full 80-bit x87 extended precision in their
+stack slots. The f64-based sign flip produced wrong results when the full 80-bit
+value was subsequently read from the slot.
+
+Fix: Override emit_unaryop in the x86 backend to handle F128 Neg via x87 fchs,
+following the same pattern as emit_float_binop for F128 arithmetic.
+
+This fixes 78 failing x86 tests (complex long double negation, imaginary literal ops).
