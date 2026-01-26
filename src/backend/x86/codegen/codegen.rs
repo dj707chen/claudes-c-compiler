@@ -4025,6 +4025,41 @@ impl ArchCodegen for X86Codegen {
         }
     }
 
+    /// Override emit_unaryop to handle F128 (long double) negation via x87 fchs.
+    /// The default trait implementation loads the F128 value into rax as a truncated f64,
+    /// then uses xorpd to flip the f64 sign bit — but for F128 the full 80-bit x87
+    /// representation is stored in the slot, so the sign bit is at bit 79 (not bit 63).
+    /// We must use the x87 fchs instruction to negate the full-precision value.
+    fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
+        if ty == IrType::F128 && op == IrUnaryOp::Neg {
+            // Load the full 80-bit value into x87 ST(0)
+            self.emit_f128_load_to_x87(src);
+            // Negate ST(0) in-place
+            self.state.emit("    fchs");
+            // Store full 80-bit precision to dest slot if available
+            if let Some(dest_slot) = self.state.get_slot(dest.0) {
+                self.state.emit_fmt(format_args!("    fstpt {}(%rbp)", dest_slot.0));
+                // Also keep f64 copy in rax for non-F128 consumers
+                self.state.emit_fmt(format_args!("    fldt {}(%rbp)", dest_slot.0));
+                self.state.emit("    subq $8, %rsp");
+                self.state.emit("    fstpl (%rsp)");
+                self.state.emit("    popq %rax");
+                self.state.reg_cache.set_acc(dest.0, false);
+                self.state.f128_direct_slots.insert(dest.0);
+            } else {
+                // No slot: just store as f64 in rax
+                self.state.emit("    subq $8, %rsp");
+                self.state.emit("    fstpl (%rsp)");
+                self.state.emit("    popq %rax");
+                self.state.reg_cache.invalidate_acc();
+                self.emit_store_result(dest);
+            }
+            return;
+        }
+        // Delegate to default trait implementation for all other cases
+        crate::backend::traits::emit_unaryop_default(self, dest, op, src, ty);
+    }
+
     /// Override the default trait emit_float_binop to avoid push/pop.
     /// For F32/F64: loads lhs to rax -> xmm0, rhs to rcx -> xmm1, uses SSE.
     /// For F128: uses x87 FPU instructions for 80-bit extended precision.

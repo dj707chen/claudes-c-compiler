@@ -1103,6 +1103,39 @@ pub fn emit_cast_default(cg: &mut (impl ArchCodegen + ?Sized), dest: &Value, src
     cg.emit_store_result(dest);
 }
 
+/// Default unary operation implementation: dispatches i128/float/int to arch-specific primitives.
+/// Backends that override `emit_unaryop` should call this for types they don't handle specially.
+pub fn emit_unaryop_default(cg: &mut (impl ArchCodegen + ?Sized), dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
+    if is_i128_type(ty) {
+        cg.emit_load_acc_pair(src);
+        match op {
+            IrUnaryOp::Neg => cg.emit_i128_neg(),
+            IrUnaryOp::Not => cg.emit_i128_not(),
+            _ => {}
+        }
+        cg.emit_store_acc_pair(dest);
+        return;
+    }
+    cg.emit_load_operand(src);
+    if ty.is_float() {
+        match op {
+            IrUnaryOp::Neg => cg.emit_float_neg(ty),
+            IrUnaryOp::Not => cg.emit_int_not(ty),
+            _ => {}
+        }
+    } else {
+        match op {
+            IrUnaryOp::Neg => cg.emit_int_neg(ty),
+            IrUnaryOp::Not => cg.emit_int_not(ty),
+            IrUnaryOp::Clz => cg.emit_int_clz(ty),
+            IrUnaryOp::Ctz => cg.emit_int_ctz(ty),
+            IrUnaryOp::Bswap => cg.emit_int_bswap(ty),
+            IrUnaryOp::Popcount => cg.emit_int_popcount(ty),
+        }
+    }
+    cg.emit_store_result(dest);
+}
+
 /// Default return implementation: loads value, moves to appropriate return register,
 /// and emits epilogue. Backends that override `emit_return` should call this for
 /// cases they don't handle specially.
