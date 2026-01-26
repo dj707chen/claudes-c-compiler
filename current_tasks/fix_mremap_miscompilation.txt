@@ -1,7 +1,7 @@
-Task: Fix miscompilation of drivers/acpi/acpi_memhotplug.c causing kernel boot failure
-(Originally was mremap.c but that was fixed by another contributor.)
+Task: Fix miscompilation of kernel/sched/core.c causing kernel boot failure
 
-Problem: drivers/acpi/acpi_memhotplug.c is miscompiled by ccc, causing kernel boot failure.
-This file handles ACPI memory hotplug device support.
+Problem: kernel/sched/core.c is miscompiled by ccc, causing kernel boot failure.
+This is the core scheduler file, heavily using static_branch/jump labels.
+Investigating root cause.
 
-Status: investigating root cause by comparing ccc output with GCC output
+Status: investigating
