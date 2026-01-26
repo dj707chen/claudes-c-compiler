@@ -403,20 +403,22 @@ impl Lowerer {
                     // __attribute__((gnu_inline)) forces GNU89 inline semantics:
                     //   extern inline + gnu_inline = inline definition only, no external def
                     //   → treat like static inline (can skip if unreferenced, local if emitted)
+                    //   inline + gnu_inline (no extern) = external definition (must emit, global)
                     //
                     // Without gnu_inline (C99 semantics):
                     //   extern inline = provides external definition (must emit, global)
                     //   inline (alone) = inline definition only (no external def)
-                    let is_gnu_inline_extern = func.is_gnu_inline && func.is_inline
-                        && (func.is_extern || !func.is_static);
+                    let is_gnu_inline_no_extern_def = func.is_gnu_inline && func.is_inline
+                        && func.is_extern;
                     let can_skip = if func.is_static {
                         // static or static inline: internal linkage, safe to skip if unreferenced
                         true
-                    } else if is_gnu_inline_extern {
+                    } else if is_gnu_inline_no_extern_def {
                         // extern inline with gnu_inline: no external definition, skip if unreferenced
                         true
                     } else if func.is_inline {
-                        // plain inline (non-static, non-gnu_inline): C99 external linkage, must emit
+                        // C99: plain inline = inline definition only (no external def from this)
+                        // gnu_inline without extern: provides external definition (must emit)
                         false
                     } else {
                         false
@@ -1098,10 +1100,12 @@ impl Lowerer {
 
         // extern inline with __attribute__((gnu_inline)) should be treated as local
         // (no external definition emitted), even if the function is referenced and lowered.
-        let is_gnu_inline_extern = func.is_gnu_inline && func.is_inline
-            && (func.is_extern || !func.is_static);
+        // But plain inline + gnu_inline (without extern) provides an external definition
+        // in GNU89 semantics, so it should be GLOBAL.
+        let is_gnu_inline_no_extern_def = func.is_gnu_inline && func.is_inline
+            && func.is_extern;
         let is_static = func.is_static || self.static_functions.contains(&func.name)
-            || is_gnu_inline_extern;
+            || is_gnu_inline_no_extern_def;
         let next_val = self.func_mut().next_value;
         let ir_func = IrFunction {
             name: func.name.clone(), return_type, params,
