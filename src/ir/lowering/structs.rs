@@ -347,6 +347,42 @@ impl Lowerer {
                     alloca
                 }
             }
+            // Ternary and assignment on struct values produce rvalues (temporaries).
+            // We must copy the struct data to a fresh temporary so that subsequent
+            // member writes don't modify the original objects.
+            Expr::Conditional(_, _, _, _) | Expr::GnuConditional(_, _, _) | Expr::Assign(_, _, _) => {
+                if let Some(struct_size) = self.struct_value_size(expr) {
+                    if self.expr_produces_packed_struct_data(expr) {
+                        // Small struct packed in a register: spill to alloca
+                        let val = self.lower_expr(expr);
+                        let alloca = self.fresh_value();
+                        let alloc_size = if struct_size > 0 { struct_size } else { 8 };
+                        let store_ty = Self::packed_store_type(alloc_size);
+                        self.emit(Instruction::Alloca { dest: alloca, size: alloc_size, ty: store_ty, align: 0, volatile: false });
+                        self.emit(Instruction::Store { val, ptr: alloca, ty: store_ty, seg_override: AddressSpace::Default });
+                        alloca
+                    } else {
+                        // Struct returned by address: copy to a fresh temporary
+                        let src_val = self.lower_expr(expr);
+                        let src_addr = self.operand_to_value(src_val);
+                        let tmp_alloca = self.fresh_value();
+                        self.emit(Instruction::Alloca { dest: tmp_alloca, size: struct_size, ty: IrType::Ptr, align: 0, volatile: false });
+                        self.emit(Instruction::Memcpy { dest: tmp_alloca, src: src_addr, size: struct_size });
+                        tmp_alloca
+                    }
+                } else {
+                    // Not a struct type - evaluate normally
+                    let val = self.lower_expr(expr);
+                    match val {
+                        Operand::Value(v) => v,
+                        Operand::Const(_) => {
+                            let tmp = self.fresh_value();
+                            self.emit(Instruction::Copy { dest: tmp, src: val });
+                            tmp
+                        }
+                    }
+                }
+            }
             _ => {
                 // For expressions that might produce packed struct data (e.g. ternary
                 // with struct-returning function calls), detect and spill to an alloca.
