@@ -826,7 +826,7 @@ pub fn emit_const_data(out: &mut AsmOutput, c: &IrConst, ty: IrType, ptr_dir: Pt
         IrConst::F64(v) => {
             out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), v.to_bits()));
         }
-        IrConst::LongDouble(_v, bytes) => {
+        IrConst::LongDouble(f64_val, bytes) => {
             if ptr_dir.is_x86() {
                 // x86-64: emit stored x87 80-bit extended precision bytes (full precision).
                 // The raw bytes are in bytes[0..10], with bytes[10..16] = 0 padding.
@@ -837,12 +837,13 @@ pub fn emit_const_data(out: &mut AsmOutput, c: &IrConst, ty: IrType, ptr_dir: Pt
                 out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), lo as i64));
                 out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), hi as i64));
             } else {
-                // ARM64/RISC-V: convert x87 bytes to IEEE f128 format for proper quad precision.
-                let f128_bytes = crate::common::long_double::x87_bytes_to_f128_bytes(bytes);
-                let lo = u64::from_le_bytes(f128_bytes[0..8].try_into().unwrap());
-                let hi = u64::from_le_bytes(f128_bytes[8..16].try_into().unwrap());
-                out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), lo as i64));
-                out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), hi as i64));
+                // ARM64/RISC-V: store f64 approximation in the low 8 bytes of the
+                // 16-byte slot. Codegen carries f128 values as f64 internally, so
+                // static data must match for consistent load/store behavior.
+                // TODO: store full f128 precision when codegen supports it natively.
+                let f64_bits = f64_val.to_bits();
+                out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), f64_bits as i64));
+                out.emit_fmt(format_args!("    {} 0", ptr_dir.as_str()));
             }
         }
         IrConst::I128(v) => {

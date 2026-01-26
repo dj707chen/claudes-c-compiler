@@ -429,9 +429,12 @@ pub enum IrConst {
     F32(f32),
     F64(f64),
     /// Long double constant with full precision.
-    /// - `f64`: approximate value for computations (lossy, 52-bit mantissa)
+    /// - `f64`: approximate value for computations (lossy, 52-bit mantissa).
+    ///   On ARM64/RISC-V, this f64 approximation is also used for data section emission
+    ///   and runtime codegen since those backends carry f128 values as f64 internally.
     /// - `[u8; 16]`: raw x87 80-bit extended precision bytes (first 10 bytes used, 6 padding).
-    ///   For ARM64/RISC-V emission, these are converted to IEEE f128 via `x87_bytes_to_f128_bytes`.
+    ///   Used by x86 for full-precision `fstpt`/`fldt` data section emission and by
+    ///   ARM64/RISC-V backends for function call argument expansion via `f64_to_f128_bytes`.
     LongDouble(f64, [u8; 16]),
     Zero,
 }
@@ -756,10 +759,13 @@ impl IrConst {
             IrConst::F64(v) => {
                 out.extend_from_slice(&v.to_bits().to_le_bytes());
             }
-            IrConst::LongDouble(_, bytes) => {
-                // ARM64/RISC-V: convert x87 bytes to IEEE f128 format
-                let f128_bytes = crate::common::long_double::x87_bytes_to_f128_bytes(bytes);
-                out.extend_from_slice(&f128_bytes);
+            IrConst::LongDouble(f64_val, _) => {
+                // ARM64/RISC-V: store f64 approximation in the low 8 bytes of the
+                // 16-byte slot. Codegen carries f128 values as f64 internally, so
+                // static data must match for consistent load/store behavior.
+                // TODO: store full f128 precision when codegen supports it natively.
+                out.extend_from_slice(&f64_val.to_bits().to_le_bytes());
+                out.extend_from_slice(&[0u8; 8]);
             }
             IrConst::I128(v) => {
                 let le_bytes = v.to_le_bytes();
