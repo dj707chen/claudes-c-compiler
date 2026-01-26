@@ -74,6 +74,7 @@ See `git log` for full history. Key milestones:
 - `__attribute__((alias, weak, visibility))` and top-level `asm()` support (musl libc)
 - `register` variable `__asm__("regname")` support for pinning variables to specific registers in inline asm
 - Performance: Rc<StructLayout> eliminates deep cloning in lowering (~18% compile speedup on sqlite3.c)
+- AArch64 inline asm: `"Q"` memory constraint (single base register, `[Xn]` syntax) and `"w"` FP/SIMD register constraint with `%d`/`%s`/`%q` modifiers (needed for musl atomic ops and math functions)
 
 ### Project Build Status
 

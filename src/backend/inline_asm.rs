@@ -170,44 +170,52 @@ pub fn constraint_is_immediate_only(constraint: &str) -> bool {
     }
     // Must NOT have any register or memory alternative
     let has_reg_or_mem = stripped.chars().any(|c| matches!(c,
-        'r' | 'q' | 'R' | 'Q' | 'l' |  // GP register
+        'r' | 'q' | 'R' | 'l' |           // GP register
         'g' |                              // general (reg + mem + imm)
         'x' | 'v' | 'Y' |                 // FP register
         'a' | 'b' | 'c' | 'd' | 'S' | 'D' | // specific register
-        'm' | 'o' | 'V' | 'p'             // memory
+        'm' | 'o' | 'V' | 'p' | 'Q'       // memory (Q = AArch64 base-register memory)
     ));
     !has_reg_or_mem && !stripped.chars().any(|c| c.is_ascii_digit())
 }
 
 /// Check whether a constraint string contains a memory alternative character.
 /// Handles both single-character ("m") and multi-character constraints ("rm", "mq").
+/// Also recognizes "Q" which is an AArch64-specific memory constraint meaning
+/// "a memory address with a single base register" (used for atomic ops like ldaxr/stlxr).
 pub fn constraint_has_memory_alt(constraint: &str) -> bool {
     let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
     // Named tied operands ("[name]") are not memory constraints
     if stripped.starts_with('[') && stripped.ends_with(']') {
         return false;
     }
-    stripped.chars().any(|c| c == 'm')
+    stripped.chars().any(|c| c == 'm' || c == 'Q')
 }
 
 /// Check whether a constraint is memory-only (has memory alternative but no register
 /// alternative). For constraints like "rm", "qm", "g" that allow both register and
 /// memory, returns false — the backend will prefer registers, so the IR lowering
-/// should provide a value (not an address). Only pure "m"/"o"/"V" constraints need
+/// should provide a value (not an address). Only pure "m"/"o"/"V"/"Q" constraints need
 /// the address for memory operand formatting.
+/// Note: "Q" is AArch64-specific meaning "single base register memory address" and is
+/// always memory-only (no register alternative), used for atomic ops like ldaxr/stlxr.
 pub fn constraint_is_memory_only(constraint: &str) -> bool {
     let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
     // Named tied operands ("[name]") are never memory-only
     if stripped.starts_with('[') && stripped.ends_with(']') {
         return false;
     }
-    let has_mem = stripped.chars().any(|c| matches!(c, 'm' | 'o' | 'V' | 'p'));
+    // "Q" is an AArch64 memory-only constraint (single base register addressing)
+    let has_mem = stripped.chars().any(|c| matches!(c, 'm' | 'o' | 'V' | 'p' | 'Q'));
     if !has_mem {
         return false;
     }
     // Check for any register alternative (GP, FP, or specific register)
+    // Note: 'Q' is NOT listed as a register here — on AArch64 it's memory, and on x86
+    // it's rarely used (legacy "a,b,c,d" registers). The backend classify_constraint
+    // handles x86 Q correctly regardless.
     let has_reg = stripped.chars().any(|c| matches!(c,
-        'r' | 'q' | 'R' | 'Q' | 'l' |  // GP register
+        'r' | 'q' | 'R' | 'l' |           // GP register
         'g' |                              // general (reg + mem + imm)
         'x' | 'v' | 'Y' |                 // FP register
         'a' | 'b' | 'c' | 'd' | 'S' | 'D' // specific register

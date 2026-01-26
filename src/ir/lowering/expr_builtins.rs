@@ -197,7 +197,10 @@ impl Lowerer {
                 if args.len() >= 2 {
                     let lhs_ty = self.get_expr_type(&args[0]);
                     let rhs_ty = self.get_expr_type(&args[1]);
-                    let cmp_ty = if lhs_ty == IrType::F64 || rhs_ty == IrType::F64 {
+                    // Promote to the widest floating-point type among the two operands.
+                    let cmp_ty = if lhs_ty == IrType::F128 || rhs_ty == IrType::F128 {
+                        IrType::F128
+                    } else if lhs_ty == IrType::F64 || rhs_ty == IrType::F64 {
                         IrType::F64
                     } else if lhs_ty == IrType::F32 || rhs_ty == IrType::F32 {
                         IrType::F32
@@ -214,13 +217,32 @@ impl Lowerer {
                         let conv = self.emit_cast_val(rhs, rhs_ty, cmp_ty);
                         rhs = Operand::Value(conv);
                     }
+
+                    // __builtin_isunordered: returns 1 if either operand is NaN.
+                    // Emit (a != a) | (b != b) since NaN is the only value where x != x.
+                    if name == "__builtin_isunordered" {
+                        let lhs_nan = self.emit_cmp_val(IrCmpOp::Ne, lhs.clone(), lhs.clone(), cmp_ty);
+                        let rhs_nan = self.emit_cmp_val(IrCmpOp::Ne, rhs.clone(), rhs.clone(), cmp_ty);
+                        let dest = self.emit_binop_val(IrBinOp::Or, Operand::Value(lhs_nan), Operand::Value(rhs_nan), IrType::I32);
+                        return Some(Operand::Value(dest));
+                    }
+
+                    // __builtin_islessgreater: returns 1 if a < b or a > b (NOT for NaN).
+                    // This differs from (a != b) because NaN != NaN is true, but
+                    // islessgreater(NaN, x) must be false.
+                    // Emit (a < b) | (a > b).
+                    if name == "__builtin_islessgreater" {
+                        let lt = self.emit_cmp_val(IrCmpOp::Slt, lhs.clone(), rhs.clone(), cmp_ty);
+                        let gt = self.emit_cmp_val(IrCmpOp::Sgt, lhs, rhs, cmp_ty);
+                        let dest = self.emit_binop_val(IrBinOp::Or, Operand::Value(lt), Operand::Value(gt), IrType::I32);
+                        return Some(Operand::Value(dest));
+                    }
+
                     let cmp_op = match name {
                         "__builtin_isgreater" => IrCmpOp::Sgt,
                         "__builtin_isgreaterequal" => IrCmpOp::Sge,
                         "__builtin_isless" => IrCmpOp::Slt,
                         "__builtin_islessequal" => IrCmpOp::Sle,
-                        "__builtin_islessgreater" => IrCmpOp::Ne,
-                        "__builtin_isunordered" => IrCmpOp::Ne, // approximate
                         _ => IrCmpOp::Eq,
                     };
                     let dest = self.emit_cmp_val(cmp_op, lhs, rhs, cmp_ty);
@@ -368,8 +390,20 @@ impl Lowerer {
             // __builtin_classify_type(expr) -> GCC type class integer
             BuiltinIntrinsic::ClassifyType => {
                 let result = if let Some(arg) = args.first() {
-                    let ctype = self.expr_ctype(arg);
-                    classify_ctype(&ctype)
+                    // Special case: bare function identifiers decay to pointer
+                    // type (class 5). expr_ctype may return CType::Int as
+                    // fallback since functions aren't stored as variables.
+                    if let Expr::Identifier(fname, _) = arg {
+                        if self.known_functions.contains(fname.as_str()) {
+                            5i64 // pointer_type_class (function decays to pointer)
+                        } else {
+                            let ctype = self.expr_ctype(arg);
+                            classify_ctype(&ctype)
+                        }
+                    } else {
+                        let ctype = self.expr_ctype(arg);
+                        classify_ctype(&ctype)
+                    }
                 } else {
                     0i64 // no_type_class
                 };

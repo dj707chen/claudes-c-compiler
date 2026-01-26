@@ -93,24 +93,90 @@ impl ArmCodegen {
     }
 
     pub(super) fn format_reg_static(reg: &str, modifier: Option<char>) -> String {
+        // Extract the register number from any register form (x, w, d, s, q)
+        let reg_num = || -> Option<&str> {
+            if reg.starts_with('x') || reg.starts_with('w') || reg.starts_with('d')
+                || reg.starts_with('s') || reg.starts_with('q') {
+                Some(&reg[1..])
+            } else {
+                None
+            }
+        };
         match modifier {
             Some('w') => {
-                // Convert x-register to w-register
-                if reg.starts_with('x') {
-                    format!("w{}", &reg[1..])
-                } else {
-                    reg.to_string()
+                // Convert to w-register (32-bit GP)
+                if let Some(num) = reg_num() {
+                    if reg.starts_with('x') || reg.starts_with('w') {
+                        return format!("w{}", num);
+                    }
                 }
+                reg.to_string()
             }
             Some('x') => {
-                // Force x-register
-                if reg.starts_with('w') {
-                    format!("x{}", &reg[1..])
-                } else {
-                    reg.to_string()
+                // Convert to x-register (64-bit GP)
+                if let Some(num) = reg_num() {
+                    if reg.starts_with('w') || reg.starts_with('x') {
+                        return format!("x{}", num);
+                    }
                 }
+                reg.to_string()
+            }
+            Some('d') => {
+                // Convert to d-register (64-bit FP/double)
+                if let Some(num) = reg_num() {
+                    if reg.starts_with('d') || reg.starts_with('s') || reg.starts_with('q') {
+                        return format!("d{}", num);
+                    }
+                }
+                reg.to_string()
+            }
+            Some('s') => {
+                // Convert to s-register (32-bit FP/float)
+                if let Some(num) = reg_num() {
+                    if reg.starts_with('d') || reg.starts_with('s') || reg.starts_with('q') {
+                        return format!("s{}", num);
+                    }
+                }
+                reg.to_string()
+            }
+            Some('q') => {
+                // Convert to q-register (128-bit SIMD)
+                if let Some(num) = reg_num() {
+                    if reg.starts_with('d') || reg.starts_with('s') || reg.starts_with('q') {
+                        return format!("q{}", num);
+                    }
+                }
+                reg.to_string()
+            }
+            Some('h') => {
+                // Convert to h-register (16-bit FP/half)
+                if let Some(num) = reg_num() {
+                    if reg.starts_with('d') || reg.starts_with('s') || reg.starts_with('q') {
+                        return format!("h{}", num);
+                    }
+                }
+                reg.to_string()
+            }
+            Some('b') => {
+                // Convert to b-register (8-bit)
+                if let Some(num) = reg_num() {
+                    if reg.starts_with('d') || reg.starts_with('s') || reg.starts_with('q') {
+                        return format!("b{}", num);
+                    }
+                }
+                reg.to_string()
             }
             _ => reg.to_string(),
+        }
+    }
+
+    /// Convert a d-register name to its s-register counterpart (same register number).
+    /// e.g., "d16" -> "s16"
+    pub(super) fn d_to_s_reg(reg: &str) -> String {
+        if reg.starts_with('d') {
+            format!("s{}", &reg[1..])
+        } else {
+            reg.to_string()
         }
     }
 
