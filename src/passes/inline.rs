@@ -18,16 +18,15 @@ use crate::common::types::{IrType, AddressSpace};
 use std::collections::HashMap;
 
 /// Maximum number of IR instructions (across all blocks) in a callee for it
-/// to be eligible for inlining. Conservative limit to avoid miscompiling
-/// complex functions while still handling simple constant-returning helpers
-/// like IS_ENABLED() wrappers and small accessor functions.
-const MAX_INLINE_INSTRUCTIONS: usize = 20;
+/// to be eligible for inlining. This handles constant-returning helpers
+/// like IS_ENABLED() wrappers and small accessor functions, as well as
+/// moderately-sized static inline functions with simple control flow.
+const MAX_INLINE_INSTRUCTIONS: usize = 60;
 
 /// Maximum number of basic blocks in a callee for inlining eligibility.
-/// Keeps inlining conservative to avoid code bloat while still handling
-/// the kernel's IS_ENABLED() pattern, accessor functions, and small helpers
-/// with simple control flow (e.g., single if-else).
-const MAX_INLINE_BLOCKS: usize = 1;
+/// Must be high enough to handle static inline functions with control flow
+/// (e.g., if/else chains, early returns). GCC inlines these aggressively.
+const MAX_INLINE_BLOCKS: usize = 6;
 
 /// Maximum total inlining budget per caller function (total inlined instructions).
 /// Prevents exponential blowup from recursive inlining chains.
@@ -98,6 +97,7 @@ pub fn run(module: &mut IrModule) -> usize {
             continue;
         }
 
+        let caller_has_section = module.functions[func_idx].section.is_some();
         let mut budget_remaining = MAX_INLINE_BUDGET_PER_CALLER;
         let mut always_inline_budget_remaining = MAX_ALWAYS_INLINE_BUDGET_PER_CALLER;
         let mut changed = true;
@@ -111,8 +111,10 @@ pub fn run(module: &mut IrModule) -> usize {
             }
             changed = false;
 
-            // Find call sites to inline in the current function
-            let call_sites = find_inline_call_sites(&module.functions[func_idx], &callee_map, &skip_list);
+            // Find call sites to inline in the current function.
+            // When the caller has a custom section attribute, also consider callees
+            // that exceed normal limits, to avoid dangerous cross-section calls.
+            let call_sites = find_inline_call_sites(&module.functions[func_idx], &callee_map, &skip_list, caller_has_section);
             if call_sites.is_empty() {
                 break;
             }
@@ -125,8 +127,10 @@ pub fn run(module: &mut IrModule) -> usize {
                 .map(|b| b.instructions.len())
                 .sum();
 
-            // Use appropriate budget based on whether callee is always_inline
-            let effective_budget = if callee_data.is_always_inline {
+            // Use appropriate budget based on whether callee is always_inline or
+            // exceeds normal limits (section-caller inlining uses always_inline budget)
+            let use_relaxed_budget = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
+            let effective_budget = if use_relaxed_budget {
                 always_inline_budget_remaining
             } else {
                 budget_remaining
@@ -153,7 +157,7 @@ pub fn run(module: &mut IrModule) -> usize {
                     dump_function_ir(&module.functions[func_idx],
                         &format!("after inlining '{}' into '{}'", site.callee_name, module.functions[func_idx].name));
                 }
-                if callee_data.is_always_inline {
+                if use_relaxed_budget {
                     always_inline_budget_remaining = always_inline_budget_remaining.saturating_sub(callee_inst_count);
                 } else {
                     budget_remaining = budget_remaining.saturating_sub(callee_inst_count);
@@ -659,6 +663,11 @@ struct CalleeData {
     max_block_id: u32,
     /// Whether this callee was marked __attribute__((always_inline))
     is_always_inline: bool,
+    /// True if this callee exceeds normal inline limits but is within the
+    /// relaxed limits used for callers with custom section attributes.
+    /// Such callees should only be inlined when the caller has a section attribute,
+    /// to avoid cross-section calls that break early boot / noinstr code.
+    exceeds_normal_limits: bool,
 }
 
 /// A call site that is eligible for inlining.
@@ -715,29 +724,41 @@ fn build_callee_map(module: &IrModule) -> HashMap<String, CalleeData> {
             continue;
         }
 
-        // Check size limits (relaxed for always_inline)
+        // Check size limits.
+        // For always_inline: use generous limits.
+        // For static inline: use normal limits, but also admit functions that exceed
+        // normal limits but fit within always_inline limits. These "exceeds_normal_limits"
+        // callees will only be inlined when the caller has a custom section attribute
+        // (e.g., .head.text, .noinstr.text), where cross-section calls are dangerous.
         let inst_count: usize = func.blocks.iter().map(|b| b.instructions.len()).sum();
-        let max_inst = if is_always_inline { MAX_ALWAYS_INLINE_INSTRUCTIONS } else { MAX_INLINE_INSTRUCTIONS };
-        let max_blocks = if is_always_inline { MAX_ALWAYS_INLINE_BLOCKS } else { MAX_INLINE_BLOCKS };
-        if inst_count > max_inst {
-            continue;
-        }
-        if func.blocks.len() > max_blocks {
-            continue;
+        let fits_normal = inst_count <= MAX_INLINE_INSTRUCTIONS && func.blocks.len() <= MAX_INLINE_BLOCKS;
+        let fits_relaxed = inst_count <= MAX_ALWAYS_INLINE_INSTRUCTIONS && func.blocks.len() <= MAX_ALWAYS_INLINE_BLOCKS;
+        let exceeds_normal = !is_always_inline && !fits_normal;
+        if is_always_inline {
+            if !fits_relaxed {
+                continue;
+            }
+        } else {
+            // For static inline: admit if within normal limits OR within relaxed limits
+            // (the latter only used for section-attributed callers).
+            if !fits_normal && !fits_relaxed {
+                continue;
+            }
         }
 
         // Skip functions containing constructs that are hard to inline correctly.
-        // For always_inline, we are more permissive: we allow inline assembly (common
-        // in kernel always_inline functions like atomic ops, barriers, etc.) but still
-        // reject variadic machinery and dynamic stack allocation.
+        // Inline asm is allowed: the inliner handles it correctly and the
+        // resolve_inline_asm_symbols post-pass resolves operand symbols.
+        // This is important because many kernel static inline functions use
+        // inline asm (cr reads/writes, atomic ops, barriers, RIP_REL_REF, etc.)
+        // and must be inlinable to avoid cross-section call issues.
         let mut has_problematic = false;
         for block in &func.blocks {
             for inst in &block.instructions {
                 match inst {
-                    // Inline asm is allowed for always_inline (kernel needs it)
-                    Instruction::InlineAsm { .. } if is_always_inline => {}
-                    Instruction::InlineAsm { .. }
-                    | Instruction::VaStart { .. }
+                    // Inline asm is allowed for all inlined functions
+                    Instruction::InlineAsm { .. } => {}
+                    Instruction::VaStart { .. }
                     | Instruction::VaEnd { .. }
                     | Instruction::VaArg { .. }
                     | Instruction::VaCopy { .. }
@@ -780,6 +801,7 @@ fn build_callee_map(module: &IrModule) -> HashMap<String, CalleeData> {
             next_value_id: func.next_value_id,
             max_block_id,
             is_always_inline,
+            exceeds_normal_limits: exceeds_normal,
         });
     }
 
@@ -787,21 +809,30 @@ fn build_callee_map(module: &IrModule) -> HashMap<String, CalleeData> {
 }
 
 /// Find call sites in a function that are eligible for inlining.
+/// `caller_has_section`: true if the caller has a custom section attribute.
+/// When true, callees that exceed normal inline limits (but fit relaxed limits)
+/// are also eligible, since cross-section calls from section-attributed functions
+/// (e.g., .head.text, .noinstr.text) can cause boot/runtime failures.
 fn find_inline_call_sites(
     func: &IrFunction,
     callee_map: &HashMap<String, CalleeData>,
     skip_list: &[String],
+    caller_has_section: bool,
 ) -> Vec<InlineCallSite> {
     let mut sites = Vec::new();
 
     for (block_idx, block) in func.blocks.iter().enumerate() {
         for (inst_idx, inst) in block.instructions.iter().enumerate() {
             if let Instruction::Call { dest, func: callee_name, args, .. } = inst {
-                if callee_map.contains_key(callee_name) {
+                if let Some(callee_data) = callee_map.get(callee_name) {
                     // Don't inline recursive calls
                     if callee_name != &func.name {
                         // Skip functions listed in CCC_INLINE_SKIP
                         if skip_list.iter().any(|s| s == callee_name) {
+                            continue;
+                        }
+                        // Skip callees that exceed normal limits unless caller has a section
+                        if callee_data.exceeds_normal_limits && !caller_has_section {
                             continue;
                         }
                         sites.push(InlineCallSite {
