@@ -1,0 +1,20 @@
+Fix F128 (long double) floating-point classification builtins
+
+Problem:
+__builtin_fpclassify, __builtin_isnan, __builtin_isinf, __builtin_isfinite,
+__builtin_isnormal, __builtin_signbit, and __builtin_isinf_sign all fail for
+long double (F128 / 128-bit quad precision) values on aarch64 and riscv64.
+
+Root cause:
+1. bitcast_float_to_int() only handles F32->I32 and F64->I64. For F128, it
+   falls through to the F64 path, only reading the low 64 bits (which are all
+   mantissa for quad precision). The exponent is in the upper 64 bits.
+2. fp_masks() has no F128 arm - the default uses F64 masks (11-bit exponent
+   at shift 52) which are wrong for F128 (15-bit exponent at shift 112).
+
+Fix:
+For F128, load the upper 64 bits (which contain sign + exponent + high mantissa)
+and also check the lower 64 bits for mantissa-based classification (NaN needs
+to know if ANY mantissa bit is set, which could be in the lower 64 bits only).
+
+Affected test: compiler_suite_0108_0094

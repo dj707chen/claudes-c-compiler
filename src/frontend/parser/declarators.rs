@@ -435,9 +435,21 @@ impl Parser {
             }
         }
 
-        // Skip trailing function param list (for abstract function pointer types)
+        // Trailing function parameter list means this parameter has function type,
+        // which in C decays to a function pointer (C11 6.7.6.3p8).
+        // E.g., `int f(union U callback(void))` → callback has type `union U (*)(void)`
         if matches!(self.peek(), TokenKind::LParen) {
-            self.skip_balanced_parens();
+            if name.is_some() {
+                // Named parameter with trailing (params): function-type decay to pointer.
+                // Parse the param list to preserve function type information.
+                is_func_ptr = true;
+                let (fp_params, _variadic) = self.parse_param_list();
+                fptr_params = Some(fp_params);
+            } else {
+                // Abstract declarator with trailing parens (e.g., `([])`).
+                // Must still consume the balanced parens to avoid parse errors.
+                self.skip_balanced_parens();
+            }
         }
 
         (name, pointer_depth, array_dims, is_func_ptr, ptr_to_array_dims, fptr_params)
@@ -535,7 +547,7 @@ impl Parser {
             }
             name
         } else if let TokenKind::Identifier(_) = self.peek() {
-            // Parenthesized name: (name)
+            // Parenthesized name: (name) or (name)(params)
             let name = if let TokenKind::Identifier(ref n) = self.peek() {
                 let n = n.clone();
                 self.advance();
@@ -545,8 +557,13 @@ impl Parser {
             };
             self.expect(&TokenKind::RParen);
             self.skip_array_dimensions();
+            // Trailing (params) means function-type parameter decay to pointer.
+            // E.g., `int (f)(int)` → f has function type, decays to function pointer.
+            // Parse the param list to preserve function type information.
             if matches!(self.peek(), TokenKind::LParen) {
-                self.skip_balanced_parens();
+                *is_func_ptr = true;
+                let (fp_params, _variadic) = self.parse_param_list();
+                *fptr_params = Some(fp_params);
             }
             name
         } else if matches!(self.peek(), TokenKind::LParen) {
@@ -554,11 +571,16 @@ impl Parser {
             let inner_save = self.pos;
             let name = self.extract_paren_name();
             if name.is_some() {
-                // Successfully extracted a name. Skip array dims and function
-                // param lists inside the outer parens, e.g. ((fnc)(int)) or ((arr)[5])
+                // Successfully extracted a name. Check for function param lists
+                // inside the outer parens, e.g. ((fnc)(int)) or ((*fp)(int))
                 self.skip_array_dimensions();
+                // Trailing (params) inside outer parens means function pointer.
+                // E.g., `int ((*f)(int))` or `int ((f)(int))`
+                // Parse the param list to preserve function type information.
                 if matches!(self.peek(), TokenKind::LParen) {
-                    self.skip_balanced_parens();
+                    *is_func_ptr = true;
+                    let (fp_params, _variadic) = self.parse_param_list();
+                    *fptr_params = Some(fp_params);
                 }
             } else {
                 // extract_paren_name failed (e.g. ((int)) where inner content
@@ -570,8 +592,12 @@ impl Parser {
             self.expect(&TokenKind::RParen);
             // Also skip trailing suffixes after the outer parens
             self.skip_array_dimensions();
+            // Trailing (params) after outer parens also means function type decay.
+            // Parse the param list to preserve function type information.
             if matches!(self.peek(), TokenKind::LParen) {
-                self.skip_balanced_parens();
+                *is_func_ptr = true;
+                let (fp_params, _variadic) = self.parse_param_list();
+                *fptr_params = Some(fp_params);
             }
             name
         } else {
