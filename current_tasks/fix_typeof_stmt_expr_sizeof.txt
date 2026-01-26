@@ -1,0 +1,1 @@
+Fix typeof(expr) returning wrong type when expr contains statement expressions with local declarations. This caused sizeof(typeof(&({stmt_expr})->member)) to return the size of int instead of int*, breaking the kernel's cmpxchg macro pattern that uses switch(sizeof(*(ptr))) to select instruction suffix.
