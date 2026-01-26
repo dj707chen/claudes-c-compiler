@@ -501,7 +501,35 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
         out.emit("");
     }
 
-    // Initialized globals -> .data (skip those with custom sections)
+    // Const globals -> .rodata (matching GCC behavior for -fno-PIE)
+    // GCC places all const-qualified globals in .rodata regardless of whether they
+    // contain relocations. The linker handles R_X86_64_64 relocations in .rodata fine.
+    // This is critical for kernel code which uses a linker script that doesn't
+    // recognize .data.rel.ro as a valid section.
+    {
+        let mut has_const_rodata = false;
+        for g in globals {
+            if g.is_extern || g.section.is_some() {
+                continue;
+            }
+            if matches!(g.init, GlobalInit::Zero) || g.size == 0 {
+                continue;
+            }
+            if !g.is_const {
+                continue;
+            }
+            if !has_const_rodata {
+                out.emit(".section .rodata");
+                has_const_rodata = true;
+            }
+            emit_global_def(out, g, ptr_dir);
+        }
+        if has_const_rodata {
+            out.emit("");
+        }
+    }
+
+    // Non-const initialized globals -> .data (skip those with custom sections)
     for g in globals {
         if g.is_extern {
             continue; // extern declarations have no storage
@@ -515,6 +543,10 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
         // Zero-size globals (e.g., empty arrays like `Type arr[0] = {}`) go to .bss
         // to avoid sharing an address with the next .data global.
         if g.size == 0 {
+            continue;
+        }
+        // Const globals already emitted to .rodata or .data.rel.ro
+        if g.is_const {
             continue;
         }
         if !has_data {

@@ -68,6 +68,8 @@ pub struct IrGlobal {
     /// Whether the user specified an explicit alignment via __attribute__((aligned(N))) or _Alignas.
     /// When true, we respect the user's alignment exactly and don't auto-promote to 16.
     pub has_explicit_align: bool,
+    /// Whether this global has const qualification (should be placed in .rodata).
+    pub is_const: bool,
 }
 
 /// Initializer for a global variable.
@@ -101,6 +103,16 @@ pub enum GlobalInit {
 }
 
 impl GlobalInit {
+    /// Returns true if this initializer contains relocations (addresses of globals/labels).
+    /// Used to decide between .rodata (no relocations) and .data.rel.ro (has relocations).
+    pub fn has_relocations(&self) -> bool {
+        match self {
+            GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) | GlobalInit::GlobalLabelDiff(_, _, _) => true,
+            GlobalInit::Compound(inits) => inits.iter().any(|i| i.has_relocations()),
+            _ => false,
+        }
+    }
+
     /// Returns the byte size of this initializer element in a compound context.
     /// Used when flattening nested Compound elements into a parent Compound.
     pub fn byte_size(&self) -> usize {

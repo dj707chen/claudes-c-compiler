@@ -337,6 +337,10 @@ impl Lowerer {
         // For struct initializers emitted as byte arrays, set element type to I8
         let global_ty = da.resolve_global_ty(&init);
 
+        // For pointer variables, decl.is_const refers to the pointee type, not the variable.
+        let var_is_const = decl.is_const && !da.is_pointer
+            && !da.is_array_of_pointers && !da.is_array_of_func_ptrs;
+
         self.emitted_global_names.insert(static_name.clone());
         self.module.globals.push(IrGlobal {
             name: static_name.clone(),
@@ -351,6 +355,7 @@ impl Lowerer {
             is_weak: false,
             visibility: None,
             has_explicit_align,
+            is_const: var_is_const,
         });
 
         // Track as a global for access via GlobalAddr

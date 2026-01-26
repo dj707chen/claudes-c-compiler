@@ -1472,6 +1472,14 @@ impl Lowerer {
                 _ => da.actual_alloc_size,
             };
 
+            // For pointer variables, decl.is_const refers to the pointee type
+            // (e.g., `const char *p` means p points to const char, but p itself is mutable).
+            // Only non-pointer variables get is_const from the declaration.
+            // Our parser doesn't track `* const` (pointer-to-const qualifier), so for
+            // pointers we conservatively mark as non-const.
+            let var_is_const = decl.is_const && !da.is_pointer
+                && !da.is_array_of_pointers && !da.is_array_of_func_ptrs;
+
             self.emitted_global_names.insert(declarator.name.clone());
             self.module.globals.push(IrGlobal {
                 name: declarator.name.clone(),
@@ -1486,6 +1494,7 @@ impl Lowerer {
                 is_weak: declarator.is_weak,
                 visibility: declarator.visibility.clone(),
                 has_explicit_align,
+                is_const: var_is_const,
             });
         }
     }
