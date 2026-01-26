@@ -115,6 +115,7 @@ pub struct IrFunction {
     pub is_variadic: bool,
     pub is_declaration: bool, // true if no body (extern)
     pub is_static: bool,      // true if declared with `static` linkage
+    pub is_inline: bool,      // true if declared with `inline` (used to skip patchable function entries)
     pub stack_size: usize,
     /// Cached upper bound on Value IDs: all Value IDs in this function are < next_value_id.
     /// Set by lowering/mem2reg/phi_eliminate to avoid expensive full-IR scans.
@@ -1032,6 +1033,7 @@ impl IrFunction {
             is_variadic,
             is_declaration: false,
             is_static: false,
+            is_inline: false,
             stack_size: 0,
             next_value_id: 0,
             section: None,

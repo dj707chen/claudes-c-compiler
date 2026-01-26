@@ -1098,7 +1098,9 @@ impl Lowerer {
         let ir_func = IrFunction {
             name: func.name.clone(), return_type, params,
             blocks: std::mem::take(&mut self.func_mut().blocks),
-            is_variadic: func.variadic, is_declaration: false, is_static, stack_size: 0,
+            is_variadic: func.variadic, is_declaration: false, is_static,
+            is_inline: func.is_inline,
+            stack_size: 0,
             next_value_id: next_val,
             section: func.section.clone(),
             visibility: func.visibility.clone(),

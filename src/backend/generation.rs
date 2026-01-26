@@ -365,30 +365,40 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
     // This is used by the Linux kernel for ftrace and static call patching.
     // Format: M NOPs before the entry point, (N-M) NOPs after, plus a
     // __patchable_function_entries section pointing to the NOP area.
-    if let Some((total, before)) = cg.state().patchable_function_entry {
-        if total > 0 {
-            let pfe_id = cg.state().next_label_id();
-            let pfe_label = format!(".LPFE{}", pfe_id);
+    //
+    // Skip patchable entries for inline functions: our compiler emits all static
+    // inline functions from headers as separate definitions (since we don't inline
+    // them yet). Emitting __patchable_function_entries for each of these would create
+    // thousands of entries per file (~1400 instead of ~5), overwhelming the kernel's
+    // ftrace initialization and causing boot hangs. GCC avoids this by inlining
+    // static inline functions so they never get their own patchable entries.
+    let emit_patchable = !func.is_inline;
+    if emit_patchable {
+        if let Some((total, before)) = cg.state().patchable_function_entry {
+            if total > 0 {
+                let pfe_id = cg.state().next_label_id();
+                let pfe_label = format!(".LPFE{}", pfe_id);
 
-            // Emit __patchable_function_entries section with a pointer to the NOP area
-            cg.state().emit_fmt(format_args!(
-                ".section __patchable_function_entries,\"awo\",@progbits,{}",
-                pfe_label
-            ));
-            cg.state().emit(".align 8");
-            cg.state().emit_fmt(format_args!(".quad {}", pfe_label));
+                // Emit __patchable_function_entries section with a pointer to the NOP area
+                cg.state().emit_fmt(format_args!(
+                    ".section __patchable_function_entries,\"awo\",@progbits,{}",
+                    pfe_label
+                ));
+                cg.state().emit(".align 8");
+                cg.state().emit_fmt(format_args!(".quad {}", pfe_label));
 
-            // Switch back to the function's section (custom or .text)
-            if let Some(ref sect) = func.section {
-                cg.state().emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
-            } else {
-                cg.state().emit(".text");
-            }
+                // Switch back to the function's section (custom or .text)
+                if let Some(ref sect) = func.section {
+                    cg.state().emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
+                } else {
+                    cg.state().emit(".text");
+                }
 
-            // Emit the LPFE label and M NOPs before the function entry point
-            cg.state().emit_fmt(format_args!("{}:", pfe_label));
-            for _ in 0..before {
-                cg.state().emit("nop");
+                // Emit the LPFE label and M NOPs before the function entry point
+                cg.state().emit_fmt(format_args!("{}:", pfe_label));
+                for _ in 0..before {
+                    cg.state().emit("nop");
+                }
             }
         }
     }
@@ -397,10 +407,12 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
     cg.state().emit_fmt(format_args!("{}:", func.name));
 
     // Emit (N-M) NOPs after the function entry point for patchable function entry
-    if let Some((total, before)) = cg.state().patchable_function_entry {
-        let after = total.saturating_sub(before);
-        for _ in 0..after {
-            cg.state().emit("nop");
+    if emit_patchable {
+        if let Some((total, before)) = cg.state().patchable_function_entry {
+            let after = total.saturating_sub(before);
+            for _ in 0..after {
+                cg.state().emit("nop");
+            }
         }
     }
 

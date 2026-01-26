@@ -1,0 +1,18 @@
+Fix __attribute__((weak)) symbol binding in ELF output
+
+Bug: Functions declared with __attribute__((weak)) are emitted with STB_GLOBAL
+binding in the ELF symbol table instead of STB_WEAK. This causes "multiple
+definition" linker errors when both a weak and strong definition exist (as is
+common in the Linux kernel, e.g. arch_release_task_struct).
+
+Reproducer:
+  void __attribute__((weak)) my_weak_func(void) {}
+  GCC: emits with 'w' (STB_WEAK) binding
+  CCC: emits with 'g' (STB_GLOBAL) binding
+
+Impact: Causes kernel boot failures for many files (fork.c, i915_gem_phys.c,
+dd.c, tsc.c, bgrt.c, etc.) due to multiple definition errors or wrong
+function being called.
+
+Fix: Parse the weak attribute in sema, propagate through IR, and emit
+STB_WEAK instead of STB_GLOBAL in the ELF writer.
