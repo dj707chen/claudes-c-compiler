@@ -2,28 +2,52 @@
 //!
 //! This module implements dead static function elimination by walking AST compound
 //! statements to collect all referenced function names. Functions that are declared
-//! as static but never referenced from any non-static function body or global
-//! initializer can be safely skipped during lowering, providing a significant
+//! as static but never referenced (transitively) from any non-static function body
+//! or global initializer can be safely skipped during lowering, providing a significant
 //! performance win for translation units that include many header-defined static
 //! or inline functions.
 
-use crate::common::fx_hash::FxHashSet;
+use std::collections::VecDeque;
+use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::frontend::parser::ast::*;
 use super::lowering::Lowerer;
 
 impl Lowerer {
-    /// Collect all function names referenced from non-static function bodies and
-    /// global initializers. Static/inline functions from headers that are never
-    /// referenced can be skipped during lowering for a significant performance win.
+    /// Returns true if a function definition can be skipped when unreferenced.
+    /// This mirrors the skip logic in `lower()` — static, static inline,
+    /// and extern inline with gnu_inline attribute can all be skipped.
+    fn is_skippable_function(func: &FunctionDef) -> bool {
+        let is_gnu_inline_no_extern_def = func.is_gnu_inline && func.is_inline
+            && func.is_extern;
+        func.is_static || is_gnu_inline_no_extern_def
+    }
+
+    /// Collect all function names that are transitively referenced from root
+    /// (non-skippable) function bodies and global initializers.
+    ///
+    /// Algorithm:
+    /// 1. Collect direct references from root functions and global initializers
+    /// 2. Build a per-function reference map for skippable functions
+    /// 3. Worklist-based transitive closure: when a skippable function becomes
+    ///    reachable, add its references to the worklist
     pub(super) fn collect_referenced_static_functions(&self, tu: &TranslationUnit) -> FxHashSet<String> {
         let mut referenced = FxHashSet::default();
+        // Map from skippable function name -> set of functions it references
+        let mut skippable_refs: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
 
         for decl in &tu.decls {
             match decl {
                 ExternalDecl::FunctionDef(func) => {
-                    // Non-static functions always reference identifiers that might be static functions
-                    // Static functions also reference other static functions
-                    self.collect_refs_from_compound(&func.body, &mut referenced);
+                    if Self::is_skippable_function(func) {
+                        // For skippable functions, collect their refs into a separate map
+                        // so we can do transitive closure later
+                        let mut func_refs = FxHashSet::default();
+                        self.collect_refs_from_compound(&func.body, &mut func_refs);
+                        skippable_refs.insert(func.name.clone(), func_refs);
+                    } else {
+                        // Root function: collect refs directly into the referenced set
+                        self.collect_refs_from_compound(&func.body, &mut referenced);
+                    }
                 }
                 ExternalDecl::Declaration(decl) => {
                     // Check global variable initializers for function references
@@ -43,10 +67,19 @@ impl Lowerer {
             }
         }
 
-        // Transitively close: if static func A references static func B,
-        // and A is referenced, then B is also referenced.
-        // We already collected all references from all function bodies above,
-        // including from static functions, so the transitive closure is handled.
+        // Transitive closure: use a worklist to propagate reachability through
+        // skippable functions. When a skippable function is found to be referenced,
+        // add all of its own references to the worklist.
+        let mut worklist: VecDeque<String> = referenced.iter().cloned().collect();
+        while let Some(name) = worklist.pop_front() {
+            if let Some(func_refs) = skippable_refs.get(&name) {
+                for r in func_refs {
+                    if referenced.insert(r.clone()) {
+                        worklist.push_back(r.clone());
+                    }
+                }
+            }
+        }
 
         referenced
     }

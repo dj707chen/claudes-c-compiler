@@ -1,26 +1,3 @@
 Fix dead static function elimination and unused extern symbol emission.
 
-Status: in progress
-
-Problem: The pre-lowering dead static function elimination was collecting function
-references from ALL function bodies (including dead static ones), causing chains
-of unreferenced static functions to be incorrectly kept alive. Additionally,
-symbol_attrs (.hidden/.weak directives) were emitted for extern declarations
-that are never referenced by the emitted code.
-
-This caused the EFI stub kernel build to fail because:
-1. Unused static inline functions (like iret_to_self from sync_core.h) with
-   absolute relocations (R_X86_64_32S) were emitted
-2. Unused extern declarations with hidden visibility created undefined hidden
-   symbol entries (R_X86_64_64) in the object file
-
-Fix:
-- ref_collection.rs: Use worklist-based transitive closure starting from root
-  (non-static) functions instead of collecting from all bodies
-- passes/mod.rs: Filter symbol_attrs to only include actually-referenced symbols
-  after dead static function elimination
-
-Files modified:
-- src/ir/lowering/ref_collection.rs
-- src/passes/mod.rs
-- tests/dead-static-func-elimination/
+Status: completed

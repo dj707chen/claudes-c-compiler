@@ -231,6 +231,15 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
         // This is an unreferenced static function - remove it
         false
     });
+
+    // Filter symbol_attrs to only include symbols that are actually referenced
+    // by the emitted code. Without this, unused extern declarations (e.g. from
+    // headers) with visibility attributes (e.g. from #pragma GCC visibility
+    // push(hidden)) generate .hidden directives that create undefined hidden
+    // symbol entries in the object file, causing linker errors.
+    module.symbol_attrs.retain(|(name, _, _)| {
+        referenced.contains(name)
+    });
 }
 
 /// Collect function name references from a global initializer.
