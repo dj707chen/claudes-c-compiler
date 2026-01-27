@@ -1,0 +1,21 @@
+Task: Fix stale expr_ctype_cache from cloned AST nodes in typeof resolution
+Status: in_progress
+Started: 2026-01-27
+
+Problem: lower_local_decl resolved typeof declarations by creating a cloned
+Declaration with resolved type_spec but cloned declarators. The cloned AST
+nodes got cached in expr_ctype_cache (keyed by pointer address). When the
+clone was dropped, those heap addresses were reused by later expressions,
+which then received stale (wrong) cached types.
+
+Impact: In Linux kernel's llist_add_batch (lib/llist.c), the try_cmpxchg
+macro uses __typeof__ in a statement expression. The stale cache caused
+*_old to get type Pointer(Struct("struct.head")) instead of the correct
+Pointer(Pointer(Struct("struct.node"))). This made pointee_is_no_load
+return true, emitting leaq (address) instead of movq (load), breaking
+the cmpxchg pattern and causing kernel boot hangs.
+
+Fix: Restructure lower_local_decl to only resolve the type_spec without
+cloning declarators. Introduce a separate type_spec variable that points
+to either the resolved type_spec or the original, while keeping the
+original decl reference for all declarator access.
