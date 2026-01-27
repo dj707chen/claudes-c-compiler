@@ -46,12 +46,9 @@ fn build_gep_fold_map(func: &IrFunction, use_counts: &[u32]) -> FxHashMap<u32, G
     for block in &func.blocks {
         for inst in &block.instructions {
             if let Instruction::GetElementPtr { dest, base, offset: Operand::Const(c), .. } = inst {
-                let offset_val = match c {
-                    IrConst::I64(n) => *n,
-                    IrConst::I32(n) => *n as i64,
-                    IrConst::I16(n) => *n as i64,
-                    IrConst::I8(n) => *n as i64,
-                    _ => continue,
+                let offset_val = match c.to_i64() {
+                    Some(v) => v,
+                    None => continue,
                 };
                 // Offset must fit in 32-bit signed displacement for x86.
                 // Also reasonable for ARM (signed 9-bit unscaled or 12-bit scaled)
@@ -147,12 +144,9 @@ fn build_global_addr_map(func: &IrFunction) -> FxHashMap<u32, String> {
                 }
                 Instruction::GetElementPtr { dest, base, offset: Operand::Const(c), .. } => {
                     if let Some(base_name) = map.get(&base.0) {
-                        let offset_val = match c {
-                            IrConst::I64(n) => *n,
-                            IrConst::I32(n) => *n as i64,
-                            IrConst::I16(n) => *n as i64,
-                            IrConst::I8(n) => *n as i64,
-                            _ => continue,
+                        let offset_val = match c.to_i64() {
+                            Some(v) => v,
+                            None => continue,
                         };
                         let sym = if offset_val == 0 {
                             base_name.clone()
@@ -498,14 +492,7 @@ pub fn generate_module(cg: &mut dyn ArchCodegen, module: &IrModule, source_mgr: 
     // visibility. This ensures the assembler marks undefined symbols correctly for PIC.
     for func in &module.functions {
         if func.is_declaration {
-            if let Some(ref vis) = func.visibility {
-                match vis.as_str() {
-                    "hidden" => cg.state().emit_fmt(format_args!(".hidden {}", func.name)),
-                    "protected" => cg.state().emit_fmt(format_args!(".protected {}", func.name)),
-                    "internal" => cg.state().emit_fmt(format_args!(".internal {}", func.name)),
-                    _ => {}
-                }
-            }
+            cg.state().emit_visibility(&func.name, &func.visibility);
         }
     }
 
@@ -549,14 +536,7 @@ pub fn generate_module(cg: &mut dyn ArchCodegen, module: &IrModule, source_mgr: 
         if *is_weak {
             cg.state().emit_fmt(format_args!(".weak {}", name));
         }
-        if let Some(ref vis) = visibility {
-            match vis.as_str() {
-                "hidden" => cg.state().emit_fmt(format_args!(".hidden {}", name)),
-                "protected" => cg.state().emit_fmt(format_args!(".protected {}", name)),
-                "internal" => cg.state().emit_fmt(format_args!(".internal {}", name)),
-                _ => {}
-            }
-        }
+        cg.state().emit_visibility(name, visibility);
     }
 
     // Emit .init_array for constructor functions
@@ -587,22 +567,8 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction, source_mgr: Op
     cg.state().reset_for_function();
 
     let type_dir = cg.function_type_directive();
-    if !func.is_static {
-        if func.is_weak {
-            cg.state().emit_fmt(format_args!(".weak {}", func.name));
-        } else {
-            cg.state().emit_fmt(format_args!(".globl {}", func.name));
-        }
-    }
-    // Emit visibility directive from __attribute__((visibility("..."))) on function defs
-    if let Some(ref vis) = func.visibility {
-        match vis.as_str() {
-            "hidden" => cg.state().emit_fmt(format_args!(".hidden {}", func.name)),
-            "protected" => cg.state().emit_fmt(format_args!(".protected {}", func.name)),
-            "internal" => cg.state().emit_fmt(format_args!(".internal {}", func.name)),
-            _ => {} // "default" or unknown: no directive needed
-        }
-    }
+    cg.state().emit_linkage(&func.name, func.is_static, func.is_weak);
+    cg.state().emit_visibility(&func.name, &func.visibility);
 
     // Emit patchable function entry NOP padding (-fpatchable-function-entry=N,M).
     // This is used by the Linux kernel for ftrace and static call patching.

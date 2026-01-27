@@ -584,6 +584,16 @@ fn effective_align(g: &IrGlobal) -> usize {
     }
 }
 
+/// Emit a zero-initialized global variable (used in .bss, .tbss, and custom section zero-init).
+fn emit_zero_global(out: &mut AsmOutput, g: &IrGlobal, obj_type: &str, ptr_dir: PtrDirective) {
+    emit_symbol_directives(out, g);
+    out.emit_fmt(format_args!(".align {}", ptr_dir.align_arg(effective_align(g))));
+    out.emit_fmt(format_args!(".type {}, {}", g.name, obj_type));
+    out.emit_fmt(format_args!(".size {}, {}", g.name, g.size));
+    out.emit_fmt(format_args!("{}:", g.name));
+    out.emit_fmt(format_args!("    .zero {}", g.size));
+}
+
 /// Emit global variable definitions split into .data and .bss sections.
 fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective) {
     let mut has_data = false;
@@ -621,19 +631,7 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
             sect, flags, section_type
         ));
         if is_zero_init || g.size == 0 {
-            if !g.is_static {
-                if g.is_weak {
-                    out.emit_fmt(format_args!(".weak {}", g.name));
-                } else {
-                    out.emit_fmt(format_args!(".globl {}", g.name));
-                }
-            }
-            emit_visibility_directive(out, &g.name, &g.visibility);
-            out.emit_fmt(format_args!(".align {}", ptr_dir.align_arg(effective_align(g))));
-            out.emit_fmt(format_args!(".type {}, @object", g.name));
-            out.emit_fmt(format_args!(".size {}, {}", g.name, g.size));
-            out.emit_fmt(format_args!("{}:", g.name));
-            out.emit_fmt(format_args!("    .zero {}", g.size));
+            emit_zero_global(out, g, "@object", ptr_dir);
         } else {
             emit_global_def(out, g, ptr_dir);
         }
@@ -746,19 +744,7 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
             out.emit(".section .tbss,\"awT\",@nobits");
             has_tbss = true;
         }
-        if !g.is_static {
-            if g.is_weak {
-                out.emit_fmt(format_args!(".weak {}", g.name));
-            } else {
-                out.emit_fmt(format_args!(".globl {}", g.name));
-            }
-        }
-        emit_visibility_directive(out, &g.name, &g.visibility);
-        out.emit_fmt(format_args!(".align {}", ptr_dir.align_arg(effective_align(g))));
-        out.emit_fmt(format_args!(".type {}, @tls_object", g.name));
-        out.emit_fmt(format_args!(".size {}, {}", g.name, g.size));
-        out.emit_fmt(format_args!("{}:", g.name));
-        out.emit_fmt(format_args!("    .zero {}", g.size));
+        emit_zero_global(out, g, "@tls_object", ptr_dir);
     }
     if has_tbss {
         out.emit("");
@@ -789,19 +775,7 @@ fn emit_globals(out: &mut AsmOutput, globals: &[IrGlobal], ptr_dir: PtrDirective
             out.emit(".section .bss");
             has_bss = true;
         }
-        if !g.is_static {
-            if g.is_weak {
-                out.emit_fmt(format_args!(".weak {}", g.name));
-            } else {
-                out.emit_fmt(format_args!(".globl {}", g.name));
-            }
-        }
-        emit_visibility_directive(out, &g.name, &g.visibility);
-        out.emit_fmt(format_args!(".align {}", ptr_dir.align_arg(effective_align(g))));
-        out.emit_fmt(format_args!(".type {}, @object", g.name));
-        out.emit_fmt(format_args!(".size {}, {}", g.name, g.size));
-        out.emit_fmt(format_args!("{}:", g.name));
-        out.emit_fmt(format_args!("    .zero {}", g.size));
+        emit_zero_global(out, g, "@object", ptr_dir);
     }
     if has_bss {
         out.emit("");
@@ -820,49 +794,62 @@ fn emit_visibility_directive(out: &mut AsmOutput, name: &str, visibility: &Optio
     }
 }
 
-/// Emit a single global variable definition.
-fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
-    if !g.is_static {
-        if g.is_weak {
-            out.emit_fmt(format_args!(".weak {}", g.name));
+/// Emit linkage directives (.globl or .weak) for a non-static symbol.
+fn emit_linkage_directive(out: &mut AsmOutput, name: &str, is_static: bool, is_weak: bool) {
+    if !is_static {
+        if is_weak {
+            out.emit_fmt(format_args!(".weak {}", name));
         } else {
-            out.emit_fmt(format_args!(".globl {}", g.name));
+            out.emit_fmt(format_args!(".globl {}", name));
         }
     }
+}
+
+/// Emit both linkage (.globl/.weak) and visibility (.hidden/.protected/.internal) directives.
+fn emit_symbol_directives(out: &mut AsmOutput, g: &IrGlobal) {
+    emit_linkage_directive(out, &g.name, g.is_static, g.is_weak);
     emit_visibility_directive(out, &g.name, &g.visibility);
+}
+
+/// Emit a single global variable definition.
+fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
+    emit_symbol_directives(out, g);
     out.emit_fmt(format_args!(".align {}", ptr_dir.align_arg(effective_align(g))));
     let obj_type = if g.is_thread_local { "@tls_object" } else { "@object" };
     out.emit_fmt(format_args!(".type {}, {}", g.name, obj_type));
     out.emit_fmt(format_args!(".size {}, {}", g.name, g.size));
     out.emit_fmt(format_args!("{}:", g.name));
 
-    match &g.init {
+    emit_init_data(out, &g.init, g.ty, g.size, ptr_dir);
+}
+
+/// Emit the data for a single GlobalInit element.
+///
+/// Handles all init variants: scalars, arrays, strings, global addresses, label diffs,
+/// and compound initializers (which recurse into this function for each element).
+/// `fallback_ty` is the declared element type of the enclosing global/array, used to
+/// widen narrow constants (e.g., IrConst::I32(0) in a pointer array emits .quad 0).
+/// `total_size` is the declared size of the enclosing global for padding calculations.
+fn emit_init_data(out: &mut AsmOutput, init: &GlobalInit, fallback_ty: IrType, total_size: usize, ptr_dir: PtrDirective) {
+    match init {
         GlobalInit::Zero => {
-            out.emit_fmt(format_args!("    .zero {}", g.size));
+            out.emit_fmt(format_args!("    .zero {}", total_size));
         }
         GlobalInit::Scalar(c) => {
-            emit_const_data(out, c, g.ty, ptr_dir);
+            emit_const_data(out, c, fallback_ty, ptr_dir);
         }
         GlobalInit::Array(values) => {
             for val in values {
                 // Determine the emission type for each array element.
-                // For byte-serialized struct data (g.ty == I8), use each constant's
+                // For byte-serialized struct data (fallback_ty == I8), use each constant's
                 // own type so that I8/I16/I32/F32/F64 fields are correctly sized.
-                // For typed arrays (e.g., pointer arrays where g.ty == Ptr), use
+                // For typed arrays (e.g., pointer arrays where fallback_ty == Ptr), use
                 // the global's declared element type when it's wider than the
                 // constant's natural type. This ensures that e.g. IrConst::I32(0)
                 // in a pointer array emits .quad 0 (8 bytes) not .long 0 (4 bytes).
-                let const_ty = match val {
-                    IrConst::I8(_) => IrType::I8,
-                    IrConst::I16(_) => IrType::I16,
-                    IrConst::I32(_) => IrType::I32,
-                    IrConst::F32(_) => IrType::F32,
-                    IrConst::F64(_) => IrType::F64,
-                    IrConst::LongDouble(..) => IrType::F128,
-                    _ => g.ty,
-                };
-                let elem_ty = if g.ty.size() > const_ty.size() {
-                    g.ty
+                let const_ty = const_natural_type(val, fallback_ty);
+                let elem_ty = if fallback_ty.size() > const_ty.size() {
+                    fallback_ty
                 } else {
                     const_ty
                 };
@@ -872,32 +859,22 @@ fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
         GlobalInit::String(s) => {
             out.emit_fmt(format_args!("    .asciz \"{}\"", escape_string(s)));
             let string_bytes = s.len() + 1; // string + null terminator
-            if g.size > string_bytes {
-                out.emit_fmt(format_args!("    .zero {}", g.size - string_bytes));
+            if total_size > string_bytes {
+                out.emit_fmt(format_args!("    .zero {}", total_size - string_bytes));
             }
         }
         GlobalInit::WideString(chars) => {
-            // Emit wide string as array of .long values (4 bytes each)
-            for &ch in chars {
-                out.emit_fmt(format_args!("    .long {}", ch));
-            }
-            // Null terminator
-            out.emit("    .long 0");
+            emit_wide_string(out, chars);
             let wide_bytes = (chars.len() + 1) * 4;
-            if g.size > wide_bytes {
-                out.emit_fmt(format_args!("    .zero {}", g.size - wide_bytes));
+            if total_size > wide_bytes {
+                out.emit_fmt(format_args!("    .zero {}", total_size - wide_bytes));
             }
         }
         GlobalInit::Char16String(chars) => {
-            // Emit char16_t string as array of .short values (2 bytes each)
-            for &ch in chars {
-                out.emit_fmt(format_args!("    .short {}", ch));
-            }
-            // Null terminator
-            out.emit("    .short 0");
+            emit_char16_string(out, chars);
             let char16_bytes = (chars.len() + 1) * 2;
-            if g.size > char16_bytes {
-                out.emit_fmt(format_args!("    .zero {}", g.size - char16_bytes));
+            if total_size > char16_bytes {
+                out.emit_fmt(format_args!("    .zero {}", total_size - char16_bytes));
             }
         }
         GlobalInit::GlobalAddr(label) => {
@@ -915,56 +892,70 @@ fn emit_global_def(out: &mut AsmOutput, g: &IrGlobal, ptr_dir: PtrDirective) {
         }
         GlobalInit::Compound(elements) => {
             for elem in elements {
-                match elem {
-                    GlobalInit::Scalar(c) => {
-                        // In Compound initializers, each element may have a different
-                        // type (e.g., struct with int and pointer fields). Use the
-                        // constant's own type, falling back to g.ty for I64 and wider.
-                        let elem_ty = match c {
-                            IrConst::I8(_) => IrType::I8,
-                            IrConst::I16(_) => IrType::I16,
-                            IrConst::I32(_) => IrType::I32,
-                            _ => g.ty,
-                        };
-                        emit_const_data(out, c, elem_ty, ptr_dir);
-                    }
-                    GlobalInit::GlobalAddr(label) => {
-                        out.emit_fmt(format_args!("    {} {}", ptr_dir.as_str(), label));
-                    }
-                    GlobalInit::GlobalAddrOffset(label, offset) => {
-                        if *offset >= 0 {
-                            out.emit_fmt(format_args!("    {} {}+{}", ptr_dir.as_str(), label, offset));
-                        } else {
-                            out.emit_fmt(format_args!("    {} {}{}", ptr_dir.as_str(), label, offset));
-                        }
-                    }
-                    GlobalInit::GlobalLabelDiff(lab1, lab2, byte_size) => {
-                        emit_label_diff(out, lab1, lab2, *byte_size);
-                    }
-                    GlobalInit::WideString(chars) => {
-                        for &ch in chars {
-                            out.emit_fmt(format_args!("    .long {}", ch));
-                        }
-                        out.emit("    .long 0"); // null terminator
-                    }
-                    GlobalInit::Char16String(chars) => {
-                        for &ch in chars {
-                            out.emit_fmt(format_args!("    .short {}", ch));
-                        }
-                        out.emit("    .short 0"); // null terminator
-                    }
-                    GlobalInit::Zero => {
-                        // Emit a zero-initialized element of the appropriate size
-                        out.emit_fmt(format_args!("    {} 0", ptr_dir.as_str()));
-                    }
-                    _ => {
-                        // Nested compound or other - emit zero as fallback
-                        out.emit_fmt(format_args!("    {} 0", ptr_dir.as_str()));
-                    }
-                }
+                // Compound elements are self-typed: each element knows its own size.
+                // For Scalar elements, use the constant's natural type (falling back
+                // to the enclosing global's type for I64/wider constants).
+                emit_compound_element(out, elem, fallback_ty, ptr_dir);
             }
         }
     }
+}
+
+/// Emit a single element within a Compound initializer.
+///
+/// Most variants delegate to the shared emit_init_data. Scalar elements use the
+/// constant's natural type rather than the enclosing global's type, since compound
+/// elements may have heterogeneous types (e.g., struct with int and pointer fields).
+fn emit_compound_element(out: &mut AsmOutput, elem: &GlobalInit, fallback_ty: IrType, ptr_dir: PtrDirective) {
+    match elem {
+        GlobalInit::Scalar(c) => {
+            // In compound initializers, each element may have a different type.
+            // Use the constant's own type, falling back to fallback_ty for I64 and wider.
+            let elem_ty = const_natural_type(c, fallback_ty);
+            emit_const_data(out, c, elem_ty, ptr_dir);
+        }
+        GlobalInit::Zero => {
+            // Zero element in compound: emit a single pointer-sized zero
+            out.emit_fmt(format_args!("    {} 0", ptr_dir.as_str()));
+        }
+        GlobalInit::Compound(_) => {
+            // Nested compound: emit pointer-sized zero as fallback
+            out.emit_fmt(format_args!("    {} 0", ptr_dir.as_str()));
+        }
+        // All other variants (GlobalAddr, GlobalAddrOffset, WideString, etc.)
+        // delegate to the shared handler with zero total_size (no padding).
+        other => emit_init_data(out, other, fallback_ty, 0, ptr_dir),
+    }
+}
+
+/// Get the natural IR type of a constant, falling back to `default_ty` for
+/// types that don't have a narrower representation (I64, I128, etc.).
+fn const_natural_type(c: &IrConst, default_ty: IrType) -> IrType {
+    match c {
+        IrConst::I8(_) => IrType::I8,
+        IrConst::I16(_) => IrType::I16,
+        IrConst::I32(_) => IrType::I32,
+        IrConst::F32(_) => IrType::F32,
+        IrConst::F64(_) => IrType::F64,
+        IrConst::LongDouble(..) => IrType::F128,
+        _ => default_ty,
+    }
+}
+
+/// Emit a wide string (wchar_t) as .long directives with null terminator.
+fn emit_wide_string(out: &mut AsmOutput, chars: &[u32]) {
+    for &ch in chars {
+        out.emit_fmt(format_args!("    .long {}", ch));
+    }
+    out.emit("    .long 0"); // null terminator
+}
+
+/// Emit a char16_t string as .short directives with null terminator.
+fn emit_char16_string(out: &mut AsmOutput, chars: &[u16]) {
+    for &ch in chars {
+        out.emit_fmt(format_args!("    .short {}", ch));
+    }
+    out.emit("    .short 0"); // null terminator
 }
 
 /// Emit a label difference as a sized assembly directive (`.long lab1-lab2`, etc.).

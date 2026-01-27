@@ -147,47 +147,30 @@ pub fn classify_params_full(func: &IrFunction, config: &CallAbiConfig) -> ParamC
             let eb_classes = &param.struct_eightbyte_classes;
 
             if size <= 16 && config.use_sysv_struct_classification && !eb_classes.is_empty() {
-                use crate::common::types::EightbyteClass;
-                let n_eightbytes = eb_classes.len();
-                let eb0_is_sse = eb_classes.get(0) == Some(&EightbyteClass::Sse);
-                let eb1_is_sse = if n_eightbytes > 1 { eb_classes.get(1) == Some(&EightbyteClass::Sse) } else { false };
-                let eb0_is_int = !eb0_is_sse;
-                let eb1_is_int = if n_eightbytes > 1 { !eb1_is_sse } else { false };
-
-                let gp_needed = (if eb0_is_int { 1 } else { 0 }) + (if n_eightbytes > 1 && eb1_is_int { 1 } else { 0 });
-                let fp_needed = (if eb0_is_sse { 1 } else { 0 }) + (if n_eightbytes > 1 && eb1_is_sse { 1 } else { 0 });
-
-                if int_reg_idx + gp_needed <= config.max_int_regs && float_reg_idx + fp_needed <= config.max_float_regs {
-                    if n_eightbytes == 1 {
-                        if eb0_is_sse {
-                            result.push(ParamClass::StructSseReg { lo_fp_idx: float_reg_idx, hi_fp_idx: None, size });
-                            float_reg_idx += 1;
-                        } else {
-                            result.push(ParamClass::StructByValReg { base_reg_idx: int_reg_idx, size });
-                            int_reg_idx += 1;
-                        }
-                    } else {
-                        if eb0_is_sse && eb1_is_sse {
-                            result.push(ParamClass::StructSseReg { lo_fp_idx: float_reg_idx, hi_fp_idx: Some(float_reg_idx + 1), size });
-                            float_reg_idx += 2;
-                        } else if eb0_is_int && eb1_is_sse {
-                            result.push(ParamClass::StructMixedIntSseReg { int_reg_idx, fp_reg_idx: float_reg_idx, size });
-                            int_reg_idx += 1;
-                            float_reg_idx += 1;
-                        } else if eb0_is_sse && eb1_is_int {
-                            result.push(ParamClass::StructMixedSseIntReg { fp_reg_idx: float_reg_idx, int_reg_idx, size });
-                            float_reg_idx += 1;
-                            int_reg_idx += 1;
-                        } else {
-                            result.push(ParamClass::StructByValReg { base_reg_idx: int_reg_idx, size });
-                            int_reg_idx += 2;
-                        }
+                use super::call_abi::{classify_sysv_struct, SysvStructRegClass};
+                let (cls, gp_used, fp_used) = classify_sysv_struct(eb_classes, int_reg_idx, float_reg_idx, config);
+                match cls {
+                    SysvStructRegClass::AllSse { fp_count } => {
+                        let hi = if fp_count > 1 { Some(float_reg_idx + 1) } else { None };
+                        result.push(ParamClass::StructSseReg { lo_fp_idx: float_reg_idx, hi_fp_idx: hi, size });
                     }
-                } else {
-                    result.push(ParamClass::StructStack { offset: stack_offset, size });
-                    stack_offset += ((size + 7) & !7) as i64;
-                    int_reg_idx = config.max_int_regs;
+                    SysvStructRegClass::AllInt { .. } => {
+                        result.push(ParamClass::StructByValReg { base_reg_idx: int_reg_idx, size });
+                    }
+                    SysvStructRegClass::IntSse => {
+                        result.push(ParamClass::StructMixedIntSseReg { int_reg_idx, fp_reg_idx: float_reg_idx, size });
+                    }
+                    SysvStructRegClass::SseInt => {
+                        result.push(ParamClass::StructMixedSseIntReg { fp_reg_idx: float_reg_idx, int_reg_idx, size });
+                    }
+                    SysvStructRegClass::Stack => {
+                        result.push(ParamClass::StructStack { offset: stack_offset, size });
+                        stack_offset += ((size + 7) & !7) as i64;
+                        int_reg_idx = config.max_int_regs;
+                    }
                 }
+                int_reg_idx += gp_used;
+                float_reg_idx += fp_used;
             } else if size <= 16 {
                 let regs_needed = if size <= 8 { 1 } else { 2 };
                 if int_reg_idx + regs_needed <= config.max_int_regs {

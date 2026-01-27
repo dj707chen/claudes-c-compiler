@@ -296,43 +296,9 @@ pub trait ArchCodegen {
 
     /// Emit a unary operation.
     /// Default dispatches i128 → F128 neg → float → int to arch-specific primitives.
+    /// Backends that override this should call `emit_unaryop_default` for unhandled cases.
     fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
-        if is_i128_type(ty) {
-            self.emit_load_acc_pair(src);
-            match op {
-                IrUnaryOp::Neg => self.emit_i128_neg(),
-                IrUnaryOp::Not => self.emit_i128_not(),
-                _ => {}
-            }
-            self.emit_store_acc_pair(dest);
-            return;
-        }
-        // F128 negation needs special handling: the f64 approximation in the
-        // accumulator doesn't capture the full 128-bit precision. Dispatch to
-        // emit_f128_neg which handles loading, negation, full-precision slot
-        // storage, and store_result internally.
-        if ty == IrType::F128 && op == IrUnaryOp::Neg {
-            self.emit_f128_neg(dest, src);
-            return;
-        }
-        self.emit_load_operand(src);
-        if ty.is_float() {
-            match op {
-                IrUnaryOp::Neg => self.emit_float_neg(ty),
-                IrUnaryOp::Not => self.emit_int_not(ty),
-                _ => {}
-            }
-        } else {
-            match op {
-                IrUnaryOp::Neg => self.emit_int_neg(ty),
-                IrUnaryOp::Not => self.emit_int_not(ty),
-                IrUnaryOp::Clz => self.emit_int_clz(ty),
-                IrUnaryOp::Ctz => self.emit_int_ctz(ty),
-                IrUnaryOp::Bswap => self.emit_int_bswap(ty),
-                IrUnaryOp::Popcount => self.emit_int_popcount(ty),
-            }
-        }
-        self.emit_store_result(dest);
+        emit_unaryop_default(self, dest, op, src, ty);
     }
 
     /// Emit a comparison operation.
@@ -601,37 +567,9 @@ pub trait ArchCodegen {
 
     /// Emit a type cast. Handles i128 widening/narrowing/copy using accumulator
     /// pair primitives, and delegates non-i128 casts to emit_cast_instrs.
+    /// Backends that override this should call `emit_cast_default` for unhandled cases.
     fn emit_cast(&mut self, dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType) {
-        if is_i128_type(to_ty) && !is_i128_type(from_ty) {
-            self.emit_load_operand(src);
-            if from_ty.size() < 8 {
-                let widen_to = if from_ty.is_signed() { IrType::I64 } else { IrType::U64 };
-                self.emit_cast_instrs(from_ty, widen_to);
-            }
-            if from_ty.is_signed() {
-                self.emit_sign_extend_acc_high();
-            } else {
-                self.emit_zero_acc_high();
-            }
-            self.emit_store_acc_pair(dest);
-            return;
-        }
-        if is_i128_type(from_ty) && !is_i128_type(to_ty) {
-            self.emit_load_acc_pair(src);
-            if to_ty.size() < 8 {
-                self.emit_cast_instrs(IrType::I64, to_ty);
-            }
-            self.emit_store_result(dest);
-            return;
-        }
-        if is_i128_type(from_ty) && is_i128_type(to_ty) {
-            self.emit_load_acc_pair(src);
-            self.emit_store_acc_pair(dest);
-            return;
-        }
-        self.emit_load_operand(src);
-        self.emit_cast_instrs(from_ty, to_ty);
-        self.emit_store_result(dest);
+        emit_cast_default(self, dest, src, from_ty, to_ty);
     }
 
     /// Emit a memory copy.
@@ -702,27 +640,9 @@ pub trait ArchCodegen {
     }
 
     /// Emit a return terminator.
+    /// Backends that override this should call `emit_return_default` for unhandled cases.
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {
-        if let Some(val) = val {
-            let ret_ty = self.current_return_type();
-            if is_i128_type(ret_ty) {
-                self.emit_load_acc_pair(val);
-                self.emit_return_i128_to_regs();
-                self.emit_epilogue_and_ret(frame_size);
-                return;
-            }
-            self.emit_load_operand(val);
-            if ret_ty.is_long_double() {
-                self.emit_return_f128_to_reg();
-            } else if ret_ty == IrType::F32 {
-                self.emit_return_f32_to_reg();
-            } else if ret_ty.is_float() {
-                self.emit_return_f64_to_reg();
-            } else {
-                self.emit_return_int_to_reg();
-            }
-        }
-        self.emit_epilogue_and_ret(frame_size);
+        emit_return_default(self, val, frame_size);
     }
 
     // ---- Architecture-specific instruction primitives ----

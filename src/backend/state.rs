@@ -199,6 +199,31 @@ impl CodegenState {
         self.out.emit_fmt(args);
     }
 
+    /// Emit a visibility directive (.hidden, .protected, .internal) if the symbol
+    /// has non-default visibility. No-op if `visibility` is None or "default".
+    pub fn emit_visibility(&mut self, name: &str, visibility: &Option<String>) {
+        if let Some(ref vis) = visibility {
+            match vis.as_str() {
+                "hidden" => self.emit_fmt(format_args!(".hidden {}", name)),
+                "protected" => self.emit_fmt(format_args!(".protected {}", name)),
+                "internal" => self.emit_fmt(format_args!(".internal {}", name)),
+                _ => {} // "default" or unknown: no directive needed
+            }
+        }
+    }
+
+    /// Emit linkage directives (.globl or .weak) for a non-static symbol.
+    /// No-op if `is_static` is true.
+    pub fn emit_linkage(&mut self, name: &str, is_static: bool, is_weak: bool) {
+        if !is_static {
+            if is_weak {
+                self.emit_fmt(format_args!(".weak {}", name));
+            } else {
+                self.emit_fmt(format_args!(".globl {}", name));
+            }
+        }
+    }
+
     pub fn reset_for_function(&mut self) {
         self.stack_offset = 0;
         self.value_locations.clear();
