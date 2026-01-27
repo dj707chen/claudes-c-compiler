@@ -38,6 +38,10 @@ fn build_label_to_idx(func: &IrFunction) -> FxHashMap<BlockId, usize> {
 
 /// Simplify the CFG of a single function.
 /// Iterates until no more simplifications are possible (fixpoint).
+///
+/// Builds the `label_to_idx` map once per fixpoint iteration and shares it
+/// across sub-passes that need block lookups, avoiding redundant HashMap
+/// construction (previously rebuilt 3-4 times per iteration).
 pub(crate) fn simplify_cfg(func: &mut IrFunction) -> usize {
     if func.blocks.len() <= 1 {
         return 0;
@@ -46,10 +50,15 @@ pub(crate) fn simplify_cfg(func: &mut IrFunction) -> usize {
     let mut total = 0;
     loop {
         let mut changed = 0;
-        changed += fold_constant_cond_branches(func);
-        changed += fold_constant_switches(func);
+        // Build the label-to-index map once per fixpoint iteration.
+        // Sub-passes that modify block structure (remove_dead_blocks) will
+        // invalidate this map, but they run last in the iteration so the
+        // map is valid for all lookups within the iteration.
+        let label_to_idx = build_label_to_idx(func);
+        changed += fold_constant_cond_branches_with_map(func, &label_to_idx);
+        changed += fold_constant_switches_with_map(func, &label_to_idx);
         changed += simplify_redundant_cond_branches(func);
-        changed += thread_jump_chains(func);
+        changed += thread_jump_chains_with_map(func, &label_to_idx);
         changed += remove_dead_blocks(func);
         changed += simplify_trivial_phis(func);
         if changed == 0 {
@@ -88,7 +97,7 @@ fn simplify_redundant_cond_branches(func: &mut IrFunction) -> usize {
 /// the phi entries referencing the current block must be removed since the edge
 /// no longer exists. Without this cleanup, stale phi entries can cause
 /// miscompilation when the not-taken block is still reachable from other paths.
-fn fold_constant_cond_branches(func: &mut IrFunction) -> usize {
+fn fold_constant_cond_branches_with_map(func: &mut IrFunction, label_to_idx: &FxHashMap<BlockId, usize>) -> usize {
     // First pass: collect the folding decisions.
     // Each entry: (block_index, taken_target, not_taken_target, block_label)
     let mut folds: Vec<(usize, BlockId, BlockId, BlockId)> = Vec::new();
@@ -117,9 +126,6 @@ fn fold_constant_cond_branches(func: &mut IrFunction) -> usize {
     for &(idx, taken, _, _) in &folds {
         func.blocks[idx].terminator = Terminator::Branch(taken);
     }
-
-    // Build label->index map for O(1) block lookups during phi cleanup
-    let label_to_idx = build_label_to_idx(func);
 
     // Clean up phi nodes in not-taken target blocks.
     // Remove phi entries that reference the folding block, since that edge
@@ -159,7 +165,7 @@ fn fold_constant_cond_branches(func: &mut IrFunction) -> usize {
 /// When folding, we clean up phi nodes in all not-taken target blocks by
 /// removing entries referencing the current block, since those edges no
 /// longer exist.
-fn fold_constant_switches(func: &mut IrFunction) -> usize {
+fn fold_constant_switches_with_map(func: &mut IrFunction, label_to_idx: &FxHashMap<BlockId, usize>) -> usize {
     // First pass: collect the folding decisions.
     // Each entry: (block_index, taken_target, not_taken_targets, block_label)
     let mut folds: Vec<(usize, BlockId, Vec<BlockId>, BlockId)> = Vec::new();
@@ -201,9 +207,6 @@ fn fold_constant_switches(func: &mut IrFunction) -> usize {
     for &(idx, taken, _, _) in &folds {
         func.blocks[idx].terminator = Terminator::Branch(taken);
     }
-
-    // Build label->index map for O(1) block lookups during phi cleanup
-    let label_to_idx = build_label_to_idx(func);
 
     // Clean up phi nodes in not-taken target blocks.
     // Remove phi entries that reference the folding block, since those edges
@@ -364,7 +367,7 @@ fn consts_equal_for_phi(a: &IrConst, b: &IrConst) -> bool {
 /// phi nodes that carry different values from the two paths, we must NOT
 /// thread. Otherwise the merge block's phi loses the ability to distinguish
 /// the two control flow paths, causing miscompilation.
-fn thread_jump_chains(func: &mut IrFunction) -> usize {
+fn thread_jump_chains_with_map(func: &mut IrFunction, label_to_idx: &FxHashMap<BlockId, usize>) -> usize {
     // Build a map of block_id -> forwarding target for empty blocks.
     // An "empty forwarding block" has no instructions (including no phis)
     // and terminates with Branch(target).
@@ -416,9 +419,6 @@ fn thread_jump_chains(func: &mut IrFunction) -> usize {
     if resolved.is_empty() {
         return 0;
     }
-
-    // Build label->index map for O(1) block lookups during phi updates
-    let label_to_idx = build_label_to_idx(func);
 
     // Collect the redirections we need to make.
     // Each edge change: (old_intermediate, new_target, phi_lookup_block)

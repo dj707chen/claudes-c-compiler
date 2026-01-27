@@ -52,12 +52,16 @@ pub(crate) fn propagate_copies(func: &mut IrFunction) -> usize {
 /// Build a flat lookup table from Copy destinations to their ultimate sources.
 /// Follows chains: if %a = Copy %b and %b = Copy %c, resolves %a -> %c.
 /// Returns (copy_map, has_any_entries) to avoid scanning the map for emptiness.
+///
+/// Uses path compression: when resolving a chain, all intermediate entries are
+/// updated to point directly to the final resolved value. This makes
+/// resolution amortized O(1) per entry instead of O(chain_length).
+/// Also avoids allocating a separate `resolved` vector by resolving in-place.
 fn build_copy_map(func: &IrFunction, max_id: usize) -> (Vec<Option<Operand>>, bool) {
     // First pass: collect direct copy relationships into flat table.
     // If a Value has multiple Copy definitions (e.g. from single-phi elimination),
-    // we skip it to avoid propagating the wrong source.
+    // we mark it as multi-def using a sentinel (self-referencing copy) and skip it.
     let mut direct: Vec<Option<Operand>> = vec![None; max_id + 1];
-    let mut multi_def: Vec<bool> = vec![false; max_id + 1];
     let mut has_copies = false;
 
     for block in &func.blocks {
@@ -66,7 +70,8 @@ fn build_copy_map(func: &IrFunction, max_id: usize) -> (Vec<Option<Operand>>, bo
                 let id = dest.0 as usize;
                 if id < direct.len() {
                     if direct[id].is_some() {
-                        multi_def[id] = true;
+                        // Multi-def: mark with self-referencing sentinel
+                        direct[id] = Some(Operand::Value(Value(id as u32)));
                     } else {
                         direct[id] = Some(*src);
                         has_copies = true;
@@ -76,58 +81,102 @@ fn build_copy_map(func: &IrFunction, max_id: usize) -> (Vec<Option<Operand>>, bo
         }
     }
 
-    // Clear multi-def entries - not safe to propagate
-    for i in 0..=max_id {
-        if multi_def[i] {
-            direct[i] = None;
-        }
-    }
-
     if !has_copies {
-        return (direct, false); // all None
+        return (direct, false);
     }
 
-    // Second pass: resolve chains with cycle detection
-    let mut resolved: Vec<Option<Operand>> = vec![None; max_id + 1];
+    // Second pass: resolve chains in-place with path compression.
+    // We resolve each entry to its ultimate source and memoize the result
+    // back into `direct`, so subsequent lookups of intermediate entries
+    // are O(1). Uses iterative chain walking to avoid stack overflow.
     let mut any_resolved = false;
     for i in 0..=max_id {
         if direct[i].is_some() {
-            resolved[i] = Some(resolve_chain(i as u32, &direct));
-            any_resolved = true;
+            resolve_chain_with_compression(&mut direct, i as u32);
+            // After compression, check if this is a valid (non-self-ref) entry
+            if let Some(Operand::Value(v)) = direct[i] {
+                if v.0 == i as u32 {
+                    // Self-referencing (multi-def sentinel or cycle) - clear it
+                    direct[i] = None;
+                    continue;
+                }
+            }
+            if direct[i].is_some() {
+                any_resolved = true;
+            }
         }
     }
 
-    (resolved, any_resolved)
+    (direct, any_resolved)
 }
 
-/// Follow a chain of copies to find the ultimate source.
-/// Handles chains like: %a = Copy %b, %b = Copy %c => %a resolves to %c's source.
-/// Limits depth to prevent infinite loops from cycles.
-fn resolve_chain(start: u32, copies: &[Option<Operand>]) -> Operand {
+/// Resolve a copy chain starting at `start` with path compression.
+/// Walks the chain to find the ultimate source, then updates all intermediate
+/// entries to point directly to it (path compression / union-find style).
+fn resolve_chain_with_compression(copies: &mut [Option<Operand>], start: u32) {
+    // First, find the ultimate source by walking the chain.
     let mut current = start;
     let mut depth = 0;
     const MAX_DEPTH: usize = 64;
 
-    loop {
+    let ultimate = loop {
         if depth >= MAX_DEPTH {
-            return Operand::Value(Value(current));
+            break Operand::Value(Value(current));
         }
 
         let idx = current as usize;
         match if idx < copies.len() { copies[idx] } else { None } {
             Some(Operand::Value(v)) => {
                 if v.0 == current {
-                    return Operand::Value(Value(current));
+                    // Self-reference (multi-def or cycle)
+                    break Operand::Value(Value(current));
                 }
                 current = v.0;
                 depth += 1;
             }
             Some(Operand::Const(c)) => {
-                return Operand::Const(c);
+                break Operand::Const(c);
             }
             None => {
-                return Operand::Value(Value(current));
+                break Operand::Value(Value(current));
             }
+        }
+    };
+
+    // Path compression: walk the chain from start and update every
+    // intermediate entry to point directly to `ultimate`.
+    // For short chains (depth <= 1), we only need to update start itself.
+    let start_idx = start as usize;
+    if depth <= 1 {
+        if start_idx < copies.len() && copies[start_idx].is_some() {
+            copies[start_idx] = Some(ultimate);
+        }
+        return;
+    }
+
+    // For longer chains, walk from start and compress each hop.
+    // We track the ultimate value ID (if it's a Value) to know when to stop.
+    let ultimate_id = match ultimate {
+        Operand::Value(v) => Some(v.0),
+        Operand::Const(_) => None,
+    };
+    let mut current = start;
+    for _ in 0..depth {
+        let idx = current as usize;
+        if idx >= copies.len() {
+            break;
+        }
+        match copies[idx] {
+            Some(Operand::Value(v)) if v.0 != current => {
+                let next = v.0;
+                copies[idx] = Some(ultimate);
+                // Stop if next is the ultimate target (nothing more to compress)
+                if ultimate_id == Some(next) {
+                    break;
+                }
+                current = next;
+            }
+            _ => break,
         }
     }
 }
