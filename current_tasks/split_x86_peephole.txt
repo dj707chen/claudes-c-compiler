@@ -1,0 +1,6 @@
+Task: Split x86 peephole.rs into focused submodules
+Status: in_progress
+Started: 2026-01-27
+Description: Split the monolithic peephole.rs (2826 lines) into multiple
+focused submodules for better organization and maintainability.
+Files: src/backend/x86/codegen/peephole.rs, src/backend/x86/codegen/peephole/
