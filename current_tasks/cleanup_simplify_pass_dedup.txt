@@ -1,0 +1,10 @@
+Clean up passes/simplify.rs: reduce duplication and code bloat
+
+- Extract helper functions to eliminate copy-paste patterns
+- Table-driven intrinsic lowering instead of repeated match arms
+- Consolidate fold_const_cast dual match blocks
+- Add test helpers to reduce 1000 lines of test boilerplate
+- Normalize commutative patterns (mul power-of-2, cmp with zero)
+- Target: reduce from ~2039 lines to ~1400-1500 lines
+
+Status: in progress
