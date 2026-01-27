@@ -4,7 +4,7 @@
 //! Values with the longest live ranges and most uses get priority for register
 //! assignment. Values that don't fit in available registers remain on the stack.
 //!
-//! Two-phase allocation:
+//! Three-phase allocation:
 //! 1. **Callee-saved registers** (x86: rbx, r12-r15; ARM: x20-x28; RISC-V: s1, s7-s11):
 //!    Assigned to values whose live ranges span function calls. These registers
 //!    are preserved across calls by the ABI, so no save/restore is needed at call
@@ -15,6 +15,13 @@
 //!    registers are destroyed by calls, so they can only hold values between calls.
 //!    No prologue/epilogue save/restore is needed since we never assign them to
 //!    values that cross call boundaries.
+//!
+//! 3. **Callee-saved spillover**: After phases 1 and 2, any remaining callee-saved
+//!    registers are assigned to the highest-priority non-call-spanning values that
+//!    didn't fit in the caller-saved pool. This is critical for call-free hot loops
+//!    (e.g., hash functions, matrix multiply, sorting) where all values compete for
+//!    only a few caller-saved registers. The one-time prologue/epilogue save/restore
+//!    cost is amortized over many loop iterations.
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::common::types::IrType;
@@ -395,6 +402,77 @@ pub fn allocate_registers(
                 assignments.insert(interval.value_id, config.caller_saved_regs[reg_idx]);
             }
         }
+    }
+
+    // Phase 3: Callee-saved spillover for non-call-spanning values.
+    //
+    // After Phase 1 (callee-saved for call-spanning) and Phase 2 (caller-saved for
+    // non-call-spanning), there may be high-priority values in call-free loops that
+    // didn't get a register because the caller-saved pool (4 regs on x86) overflowed.
+    // Meanwhile, callee-saved registers may be sitting unused because the function
+    // has few or no call-spanning values.
+    //
+    // Assign remaining callee-saved registers to these overflow values. The cost is
+    // a one-time prologue/epilogue save/restore (16 bytes of stack per register),
+    // but the benefit is eliminating repeated stack spills in hot loops. For a loop
+    // that iterates N times, this saves ~2*N memory accesses per value promoted.
+    {
+        let mut spillover_candidates: Vec<&LiveInterval> = liveness.intervals.iter()
+            .filter(|iv| eligible.contains(&iv.value_id))
+            .filter(|iv| !assignments.contains_key(&iv.value_id)) // Not already allocated
+            .filter(|iv| iv.end > iv.start) // Must span at least 2 points
+            .filter(|iv| {
+                // Only non-call-spanning values (caller-saved overflow).
+                let start_idx = call_points.partition_point(|&cp| cp < iv.start);
+                !(start_idx < call_points.len() && call_points[start_idx] <= iv.end)
+            })
+            .collect();
+
+        // Prioritize by use_count * interval_length (same heuristic).
+        spillover_candidates.sort_by(|a, b| {
+            let score_a = (a.end - a.start) as u64 * use_count.get(&a.value_id).copied().unwrap_or(1) as u64;
+            let score_b = (b.end - b.start) as u64 * use_count.get(&b.value_id).copied().unwrap_or(1) as u64;
+            score_b.cmp(&score_a)
+        });
+
+        // Use the existing reg_free_until from Phase 1 since it tracks callee-saved
+        // register availability.
+        for interval in &spillover_candidates {
+            // Prefer reusing already-saved registers (zero additional frame cost).
+            let mut best_already_used: Option<usize> = None;
+            let mut best_already_used_free_time: u32 = u32::MAX;
+            let mut best_new: Option<usize> = None;
+            let mut best_new_free_time: u32 = u32::MAX;
+
+            for (i, &free_until) in reg_free_until.iter().enumerate() {
+                if free_until <= interval.start {
+                    let reg_id = config.available_regs[i].0;
+                    if used_regs_set.contains(&reg_id) {
+                        if best_already_used.is_none() || free_until < best_already_used_free_time {
+                            best_already_used = Some(i);
+                            best_already_used_free_time = free_until;
+                        }
+                    } else {
+                        if best_new.is_none() || free_until < best_new_free_time {
+                            best_new = Some(i);
+                            best_new_free_time = free_until;
+                        }
+                    }
+                }
+            }
+
+            let chosen = best_already_used.or(best_new);
+
+            if let Some(reg_idx) = chosen {
+                reg_free_until[reg_idx] = interval.end + 1;
+                assignments.insert(interval.value_id, config.available_regs[reg_idx]);
+                used_regs_set.insert(config.available_regs[reg_idx].0);
+            }
+        }
+
+        // Rebuild used_regs since Phase 3 may have added new callee-saved registers.
+        used_regs = used_regs_set.iter().map(|&r| PhysReg(r)).collect();
+        used_regs.sort_by_key(|r| r.0);
     }
 
     RegAllocResult {

@@ -1,9 +1,14 @@
 Register allocator -- DONE (all 3 backends)
 
-Linear scan register allocator with callee-saved registers is implemented for:
-- x86-64: rbx, r12-r15 (5 registers)
-- AArch64: x20-x28 (9 registers) -- with register-direct ALU via 3-operand ISA
-- RISC-V: s1, s7-s11 (6 registers)
+Three-phase linear scan register allocator:
+1. Callee-saved registers for call-spanning values
+2. Caller-saved registers for non-call-spanning values
+3. Callee-saved spillover for non-call-spanning values that overflowed Phase 2
+
+Implemented for:
+- x86-64: rbx, r12-r15 (5 callee) + r11, r10, r8, r9 (4 caller) = 9 registers
+- AArch64: x20-x28 (9 callee) + x13, x14 (2 caller) = 11 registers
+- RISC-V: s1, s7-s11 (6 callee) = 6 registers
 
 Liveness analysis uses backward dataflow iteration and supports loops.
 ARM integration skips variadic functions to avoid callee-save/VA-save area conflicts.
