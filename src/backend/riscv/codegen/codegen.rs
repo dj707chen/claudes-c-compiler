@@ -1977,21 +1977,35 @@ impl ArchCodegen for RiscvCodegen {
     fn emit_call_store_result(&mut self, dest: &Value, return_type: IrType) {
         // RISC-V returns integers in a0 (not t0), so we need custom handling
         // to store a0 directly without an unnecessary a0->t0 move.
-        if let Some(slot) = self.state.get_slot(dest.0) {
-            if is_i128_type(return_type) {
+        if is_i128_type(return_type) {
+            if let Some(slot) = self.state.get_slot(dest.0) {
                 self.emit_store_to_s0("a0", slot.0, "sd");
                 self.emit_store_to_s0("a1", slot.0 + 8, "sd");
-            } else if return_type.is_long_double() {
+            }
+        } else if return_type.is_long_double() {
+            if let Some(slot) = self.state.get_slot(dest.0) {
                 self.state.emit("    call __trunctfdf2");
                 self.state.emit("    fmv.x.d t0, fa0");
                 self.emit_store_to_s0("t0", slot.0, "sd");
-            } else if return_type == IrType::F32 {
+            }
+        } else if return_type == IrType::F32 {
+            if let Some(slot) = self.state.get_slot(dest.0) {
                 self.state.emit("    fmv.x.w t0, fa0");
                 self.emit_store_to_s0("t0", slot.0, "sd");
-            } else if return_type.is_float() {
+            }
+        } else if return_type.is_float() {
+            if let Some(slot) = self.state.get_slot(dest.0) {
                 self.state.emit("    fmv.x.d t0, fa0");
                 self.emit_store_to_s0("t0", slot.0, "sd");
-            } else {
+            }
+        } else {
+            // Integer return value in a0. Check for register allocation first:
+            // if the value has a callee-saved register, move a0 directly to it
+            // (avoiding a stack spill). Otherwise store to the stack slot.
+            if let Some(&reg) = self.reg_assignments.get(&dest.0) {
+                let reg_name = callee_saved_name(reg);
+                self.state.emit_fmt(format_args!("    mv {}, a0", reg_name));
+            } else if let Some(slot) = self.state.get_slot(dest.0) {
                 self.emit_store_to_s0("a0", slot.0, "sd");
             }
         }

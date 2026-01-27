@@ -59,8 +59,7 @@ pub struct RegAllocConfig {
 ///
 /// We avoid allocating registers to:
 /// - Alloca values (they represent stack addresses)
-/// - i128 values (they need register pairs, handled specially)
-/// - Values defined by Call/CallIndirect (result is in a0, needs immediate spill)
+/// - i128/float values (they need special register paths)
 /// - Values used only once right after definition (no benefit from register)
 pub fn allocate_registers(
     func: &IrFunction,
@@ -100,8 +99,8 @@ pub fn allocate_registers(
 
     for block in &func.blocks {
         for inst in &block.instructions {
-            // Only BinOp, UnaryOp, Cmp, Cast, Load, and GEP results are eligible.
-            // These all store their result via emit_store_result -> store_t0_to.
+            // Values eligible for register allocation: those stored via the
+            // standard accumulator path (store_rax_to on x86, store_t0_to on RISC-V).
             // Exclude float and i128 types since they use different register paths.
             match inst {
                 Instruction::BinOp { dest, ty, .. }
@@ -140,6 +139,28 @@ pub fn allocate_registers(
                         Operand::Const(IrConst::LongDouble(..)) | Operand::Const(IrConst::I128(_))
                     );
                     if !is_ineligible {
+                        eligible.insert(dest.0);
+                    }
+                }
+                // Call results are eligible for callee-saved register allocation.
+                // The result arrives in the accumulator (rax on x86, x0 on ARM, a0 on
+                // RISC-V), and emit_call_store_result calls emit_store_result which
+                // uses store_rax_to/store_t0_to — both of which are register-aware
+                // and will emit a reg-to-reg move (e.g., movq %rax, %rbx) instead of
+                // a stack spill. This is critical for reducing stack frame sizes in
+                // functions with many calls (e.g., kernel page allocator functions
+                // that call spin_lock, list helpers, etc.) where call results used
+                // across subsequent calls would otherwise each consume an 8-byte
+                // stack slot.
+                Instruction::Call { dest: Some(dest), return_type, .. } => {
+                    if !return_type.is_float() && !return_type.is_long_double()
+                        && !matches!(return_type, IrType::I128 | IrType::U128) {
+                        eligible.insert(dest.0);
+                    }
+                }
+                Instruction::CallIndirect { dest: Some(dest), return_type, .. } => {
+                    if !return_type.is_float() && !return_type.is_long_double()
+                        && !matches!(return_type, IrType::I128 | IrType::U128) {
                         eligible.insert(dest.0);
                     }
                 }

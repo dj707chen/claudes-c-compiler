@@ -1,0 +1,24 @@
+Fix RISC-V callee-saved register corruption in emit_call_reg_args
+
+Status: in_progress
+Started: 2026-01-27
+
+Problem:
+The RISC-V backend's emit_call_reg_args function uses callee-saved registers
+s2-s6 as temporaries when staging GP arguments for function calls with 4+ GP
+register args. These registers were NOT added to used_callee_saved, so they
+were not saved/restored in the function prologue/epilogue, corrupting the
+caller's register state.
+
+This caused a RISC-V kernel boot failure with init/do_mounts_initrd.c: the
+kernel_do_mounts_initrd_sysctls_init function calls __register_sysctl_init with
+4 GP args, using s2 as a temp without saving it.
+
+Fix:
+In calculate_stack_space, scan all call instructions to determine the maximum
+number of GP register arguments. When >= 4, add the needed s2-s6 registers to
+used_callee_saved so they get proper prologue/epilogue save/restore.
+
+Files changed:
+- src/backend/riscv/codegen/codegen.rs
+- tests/riscv-callee-saved-call-args/ (regression test)
