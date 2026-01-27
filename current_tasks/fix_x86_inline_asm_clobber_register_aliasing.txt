@@ -1,0 +1,22 @@
+Task: Fix x86 inline asm clobber register aliasing (edx vs rdx)
+Status: in_progress
+Started: 2026-01-27
+
+Problem: When inline asm clobbers use 32-bit register names (e.g., "edx"),
+the clobber exclusion logic fails to prevent assigning the corresponding
+64-bit register (e.g., "rdx") to input operands. This is because the
+scratch pool uses 64-bit names but the exclusion comparison is exact
+string match.
+
+Example: asm volatile("..." : "=a"(out) : "g"(val), "c"(ecx_in) : "edx")
+The "g" operand gets assigned to "rdx" because "edx" != "rdx", but they
+are the same physical register. The asm template then corrupts the operand.
+
+Root cause: The exclusion list from clobbers uses the literal clobber name
+(e.g., "edx") but the scratch register pool uses 64-bit names (e.g., "rdx").
+ARM64 has wN/xN aliasing handled, but x86 register aliasing (al/ax/eax/rax)
+is not handled.
+
+Fix: Normalize x86 clobber register names to their 64-bit form before
+adding them to the exclusion list, similar to how ARM already handles
+wN/xN aliasing.
