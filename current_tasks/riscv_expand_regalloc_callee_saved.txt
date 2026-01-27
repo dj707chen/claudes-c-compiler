@@ -1,0 +1,18 @@
+Task: Expand RISC-V register allocation to use s2-s6 callee-saved registers
+Status: in_progress
+Started: 2026-01-27
+
+Problem: RISC-V kernel boot fails with stack overflow in kernel/sched/core.c.
+Functions like try_to_wake_up have 1408-byte stack frames (vs GCC's 112),
+causing kernel stack overflow during scheduler calls. Root cause: only 6
+callee-saved registers (s1, s7-s11) are available for register allocation.
+Registers s2-s6 are unconditionally reserved for call argument staging,
+even though they're only needed when a call has >= 4 GP register arguments.
+
+Fix: Compute max_gp_reg_args_in_calls BEFORE running the register allocator,
+then only exclude the s2-s6 registers actually needed for call staging from
+the allocatable pool. Functions with no calls or calls with <= 3 args get
+11 callee-saved registers instead of 6, dramatically reducing stack usage.
+
+Result: try_to_wake_up drops from 1408 to 1008 bytes. kernel/sched/core.c
+now boots successfully on RISC-V (was failing with stack overflow).
