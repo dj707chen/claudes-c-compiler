@@ -1,0 +1,28 @@
+Task: Fix RISC-V inline asm "i" constraint symbol resolution in __jump_table
+Status: in_progress
+Started: 2026-01-27
+
+Problem:
+  RISC-V kernel boot failure: arch/riscv/kernel/traps.c produces a linker error
+  "undefined reference to 't0'" in the __jump_table section.
+
+  Root cause has two parts:
+  1. The RISC-V backend's format_operand and substitute_riscv_asm_operands functions
+     did not pass or check imm_symbol (symbol name) for "i" constraint operands.
+     When an inline asm operand had a symbol name (e.g., "my_key" for a global
+     static key), format_operand only checked imm_value (integer), missing the
+     symbol and outputting "0" instead. The x86 and ARM backends already handled
+     this correctly.
+
+  2. always_inline functions containing inline asm (like arch_static_branch) were
+     not inlined when the caller exceeded the hard cap (500 instructions). These
+     functions MUST be inlined because their "i" constraint operands reference
+     parameters that only become compile-time symbols after inlining. The first-pass
+     "tiny callee" check now also includes always_inline functions with inline asm.
+
+Fix:
+  - Added op_imm_symbols parameter to format_operand and substitute_riscv_asm_operands
+  - In format_operand, check imm_symbol before imm_value for Immediate operands
+  - Extract op_imm_symbols in substitute_template_line from AsmOperand structs
+  - In the inlining first-pass, treat always_inline callees with inline asm like
+    tiny callees (bypass hard cap)
