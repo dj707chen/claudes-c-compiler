@@ -101,6 +101,13 @@ impl Lowerer {
                 vector_size: decl.vector_size,
                 span: decl.span,
             };
+            // Clear the expr_ctype_cache because `resolved_decl` clones the
+            // declaration's expression trees, creating new heap allocations.
+            // When `resolved_decl` is dropped at the end of this function, those
+            // allocations are freed and their addresses may be reused by subsequent
+            // declarations. Without clearing, stale cache entries keyed by those
+            // addresses would return incorrect types for the new expressions.
+            self.expr_ctype_cache.borrow_mut().clear();
             &resolved_decl
         } else {
             decl
