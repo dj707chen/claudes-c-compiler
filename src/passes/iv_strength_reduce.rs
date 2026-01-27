@@ -212,35 +212,32 @@ fn reduce_loop(
                         });
                     }
                 } else {
-                    let init_cast_val = Value(next_id);
-                    next_id += 1;
-                    let init_mul_val = Value(next_id);
-                    next_id += 1;
-
-                    if iv.ty != IrType::I64 && iv.ty != IrType::Ptr {
+                    // Compute init * stride at runtime.
+                    // Only allocate a cast value if the IV type needs widening to I64.
+                    let needs_cast = iv.ty != IrType::I64 && iv.ty != IrType::Ptr;
+                    let mul_operand = if needs_cast {
+                        let init_cast_val = Value(next_id);
+                        next_id += 1;
                         preheader_insts.push(Instruction::Cast {
                             dest: init_cast_val,
                             src: Operand::Value(init_val),
                             from_ty: iv.ty,
                             to_ty: IrType::I64,
                         });
-                        preheader_insts.push(Instruction::BinOp {
-                            dest: init_mul_val,
-                            op: IrBinOp::Mul,
-                            lhs: Operand::Value(init_cast_val),
-                            rhs: Operand::Const(IrConst::I64(d.stride)),
-                            ty: IrType::I64,
-                        });
+                        Operand::Value(init_cast_val)
                     } else {
-                        next_id -= 1; // Undo unused init_cast_val allocation
-                        preheader_insts.push(Instruction::BinOp {
-                            dest: init_mul_val,
-                            op: IrBinOp::Mul,
-                            lhs: Operand::Value(init_val),
-                            rhs: Operand::Const(IrConst::I64(d.stride)),
-                            ty: IrType::I64,
-                        });
-                    }
+                        Operand::Value(init_val)
+                    };
+
+                    let init_mul_val = Value(next_id);
+                    next_id += 1;
+                    preheader_insts.push(Instruction::BinOp {
+                        dest: init_mul_val,
+                        op: IrBinOp::Mul,
+                        lhs: mul_operand,
+                        rhs: Operand::Const(IrConst::I64(d.stride)),
+                        ty: IrType::I64,
+                    });
                     preheader_insts.push(Instruction::GetElementPtr {
                         dest: init_ptr_val,
                         base: gep_base,
