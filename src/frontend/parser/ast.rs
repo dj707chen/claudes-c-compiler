@@ -45,6 +45,8 @@ pub struct FunctionDef {
     pub visibility: Option<String>,
     /// __attribute__((weak)) - emit as a weak symbol
     pub is_weak: bool,
+    /// __attribute__((used)) - prevent dead code elimination of this symbol
+    pub is_used: bool,
     pub span: Span,
 }
 
@@ -150,6 +152,8 @@ pub struct InitDeclarator {
     /// __attribute__((cleanup(func))) - call func(&var) when var goes out of scope.
     /// Used for RAII-style cleanup (e.g., Linux kernel guard()/scoped_guard() for mutex_unlock).
     pub cleanup_fn: Option<String>,
+    /// __attribute__((used)) - prevent dead code elimination of this symbol
+    pub is_used: bool,
     pub span: Span,
 }
 

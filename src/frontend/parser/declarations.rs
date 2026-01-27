@@ -26,6 +26,7 @@ impl Parser {
         self.parsing_constructor = false;
         self.parsing_destructor = false;
         self.parsing_weak = false;
+        self.parsing_used = false;
         self.parsing_alias_target = None;
         self.parsing_visibility = None;
         self.parsing_section = None;
@@ -151,6 +152,7 @@ impl Parser {
         let is_error_attr = self.parsing_error_attr;
         let is_noreturn = self.parsing_noreturn;
         let cleanup_fn = self.parsing_cleanup_fn.take();
+        let is_used = self.parsing_used;
 
         // Apply __attribute__((mode(...))): transform type to specified bit-width
         let type_spec = if let Some(mk) = mode_kind {
@@ -165,9 +167,9 @@ impl Parser {
             && (matches!(self.peek(), TokenKind::LBrace) || self.is_type_specifier());
 
         if is_funcdef {
-            self.parse_function_def(type_spec, name, derived, start, is_constructor, is_destructor, section, visibility, is_weak)
+            self.parse_function_def(type_spec, name, derived, start, is_constructor, is_destructor, section, visibility, is_weak, is_used)
         } else {
-            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common, merged_alignment, alignas_type, alignment_sizeof_type, is_weak, alias_target, visibility, section, first_asm_reg, is_error_attr, is_noreturn, cleanup_fn)
+            self.parse_declaration_rest(type_spec, name, derived, start, is_constructor, is_destructor, is_common, merged_alignment, alignas_type, alignment_sizeof_type, is_weak, alias_target, visibility, section, first_asm_reg, is_error_attr, is_noreturn, cleanup_fn, is_used)
         }
     }
 
@@ -183,6 +185,7 @@ impl Parser {
         section: Option<String>,
         visibility: Option<String>,
         is_weak: bool,
+        is_used: bool,
     ) -> Option<ExternalDecl> {
         self.parsing_typedef = false; // function defs are never typedefs
         let (params, variadic) = if let Some(DerivedDeclarator::Function(p, v)) = derived.last() {
@@ -239,6 +242,7 @@ impl Parser {
             section,
             visibility,
             is_weak,
+            is_used,
             span: start,
         }))
     }
@@ -424,6 +428,7 @@ impl Parser {
         is_error_attr: bool,
         is_noreturn: bool,
         cleanup_fn: Option<String>,
+        is_used: bool,
     ) -> Option<ExternalDecl> {
         let mut declarators = Vec::new();
         let init = if self.consume_if(&TokenKind::Assign) {
@@ -445,6 +450,7 @@ impl Parser {
             is_error_attr,
             is_noreturn,
             cleanup_fn,
+            is_used,
             span: start,
         });
 
@@ -476,6 +482,9 @@ impl Parser {
         if let Some(ref cleanup) = self.parsing_cleanup_fn {
             declarators.last_mut().unwrap().cleanup_fn = Some(cleanup.clone());
         }
+        if self.parsing_used {
+            declarators.last_mut().unwrap().is_used = true;
+        }
         self.parsing_weak = false;
         self.parsing_alias_target = None;
         self.parsing_visibility = None;
@@ -483,6 +492,7 @@ impl Parser {
         self.parsing_error_attr = false;
         self.parsing_noreturn = false;
         self.parsing_cleanup_fn = None;
+        self.parsing_used = false;
         is_common = is_common || extra_common;
         if let Some(a) = extra_aligned {
             alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
@@ -501,7 +511,9 @@ impl Parser {
             // the declaration-level attribute (e.g. __attribute__((section(".x"))) int a, b;)
             let d_section = self.parsing_section.take().or_else(|| section.clone());
             let d_cleanup_fn = self.parsing_cleanup_fn.take();
+            let d_used = self.parsing_used;
             self.parsing_weak = false;
+            self.parsing_used = false;
             let dinit = if self.consume_if(&TokenKind::Assign) {
                 Some(self.parse_initializer())
             } else {
@@ -523,6 +535,7 @@ impl Parser {
                 is_error_attr: d_error_attr,
                 is_noreturn: d_noreturn,
                 cleanup_fn: d_cleanup_fn,
+                is_used: d_used,
                 span: start,
             });
             let (_, skip_aligned, skip_asm_reg) = self.skip_asm_and_attributes();
@@ -615,6 +628,7 @@ impl Parser {
                 is_error_attr: false,
                 is_noreturn: false,
                 cleanup_fn: local_cleanup_fn,
+                is_used: false,
                 span: start,
             });
             let (_, post_init_aligned, _post_asm_reg) = self.skip_asm_and_attributes();

@@ -121,6 +121,9 @@ pub struct Parser {
     pub(super) pragma_default_visibility: Option<String>,
     /// Count of parse errors encountered (invalid tokens at top level, etc.)
     pub error_count: usize,
+    /// Set to true when __attribute__((used)) is encountered.
+    /// Prevents dead code elimination of the symbol even if unreferenced.
+    pub(super) parsing_used: bool,
     /// Set when __attribute__((vector_size(N))) is encountered on a typedef.
     /// Holds the total vector size in bytes. Consumed during typedef processing.
     pub(super) parsing_vector_size: Option<usize>,
@@ -167,6 +170,7 @@ impl Parser {
             pragma_visibility_stack: Vec::new(),
             pragma_default_visibility: None,
             error_count: 0,
+            parsing_used: false,
             parsing_vector_size: None,
             parsing_address_space: AddressSpace::Default,
             enum_constants: FxHashMap::default(),
@@ -590,6 +594,10 @@ impl Parser {
                                                 self.advance();
                                             }
                                         }
+                                    }
+                                    TokenKind::Identifier(name) if name == "used" || name == "__used__" => {
+                                        self.parsing_used = true;
+                                        self.advance();
                                     }
                                     TokenKind::Identifier(name) if name == "address_space" || name == "__address_space__" => {
                                         self.advance();

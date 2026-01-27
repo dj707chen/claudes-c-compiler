@@ -70,6 +70,8 @@ pub struct IrGlobal {
     pub has_explicit_align: bool,
     /// Whether this global has const qualification (should be placed in .rodata).
     pub is_const: bool,
+    /// __attribute__((used)) - prevent dead code elimination of this symbol.
+    pub is_used: bool,
 }
 
 /// Initializer for a global variable.
@@ -175,6 +177,8 @@ pub struct IrFunction {
     pub visibility: Option<String>,
     /// __attribute__((weak)) - emit as a weak symbol (STB_WEAK).
     pub is_weak: bool,
+    /// __attribute__((used)) - prevent dead code elimination of this symbol.
+    pub is_used: bool,
     /// Set by the inlining pass when call sites were inlined into this function.
     /// Used by post-inlining passes (mem2reg re-run, symbol resolution) to know
     /// that non-entry blocks may contain allocas from inlined callees.
@@ -1275,6 +1279,7 @@ impl IrFunction {
             section: None,
             visibility: None,
             is_weak: false,
+            is_used: false,
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
         }

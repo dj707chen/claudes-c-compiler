@@ -488,7 +488,7 @@ impl Lowerer {
                     } else {
                         false
                     };
-                    if can_skip && !referenced_statics.contains(&func.name) {
+                    if can_skip && !func.is_used && !referenced_statics.contains(&func.name) {
                         continue;
                     }
                     self.lower_function(func);
@@ -1248,6 +1248,7 @@ impl Lowerer {
             section: func.section.clone(),
             visibility: func.visibility.clone(),
             is_weak: func.is_weak,
+            is_used: func.is_used,
             has_inlined_calls: false,
             param_alloca_values: param_alloca_vals,
         };
@@ -1646,6 +1647,7 @@ impl Lowerer {
                 visibility: declarator.visibility.clone(),
                 has_explicit_align,
                 is_const: var_is_const,
+                is_used: declarator.is_used,
             });
         }
     }

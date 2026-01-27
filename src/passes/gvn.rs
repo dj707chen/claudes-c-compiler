@@ -505,6 +505,7 @@ mod tests {
             section: None,
             visibility: None,
             is_weak: false,
+            is_used: false,
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
         };
@@ -573,6 +574,7 @@ mod tests {
             section: None,
             visibility: None,
             is_weak: false,
+            is_used: false,
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
         };
@@ -632,6 +634,7 @@ mod tests {
             section: None,
             visibility: None,
             is_weak: false,
+            is_used: false,
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
         };
@@ -697,6 +700,7 @@ mod tests {
             section: None,
             visibility: None,
             is_weak: false,
+            is_used: false,
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
         };
@@ -762,6 +766,7 @@ mod tests {
             section: None,
             visibility: None,
             is_weak: false,
+            is_used: false,
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
         };
@@ -831,6 +836,7 @@ mod tests {
             section: None,
             visibility: None,
             is_weak: false,
+            is_used: false,
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
         };
@@ -927,6 +933,7 @@ mod tests {
             section: None,
             visibility: None,
             is_weak: false,
+            is_used: false,
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
         };
@@ -977,6 +984,7 @@ mod tests {
             section: None,
             visibility: None,
             is_weak: false,
+            is_used: false,
             has_inlined_calls: false,
             param_alloca_values: Vec::new(),
         }

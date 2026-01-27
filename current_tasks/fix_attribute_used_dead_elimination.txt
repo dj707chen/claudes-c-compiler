@@ -1,0 +1,19 @@
+Task: Implement __attribute__((used)) to prevent dead elimination of kernel setup data
+
+Root cause: __attribute__((used)) is recognized by the preprocessor (__has_attribute)
+but NOT parsed, stored, or respected by the compiler pipeline. The dead static
+elimination pass removes static variables/functions marked with __used__ when they
+are not directly referenced in code. This causes:
+- Missing .init.setup section (breaks console= kernel parameter parsing)
+- Missing __param, .modinfo sections
+- Boot failures (printk.c, ata_piix.c, etc.)
+
+Fix plan:
+1. Parse "used"/"__used__" in parser's parse_gcc_attributes()
+2. Add is_used field to AST (FunctionDef, InitDeclarator)
+3. Add is_used field to IR (IrGlobal, IrFunction)
+4. Propagate through lowering
+5. Treat is_used symbols as roots in eliminate_dead_static_functions()
+6. Don't skip is_used functions in pre-lowering ref_collection
+
+Status: in_progress

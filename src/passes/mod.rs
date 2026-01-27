@@ -267,7 +267,7 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
         if func.is_declaration {
             continue;
         }
-        if !func.is_static {
+        if !func.is_static || func.is_used {
             reachable.insert(func.name.clone());
             worklist.push(func.name.clone());
         }
@@ -277,7 +277,7 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
         if global.is_extern {
             continue;
         }
-        if !global.is_static || global.is_common {
+        if !global.is_static || global.is_common || global.is_used {
             reachable.insert(global.name.clone());
             worklist.push(global.name.clone());
         }

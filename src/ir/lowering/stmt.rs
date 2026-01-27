@@ -397,6 +397,7 @@ impl Lowerer {
             visibility: None,
             has_explicit_align,
             is_const: var_is_const,
+            is_used: false,
         });
 
         // Track as a global for access via GlobalAddr
