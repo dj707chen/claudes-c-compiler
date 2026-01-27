@@ -212,14 +212,19 @@ pub fn run(module: &mut IrModule) -> usize {
                     if caller_too_large && !callee_data.is_always_inline {
                         continue;
                     }
-                    // Hard cap: when the caller is extremely large, stop ALL
-                    // inlining (including always_inline) to prevent kernel stack
-                    // overflow. CCC's codegen spills every SSA value to the stack,
-                    // so functions with 1000+ instructions produce multi-KB frames.
-                    // The kernel has only 16KB stack with guard pages, and deep call
-                    // chains (e.g., page allocator) can easily overflow.
+                    // Hard cap: when the caller is extremely large, stop normal
+                    // inlining to prevent kernel stack overflow. CCC's codegen
+                    // spills every SSA value to the stack, so functions with 1000+
+                    // instructions produce multi-KB frames. The kernel has only
+                    // 16KB stack with guard pages, and deep call chains (e.g.,
+                    // page allocator) can easily overflow.
                     // Tiny callees are still allowed (handled in first pass above).
-                    if caller_at_hard_cap {
+                    // always_inline callees MUST be inlined regardless of caller
+                    // size — this is a C semantic requirement. Not inlining them
+                    // causes linker errors when the function body contains inline
+                    // asm with "i" constraints that can only be resolved after
+                    // inlining (e.g., arch_static_branch's __jump_table entries).
+                    if caller_at_hard_cap && !callee_data.is_always_inline {
                         continue;
                     }
                     let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;

@@ -421,10 +421,20 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
         }
     }
 
-    // Remove unreachable static functions
+    // Remove unreachable static functions and static always_inline functions.
+    // Static always_inline functions should never be emitted as standalone bodies —
+    // GCC never emits them. Their bodies exist only to be inlined at call sites.
+    // If they're still present after inlining, their standalone bodies may contain
+    // unresolvable inline asm operands (e.g., "i" constraint with %c modifier
+    // referencing function parameters that are only known after inlining), which
+    // produce invalid assembly like `.quad x9 - .` instead of `.quad symbol - .`.
     module.functions.retain(|func| {
         if func.is_declaration {
             return true;
+        }
+        // Remove static always_inline functions — they should only exist as inlined copies.
+        if func.is_static && func.is_always_inline {
+            return false;
         }
         if !func.is_static {
             return true;
