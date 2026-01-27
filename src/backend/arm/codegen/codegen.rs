@@ -1658,32 +1658,12 @@ impl ArchCodegen for ArmCodegen {
         // allocation and enormous stack frames (4KB+), causing kernel stack overflows.
         let mut asm_clobbered_regs: Vec<PhysReg> = Vec::new();
         Self::prescan_inline_asm_callee_saved(func, &mut asm_clobbered_regs);
-
-        let mut available_regs = if func.is_variadic { Vec::new() } else { ARM_CALLEE_SAVED.to_vec() };
-        if !asm_clobbered_regs.is_empty() {
-            let clobbered_set: FxHashSet<u8> = asm_clobbered_regs.iter().map(|r| r.0).collect();
-            available_regs.retain(|r| !clobbered_set.contains(&r.0));
-        }
-        let config = RegAllocConfig {
-            available_regs,
-        };
-        let alloc_result = regalloc::allocate_registers(func, &config);
-        self.reg_assignments = alloc_result.assignments;
-        self.used_callee_saved = alloc_result.used_regs;
-        let cached_liveness = alloc_result.liveness;
-
-        // Add inline asm clobbered callee-saved registers to the save/restore list
-        // (they need to be preserved per the ABI even though we don't allocate
-        // values to them).
-        for phys in &asm_clobbered_regs {
-            if !self.used_callee_saved.iter().any(|r| r.0 == phys.0) {
-                self.used_callee_saved.push(*phys);
-            }
-        }
-        self.used_callee_saved.sort_by_key(|r| r.0);
-
-        // Build set of register-assigned value IDs to skip stack slot allocation.
-        let reg_assigned: FxHashSet<u32> = self.reg_assignments.keys().copied().collect();
+        let base_regs: &[PhysReg] = if func.is_variadic { &[] } else { &ARM_CALLEE_SAVED };
+        let available_regs = crate::backend::generation::filter_available_regs(base_regs, &asm_clobbered_regs);
+        let (reg_assigned, cached_liveness) = crate::backend::generation::run_regalloc_and_merge_clobbers(
+            func, available_regs, &asm_clobbered_regs,
+            &mut self.reg_assignments, &mut self.used_callee_saved,
+        );
 
         let mut space = calculate_stack_space_common(&mut self.state, func, 16, |space, alloc_size, align| {
             // ARM uses positive offsets from sp, starting at 16 (after fp/lr)

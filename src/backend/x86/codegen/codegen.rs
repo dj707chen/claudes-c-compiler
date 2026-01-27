@@ -39,9 +39,7 @@ fn callee_saved_name_32(reg: PhysReg) -> &'static str {
 /// registers that are used via specific constraints or listed in clobbers.
 /// These must be saved/restored in the function prologue/epilogue.
 fn collect_inline_asm_callee_saved_x86(func: &IrFunction, used: &mut Vec<PhysReg>) {
-    // x86-64 callee-saved: rbx (PhysReg(1)), r12-r15 (PhysReg(2)-PhysReg(5))
-    // Map register name -> PhysReg index
-    fn reg_to_phys(name: &str) -> Option<PhysReg> {
+    fn clobber_to_phys(name: &str) -> Option<PhysReg> {
         match name {
             "rbx" | "ebx" | "bx" | "bl" | "bh" => Some(PhysReg(1)),
             "r12" | "r12d" | "r12w" | "r12b" => Some(PhysReg(2)),
@@ -51,41 +49,9 @@ fn collect_inline_asm_callee_saved_x86(func: &IrFunction, used: &mut Vec<PhysReg
             _ => None,
         }
     }
-
-    let mut already: FxHashSet<u8> = used.iter().map(|r| r.0).collect();
-
-    for block in &func.blocks {
-        for inst in &block.instructions {
-            if let Instruction::InlineAsm { outputs, inputs, clobbers, .. } = inst {
-                // Check output constraints for specific callee-saved registers
-                for (constraint, _, _) in outputs {
-                    let c = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
-                    if let Some(phys) = constraint_to_callee_saved_x86(c) {
-                        if already.insert(phys.0) {
-                            used.push(phys);
-                        }
-                    }
-                }
-                // Check input constraints for specific callee-saved registers
-                for (constraint, _, _) in inputs {
-                    let c = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
-                    if let Some(phys) = constraint_to_callee_saved_x86(c) {
-                        if already.insert(phys.0) {
-                            used.push(phys);
-                        }
-                    }
-                }
-                // Check clobber list for callee-saved register names
-                for clobber in clobbers {
-                    if let Some(phys) = reg_to_phys(clobber.as_str()) {
-                        if already.insert(phys.0) {
-                            used.push(phys);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    crate::backend::generation::collect_inline_asm_callee_saved(
+        func, used, constraint_to_callee_saved_x86, clobber_to_phys,
+    );
 }
 
 /// Check if a constraint string refers to a specific x86-64 callee-saved register.
@@ -1890,35 +1856,13 @@ impl ArchCodegen for X86Codegen {
         // rather than disabling it entirely. Many kernel functions contain inline asm
         // from inlined spin_lock/spin_unlock; without this, they get no register
         // allocation and enormous stack frames (4KB+), causing kernel stack overflows.
-        let mut available_regs = X86_CALLEE_SAVED.to_vec();
         let mut asm_clobbered_regs: Vec<PhysReg> = Vec::new();
         collect_inline_asm_callee_saved_x86(func, &mut asm_clobbered_regs);
-        if !asm_clobbered_regs.is_empty() {
-            let clobbered_set: FxHashSet<u8> = asm_clobbered_regs.iter().map(|r| r.0).collect();
-            available_regs.retain(|r| !clobbered_set.contains(&r.0));
-        }
-        let config = RegAllocConfig {
-            available_regs,
-        };
-        let alloc_result = regalloc::allocate_registers(func, &config);
-        self.reg_assignments = alloc_result.assignments;
-        self.used_callee_saved = alloc_result.used_regs;
-        // Cache liveness data from regalloc to avoid recomputing it in
-        // calculate_stack_space_common for Tier 2 stack slot packing.
-        let cached_liveness = alloc_result.liveness;
-
-        // Also add inline asm clobbered callee-saved registers to the save/restore
-        // list (they need to be preserved per the ABI even though we don't allocate
-        // values to them).
-        for phys in &asm_clobbered_regs {
-            if !self.used_callee_saved.iter().any(|r| r.0 == phys.0) {
-                self.used_callee_saved.push(*phys);
-            }
-        }
-        self.used_callee_saved.sort_by_key(|r| r.0);
-
-        // Build set of register-assigned value IDs to skip stack slot allocation.
-        let reg_assigned: FxHashSet<u32> = self.reg_assignments.keys().copied().collect();
+        let available_regs = crate::backend::generation::filter_available_regs(&X86_CALLEE_SAVED, &asm_clobbered_regs);
+        let (reg_assigned, cached_liveness) = crate::backend::generation::run_regalloc_and_merge_clobbers(
+            func, available_regs, &asm_clobbered_regs,
+            &mut self.reg_assignments, &mut self.used_callee_saved,
+        );
 
         let mut space = calculate_stack_space_common(&mut self.state, func, 0, |space, alloc_size, align| {
             // x86 uses negative offsets from rbp

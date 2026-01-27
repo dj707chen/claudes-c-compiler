@@ -1184,6 +1184,98 @@ fn compute_coalescable_allocas(
     CoalescableAllocas { single_block, dead }
 }
 
+/// Scan inline-asm instructions for callee-saved register usage.
+///
+/// Iterates over all inline-asm instructions in `func`, checking output/input
+/// constraints and clobber lists for callee-saved registers.  Uses two callbacks:
+/// - `constraint_to_phys`: maps an output/input constraint string to a PhysReg
+/// - `clobber_to_phys`: maps a clobber register name to a PhysReg
+///
+/// Any discovered callee-saved PhysRegs are appended to `used` (deduplicated).
+/// This shared helper eliminates duplicated scan loops in x86 and RISC-V.
+pub fn collect_inline_asm_callee_saved(
+    func: &IrFunction,
+    used: &mut Vec<super::regalloc::PhysReg>,
+    constraint_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
+    clobber_to_phys: impl Fn(&str) -> Option<super::regalloc::PhysReg>,
+) {
+    let mut already: FxHashSet<u8> = used.iter().map(|r| r.0).collect();
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let Instruction::InlineAsm { outputs, inputs, clobbers, .. } = inst {
+                for (constraint, _, _) in outputs {
+                    let c = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+                    if let Some(phys) = constraint_to_phys(c) {
+                        if already.insert(phys.0) { used.push(phys); }
+                    }
+                }
+                for (constraint, _, _) in inputs {
+                    let c = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+                    if let Some(phys) = constraint_to_phys(c) {
+                        if already.insert(phys.0) { used.push(phys); }
+                    }
+                }
+                for clobber in clobbers {
+                    if let Some(phys) = clobber_to_phys(clobber.as_str()) {
+                        if already.insert(phys.0) { used.push(phys); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Run register allocation and merge ASM-clobbered callee-saved registers.
+///
+/// This shared helper eliminates duplicated regalloc setup boilerplate across
+/// all three backends (x86, ARM, RISC-V).  Each backend supplies its callee-saved
+/// register list and pre-collected ASM clobber list; this function handles the
+/// common steps: filtering available registers, running the allocator, storing
+/// results, merging clobbers into `used_callee_saved`, and building the
+/// `reg_assigned` set.
+///
+/// Returns `(reg_assigned, cached_liveness)` for use by `calculate_stack_space_common`.
+pub fn run_regalloc_and_merge_clobbers(
+    func: &IrFunction,
+    available_regs: Vec<super::regalloc::PhysReg>,
+    asm_clobbered_regs: &[super::regalloc::PhysReg],
+    reg_assignments: &mut FxHashMap<u32, super::regalloc::PhysReg>,
+    used_callee_saved: &mut Vec<super::regalloc::PhysReg>,
+) -> (FxHashSet<u32>, Option<super::liveness::LivenessResult>) {
+    let config = super::regalloc::RegAllocConfig { available_regs };
+    let alloc_result = super::regalloc::allocate_registers(func, &config);
+    *reg_assignments = alloc_result.assignments;
+    *used_callee_saved = alloc_result.used_regs;
+    let cached_liveness = alloc_result.liveness;
+
+    // Merge inline-asm clobbered callee-saved registers into the save/restore
+    // list (they need to be preserved per the ABI even though we don't allocate
+    // values to them).
+    for phys in asm_clobbered_regs {
+        if !used_callee_saved.iter().any(|r| r.0 == phys.0) {
+            used_callee_saved.push(*phys);
+        }
+    }
+    used_callee_saved.sort_by_key(|r| r.0);
+
+    let reg_assigned: FxHashSet<u32> = reg_assignments.keys().copied().collect();
+    (reg_assigned, cached_liveness)
+}
+
+/// Filter a callee-saved register list by removing ASM-clobbered entries.
+/// Returns the filtered list suitable for passing to `run_regalloc_and_merge_clobbers`.
+pub fn filter_available_regs(
+    callee_saved: &[super::regalloc::PhysReg],
+    asm_clobbered: &[super::regalloc::PhysReg],
+) -> Vec<super::regalloc::PhysReg> {
+    let mut available = callee_saved.to_vec();
+    if !asm_clobbered.is_empty() {
+        let clobbered_set: FxHashSet<u8> = asm_clobbered.iter().map(|r| r.0).collect();
+        available.retain(|r| !clobbered_set.contains(&r.0));
+    }
+    available
+}
+
 /// Shared stack space calculation: iterates over all instructions, assigns stack
 /// slots for allocas and value results. Arch-specific offset direction is handled
 /// by the `assign_slot` closure.
