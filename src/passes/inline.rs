@@ -69,6 +69,20 @@ const MAX_ALWAYS_INLINE_BLOCKS: usize = 200;
 /// 3. GCC always inlines these trivial static inline functions
 const MAX_TINY_INLINE_INSTRUCTIONS: usize = 5;
 
+/// Maximum instructions for a callee to be considered "small" and always inlined
+/// regardless of caller size. Small functions like `static inline void f(x, flag) { if (flag) g(x); }`
+/// have 2-3 blocks (from if/else) and ~10-20 instructions. They must be inlined
+/// because not inlining them can cause linker errors when they contain conditional
+/// calls to symbols that don't exist in the current build configuration. Example:
+/// kernel's fscache_clear_page_bits() calls __fscache_clear_page_bits() conditionally,
+/// but if CONFIG_FSCACHE is disabled, the latter is not compiled. GCC inlines the
+/// wrapper, so the conditional call becomes part of the caller — no linker error.
+/// Without inlining, the standalone static function has an undefined reference.
+const MAX_SMALL_INLINE_INSTRUCTIONS: usize = 20;
+
+/// Maximum blocks for a callee to be considered "small" (see above).
+const MAX_SMALL_INLINE_BLOCKS: usize = 3;
+
 /// Maximum instructions for a `static` (non-`inline`) function to be eligible
 /// for inlining. GCC at -O2 inlines small static functions even without the
 /// `inline` keyword. This is critical for correctness: if a static function
@@ -200,7 +214,11 @@ pub fn run(module: &mut IrModule) -> usize {
             // the max_rounds limit may be exhausted before reaching the tiny call site
             // deep in the function's block list.
             let mut found_site = None;
-            // First pass: look for tiny callees anywhere in the function.
+            // First pass: look for tiny/small callees anywhere in the function.
+            // These are always inlined regardless of caller size because:
+            // 1. They have negligible impact on code/stack size
+            // 2. Not inlining them can cause linker errors from conditional
+            //    references to undefined symbols (e.g., fscache_clear_page_bits)
             for site in &call_sites {
                 let callee_data = &callee_map[&site.callee_name];
                 let callee_inst_count: usize = callee_data.blocks.iter()
@@ -208,7 +226,9 @@ pub fn run(module: &mut IrModule) -> usize {
                     .sum();
                 let is_tiny = callee_inst_count <= MAX_TINY_INLINE_INSTRUCTIONS
                     && callee_data.blocks.len() <= 1;
-                if is_tiny {
+                let is_small = callee_inst_count <= MAX_SMALL_INLINE_INSTRUCTIONS
+                    && callee_data.blocks.len() <= MAX_SMALL_INLINE_BLOCKS;
+                if is_tiny || is_small {
                     let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
                     found_site = Some((site.clone(), callee_inst_count, use_relaxed));
                     break;

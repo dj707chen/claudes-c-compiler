@@ -29,6 +29,12 @@ pub(crate) fn run_function(func: &mut IrFunction) -> usize {
     simplify_cfg(func)
 }
 
+/// Build a map from BlockId -> index in func.blocks for O(1) lookup.
+#[inline]
+fn build_label_to_idx(func: &IrFunction) -> FxHashMap<BlockId, usize> {
+    func.blocks.iter().enumerate().map(|(i, b)| (b.label, i)).collect()
+}
+
 /// Simplify the CFG of a single function.
 /// Iterates until no more simplifications are possible (fixpoint).
 pub(crate) fn simplify_cfg(func: &mut IrFunction) -> usize {
@@ -110,6 +116,9 @@ fn fold_constant_cond_branches(func: &mut IrFunction) -> usize {
         func.blocks[idx].terminator = Terminator::Branch(taken);
     }
 
+    // Build label->index map for O(1) block lookups during phi cleanup
+    let label_to_idx = build_label_to_idx(func);
+
     // Clean up phi nodes in not-taken target blocks.
     // Remove phi entries that reference the folding block, since that edge
     // no longer exists. Only remove when the not-taken target differs from
@@ -120,14 +129,12 @@ fn fold_constant_cond_branches(func: &mut IrFunction) -> usize {
             continue;
         }
         // Find the not-taken block and remove phi entries from block_label
-        for block in &mut func.blocks {
-            if block.label == not_taken {
-                for inst in &mut block.instructions {
-                    if let Instruction::Phi { incoming, .. } = inst {
-                        incoming.retain(|(_, label)| *label != block_label);
-                    }
+        if let Some(&block_idx) = label_to_idx.get(&not_taken) {
+            let block = &mut func.blocks[block_idx];
+            for inst in &mut block.instructions {
+                if let Instruction::Phi { incoming, .. } = inst {
+                    incoming.retain(|(_, label)| *label != block_label);
                 }
-                break;
             }
         }
     }
@@ -177,10 +184,11 @@ fn would_create_phi_conflict(
     false_label: BlockId,
     target: BlockId,
     resolved: &FxHashMap<BlockId, (BlockId, BlockId)>,
+    label_to_idx: &FxHashMap<BlockId, usize>,
 ) -> bool {
-    // Find the target block
-    let target_block = match func.blocks.iter().find(|b| b.label == target) {
-        Some(b) => b,
+    // Find the target block using O(1) lookup
+    let target_block = match label_to_idx.get(&target) {
+        Some(&idx) => &func.blocks[idx],
         None => return false,
     };
 
@@ -327,6 +335,9 @@ fn thread_jump_chains(func: &mut IrFunction) -> usize {
         return 0;
     }
 
+    // Build label->index map for O(1) block lookups during phi updates
+    let label_to_idx = build_label_to_idx(func);
+
     // Collect the redirections we need to make.
     // Each edge change: (old_intermediate, new_target, phi_lookup_block)
     // phi_lookup_block is the immediate predecessor of new_target in the chain,
@@ -358,7 +369,8 @@ fn thread_jump_chains(func: &mut IrFunction) -> usize {
                     // values, and merging both edges into one would lose this
                     // distinction. Check for phi conflict.
                     if would_create_phi_conflict(func, block_label, *true_label,
-                                                  *false_label, true_final, &resolved) {
+                                                  *false_label, true_final, &resolved,
+                                                  &label_to_idx) {
                         // Phi conflict: don't thread either edge
                     } else {
                         // No phi conflict - safe to thread both edges
@@ -433,28 +445,26 @@ fn thread_jump_chains(func: &mut IrFunction) -> usize {
         //   - new_target = D (the final resolved target)
         //   - phi_lookup_block = C (D's phi entries reference C, not B)
         for (_old_intermediate, new_target, phi_lookup_block) in edge_changes {
-            // Find the new_target block and update its phi nodes
-            for block in &mut func.blocks {
-                if block.label == *new_target {
-                    for inst in &mut block.instructions {
-                        if let Instruction::Phi { incoming, .. } = inst {
-                            // Look up the phi value using the immediate predecessor
-                            // in the chain (phi_lookup_block), which is the block
-                            // that phi entries in new_target actually reference.
-                            let value_from_chain = incoming.iter()
-                                .find(|(_, label)| *label == *phi_lookup_block)
-                                .map(|(val, _)| *val);
-                            if let Some(val) = value_from_chain {
-                                // Only add if block_label doesn't already have an entry
-                                let already_has_entry = incoming.iter()
-                                    .any(|(_, label)| *label == block_label);
-                                if !already_has_entry {
-                                    incoming.push((val, block_label));
-                                }
+            // Find the new_target block using O(1) lookup
+            if let Some(&target_idx) = label_to_idx.get(new_target) {
+                let block = &mut func.blocks[target_idx];
+                for inst in &mut block.instructions {
+                    if let Instruction::Phi { incoming, .. } = inst {
+                        // Look up the phi value using the immediate predecessor
+                        // in the chain (phi_lookup_block), which is the block
+                        // that phi entries in new_target actually reference.
+                        let value_from_chain = incoming.iter()
+                            .find(|(_, label)| *label == *phi_lookup_block)
+                            .map(|(val, _)| *val);
+                        if let Some(val) = value_from_chain {
+                            // Only add if block_label doesn't already have an entry
+                            let already_has_entry = incoming.iter()
+                                .any(|(_, label)| *label == block_label);
+                            if !already_has_entry {
+                                incoming.push((val, block_label));
                             }
                         }
                     }
-                    break;
                 }
             }
         }
@@ -485,13 +495,12 @@ fn remove_dead_blocks(func: &mut IrFunction) -> usize {
     let mut worklist = vec![entry];
     while let Some(block_id) = worklist.pop() {
         if let Some(&idx) = block_map.get(&block_id) {
-            // Successor blocks from terminator
-            let targets = get_terminator_targets(&func.blocks[idx].terminator);
-            for target in targets {
+            // Successor blocks from terminator (no Vec allocation)
+            for_each_terminator_target(&func.blocks[idx].terminator, |target| {
                 if reachable.insert(target) {
                     worklist.push(target);
                 }
-            }
+            });
             // LabelAddr and InlineAsm goto labels (computed goto targets)
             for inst in &func.blocks[idx].instructions {
                 if let Instruction::LabelAddr { label, .. } = inst {
@@ -594,24 +603,32 @@ fn simplify_trivial_phis(func: &mut IrFunction) -> usize {
     count
 }
 
-/// Get the branch targets of a terminator.
-fn get_terminator_targets(term: &Terminator) -> Vec<BlockId> {
+/// Visit each branch target of a terminator, calling `f` for each unique target.
+/// This avoids allocating a Vec for each call, which is significant in hot paths.
+#[inline]
+fn for_each_terminator_target(term: &Terminator, mut f: impl FnMut(BlockId)) {
     match term {
-        Terminator::Branch(target) => vec![*target],
+        Terminator::Branch(target) => f(*target),
         Terminator::CondBranch { true_label, false_label, .. } => {
-            vec![*true_label, *false_label]
+            f(*true_label);
+            f(*false_label);
         }
-        Terminator::IndirectBranch { possible_targets, .. } => possible_targets.clone(),
+        Terminator::IndirectBranch { possible_targets, .. } => {
+            for &target in possible_targets {
+                f(target);
+            }
+        }
         Terminator::Switch { cases, default, .. } => {
-            let mut targets = vec![*default];
+            f(*default);
+            // For switch, we need to deduplicate targets to avoid visiting
+            // the same block multiple times. Use a small inline set.
             for &(_, label) in cases {
-                if !targets.contains(&label) {
-                    targets.push(label);
+                if label != *default {
+                    f(label);
                 }
             }
-            targets
         }
-        Terminator::Return(_) | Terminator::Unreachable => vec![],
+        Terminator::Return(_) | Terminator::Unreachable => {}
     }
 }
 
@@ -777,12 +794,20 @@ mod tests {
         assert!(count > 0);
         assert!(matches!(func.blocks[0].terminator, Terminator::Branch(BlockId(2))));
 
-        // The phi in Block 2 should have an entry from Block 0
+        // After threading Block 0 -> Block 2 (skipping empty Block 1),
+        // the phi in Block 2 gets a new entry for Block 0. Then Block 1 becomes
+        // dead and is removed, leaving a single-entry phi which simplify_trivial_phis
+        // converts to a Copy instruction.
         let last_block = func.blocks.last().unwrap();
-        if let Instruction::Phi { incoming, .. } = &last_block.instructions[0] {
-            assert!(incoming.iter().any(|(_, label)| *label == BlockId(0)));
-        } else {
-            panic!("Expected Phi instruction");
+        match &last_block.instructions[0] {
+            Instruction::Phi { incoming, .. } => {
+                assert!(incoming.iter().any(|(_, label)| *label == BlockId(0)));
+            }
+            Instruction::Copy { dest, .. } => {
+                // After trivial phi simplification, the phi became a Copy
+                assert_eq!(dest.0, 1);
+            }
+            other => panic!("Expected Phi or Copy instruction, got {:?}", other),
         }
     }
 

@@ -36,37 +36,28 @@ pub(crate) fn eliminate_dead_code(func: &mut IrFunction) -> usize {
         let mut removed = 0;
         for block in &mut func.blocks {
             let original_len = block.instructions.len();
-            // Keep source_spans in sync with instructions
-            if !block.source_spans.is_empty() {
-                let mut idx = 0;
-                let insts = &block.instructions;
-                block.source_spans.retain(|_| {
-                    let inst = &insts[idx];
-                    idx += 1;
-                    if has_side_effects(inst) {
-                        return true;
-                    }
-                    match inst.dest() {
-                        Some(dest) => {
-                            let id = dest.0 as usize;
-                            id < used.len() && used[id]
+            let has_spans = !block.source_spans.is_empty();
+
+            // Fuse instruction and span removal into a single pass.
+            // This avoids scanning instructions twice (once for spans, once for insts)
+            // and improves cache locality.
+            if has_spans {
+                let mut write_idx = 0;
+                for read_idx in 0..block.instructions.len() {
+                    let keep = is_live(&block.instructions[read_idx], &used);
+                    if keep {
+                        if write_idx != read_idx {
+                            block.instructions.swap(write_idx, read_idx);
+                            block.source_spans.swap(write_idx, read_idx);
                         }
-                        None => true,
+                        write_idx += 1;
                     }
-                });
+                }
+                block.instructions.truncate(write_idx);
+                block.source_spans.truncate(write_idx);
+            } else {
+                block.instructions.retain(|inst| is_live(inst, &used));
             }
-            block.instructions.retain(|inst| {
-                if has_side_effects(inst) {
-                    return true;
-                }
-                match inst.dest() {
-                    Some(dest) => {
-                        let id = dest.0 as usize;
-                        id < used.len() && used[id]
-                    }
-                    None => true,
-                }
-            });
             removed += original_len - block.instructions.len();
         }
 
@@ -76,6 +67,21 @@ pub(crate) fn eliminate_dead_code(func: &mut IrFunction) -> usize {
         total += removed;
     }
     total
+}
+
+/// Check if an instruction is live (should be retained).
+#[inline]
+fn is_live(inst: &Instruction, used: &[bool]) -> bool {
+    if has_side_effects(inst) {
+        return true;
+    }
+    match inst.dest() {
+        Some(dest) => {
+            let id = dest.0 as usize;
+            id < used.len() && used[id]
+        }
+        None => true,
+    }
 }
 
 /// Collect all Value IDs that are used in the function into a bitvector.

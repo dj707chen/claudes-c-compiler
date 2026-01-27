@@ -551,7 +551,13 @@ impl Parser {
                                             }
                                         }
                                     }
-                                    TokenKind::Identifier(name) if name == "noreturn" || name == "__noreturn__" => {
+                                    TokenKind::Identifier(name) if name == "noreturn" => {
+                                        self.parsing_noreturn = true;
+                                        self.advance();
+                                    }
+                                    // __noreturn__ is tokenized as TokenKind::Noreturn by the lexer,
+                                    // so handle the keyword form here in addition to the identifier "noreturn".
+                                    TokenKind::Noreturn => {
                                         self.parsing_noreturn = true;
                                         self.advance();
                                     }

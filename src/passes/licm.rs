@@ -271,80 +271,81 @@ fn analyze_allocas(func: &IrFunction) -> AllocaAnalysis {
                 Instruction::Alloca { .. } | Instruction::DynAlloca { .. } => {}
                 // All other instructions: any alloca used as an operand is address-taken.
                 _ => {
-                    for val_id in all_operand_values(inst) {
+                    for_each_operand_value(inst, |val_id| {
                         if alloca_values.contains(&val_id) {
                             address_taken.insert(val_id);
                         }
-                    }
+                    });
                 }
             }
         }
 
         // Check terminator operands.
-        for val_id in terminator_operand_values(&block.terminator) {
+        for_each_terminator_value(&block.terminator, |val_id| {
             if alloca_values.contains(&val_id) {
                 address_taken.insert(val_id);
             }
-        }
+        });
     }
 
     AllocaAnalysis { alloca_values, address_taken }
 }
 
-/// Get all Value IDs used as operands by any instruction (for address-taken analysis).
-fn all_operand_values(inst: &Instruction) -> Vec<u32> {
-    let mut vals = Vec::new();
-
-    fn collect(op: &Operand, vals: &mut Vec<u32>) {
+/// Visit each Value ID used as operands by any instruction (for address-taken analysis).
+/// Uses a callback to avoid allocating a Vec per call.
+#[inline]
+fn for_each_operand_value(inst: &Instruction, mut f: impl FnMut(u32)) {
+    #[inline]
+    fn collect(op: &Operand, f: &mut impl FnMut(u32)) {
         if let Operand::Value(v) = op {
-            vals.push(v.0);
+            f(v.0);
         }
     }
 
     match inst {
-        Instruction::BinOp { lhs, rhs, .. } => { collect(lhs, &mut vals); collect(rhs, &mut vals); }
-        Instruction::UnaryOp { src, .. } => collect(src, &mut vals),
-        Instruction::Cmp { lhs, rhs, .. } => { collect(lhs, &mut vals); collect(rhs, &mut vals); }
-        Instruction::Cast { src, .. } => collect(src, &mut vals),
+        Instruction::BinOp { lhs, rhs, .. } => { collect(lhs, &mut f); collect(rhs, &mut f); }
+        Instruction::UnaryOp { src, .. } => collect(src, &mut f),
+        Instruction::Cmp { lhs, rhs, .. } => { collect(lhs, &mut f); collect(rhs, &mut f); }
+        Instruction::Cast { src, .. } => collect(src, &mut f),
         Instruction::GetElementPtr { base, offset, .. } => {
-            vals.push(base.0);
-            collect(offset, &mut vals);
+            f(base.0);
+            collect(offset, &mut f);
         }
-        Instruction::Copy { src, .. } => collect(src, &mut vals),
-        Instruction::Call { args, .. } => { for a in args { collect(a, &mut vals); } }
+        Instruction::Copy { src, .. } => collect(src, &mut f),
+        Instruction::Call { args, .. } => { for a in args { collect(a, &mut f); } }
         Instruction::CallIndirect { func_ptr, args, .. } => {
-            collect(func_ptr, &mut vals);
-            for a in args { collect(a, &mut vals); }
+            collect(func_ptr, &mut f);
+            for a in args { collect(a, &mut f); }
         }
-        Instruction::Memcpy { dest, src, .. } => { vals.push(dest.0); vals.push(src.0); }
-        Instruction::VaStart { va_list_ptr, .. } => vals.push(va_list_ptr.0),
-        Instruction::VaEnd { va_list_ptr } => vals.push(va_list_ptr.0),
-        Instruction::VaCopy { dest_ptr, src_ptr } => { vals.push(dest_ptr.0); vals.push(src_ptr.0); }
-        Instruction::VaArg { va_list_ptr, .. } => vals.push(va_list_ptr.0),
-        Instruction::AtomicRmw { ptr, val, .. } => { collect(ptr, &mut vals); collect(val, &mut vals); }
+        Instruction::Memcpy { dest, src, .. } => { f(dest.0); f(src.0); }
+        Instruction::VaStart { va_list_ptr, .. } => f(va_list_ptr.0),
+        Instruction::VaEnd { va_list_ptr } => f(va_list_ptr.0),
+        Instruction::VaCopy { dest_ptr, src_ptr } => { f(dest_ptr.0); f(src_ptr.0); }
+        Instruction::VaArg { va_list_ptr, .. } => f(va_list_ptr.0),
+        Instruction::AtomicRmw { ptr, val, .. } => { collect(ptr, &mut f); collect(val, &mut f); }
         Instruction::AtomicCmpxchg { ptr, expected, desired, .. } => {
-            collect(ptr, &mut vals); collect(expected, &mut vals); collect(desired, &mut vals);
+            collect(ptr, &mut f); collect(expected, &mut f); collect(desired, &mut f);
         }
-        Instruction::AtomicLoad { ptr, .. } => collect(ptr, &mut vals),
-        Instruction::AtomicStore { ptr, val, .. } => { collect(ptr, &mut vals); collect(val, &mut vals); }
+        Instruction::AtomicLoad { ptr, .. } => collect(ptr, &mut f),
+        Instruction::AtomicStore { ptr, val, .. } => { collect(ptr, &mut f); collect(val, &mut f); }
         Instruction::InlineAsm { outputs, inputs, .. } => {
             // Output pointers are alloca Values that the backend stores asm results into.
             // They must be tracked as address-taken to prevent LICM from hoisting loads
             // of those allocas out of loops containing inline asm.
-            for (_, ptr, _) in outputs { vals.push(ptr.0); }
-            for (_, op, _) in inputs { collect(op, &mut vals); }
+            for (_, ptr, _) in outputs { f(ptr.0); }
+            for (_, op, _) in inputs { collect(op, &mut f); }
         }
-        Instruction::Intrinsic { args, .. } => { for a in args { collect(a, &mut vals); } }
+        Instruction::Intrinsic { args, .. } => { for a in args { collect(a, &mut f); } }
         Instruction::Phi { incoming, .. } => {
-            for (op, _) in incoming { collect(op, &mut vals); }
+            for (op, _) in incoming { collect(op, &mut f); }
         }
-        Instruction::SetReturnF64Second { src } => collect(src, &mut vals),
-        Instruction::SetReturnF32Second { src } => collect(src, &mut vals),
-        Instruction::DynAlloca { size, .. } => collect(size, &mut vals),
+        Instruction::SetReturnF64Second { src } => collect(src, &mut f),
+        Instruction::SetReturnF32Second { src } => collect(src, &mut f),
+        Instruction::DynAlloca { size, .. } => collect(size, &mut f),
         Instruction::Select { cond, true_val, false_val, .. } => {
-            collect(cond, &mut vals);
-            collect(true_val, &mut vals);
-            collect(false_val, &mut vals);
+            collect(cond, &mut f);
+            collect(true_val, &mut f);
+            collect(false_val, &mut f);
         }
         // These don't use Value operands (or are already handled above).
         Instruction::Alloca { .. }
@@ -358,75 +359,72 @@ fn all_operand_values(inst: &Instruction) -> Vec<u32> {
         | Instruction::StackSave { .. }
         | Instruction::StackRestore { .. } => {}
     }
-
-    vals
 }
 
-/// Get all Value IDs used in a terminator.
-fn terminator_operand_values(term: &Terminator) -> Vec<u32> {
-    let mut vals = Vec::new();
+/// Visit each Value ID used in a terminator.
+#[inline]
+fn for_each_terminator_value(term: &Terminator, mut f: impl FnMut(u32)) {
     match term {
-        Terminator::Return(Some(Operand::Value(v))) => vals.push(v.0),
-        Terminator::CondBranch { cond: Operand::Value(v), .. } => vals.push(v.0),
-        Terminator::IndirectBranch { target: Operand::Value(v), .. } => vals.push(v.0),
-        Terminator::Switch { val: Operand::Value(v), .. } => vals.push(v.0),
+        Terminator::Return(Some(Operand::Value(v))) => f(v.0),
+        Terminator::CondBranch { cond: Operand::Value(v), .. } => f(v.0),
+        Terminator::IndirectBranch { target: Operand::Value(v), .. } => f(v.0),
+        Terminator::Switch { val: Operand::Value(v), .. } => f(v.0),
         _ => {}
     }
-    vals
 }
 
-/// Get all Value IDs referenced as operands by a hoistable instruction (not including dest).
+/// Visit each Value ID referenced as operands by a hoistable instruction (not including dest).
 /// This is used for the invariance check during hoisting.
-fn instruction_operand_values(inst: &Instruction) -> Vec<u32> {
-    let mut vals = Vec::new();
-    let collect_op = |op: &Operand, vals: &mut Vec<u32>| {
+/// Uses a callback to avoid allocating a Vec per call in the hot fixpoint loop.
+#[inline]
+fn for_each_hoistable_operand(inst: &Instruction, mut f: impl FnMut(u32)) {
+    #[inline]
+    fn collect_op(op: &Operand, f: &mut impl FnMut(u32)) {
         if let Operand::Value(v) = op {
-            vals.push(v.0);
+            f(v.0);
         }
-    };
+    }
 
     match inst {
         Instruction::BinOp { lhs, rhs, .. } => {
-            collect_op(lhs, &mut vals);
-            collect_op(rhs, &mut vals);
+            collect_op(lhs, &mut f);
+            collect_op(rhs, &mut f);
         }
         Instruction::UnaryOp { src, .. } => {
-            collect_op(src, &mut vals);
+            collect_op(src, &mut f);
         }
         Instruction::Cmp { lhs, rhs, .. } => {
-            collect_op(lhs, &mut vals);
-            collect_op(rhs, &mut vals);
+            collect_op(lhs, &mut f);
+            collect_op(rhs, &mut f);
         }
         Instruction::Cast { src, .. } => {
-            collect_op(src, &mut vals);
+            collect_op(src, &mut f);
         }
         Instruction::GetElementPtr { base, offset, .. } => {
-            vals.push(base.0);
-            collect_op(offset, &mut vals);
+            f(base.0);
+            collect_op(offset, &mut f);
         }
         Instruction::Copy { src, .. } => {
-            collect_op(src, &mut vals);
+            collect_op(src, &mut f);
         }
         Instruction::GlobalAddr { .. } => {
             // No value operands
         }
         Instruction::Load { ptr, .. } => {
             // The pointer is the operand we need to check for loop-invariance.
-            vals.push(ptr.0);
+            f(ptr.0);
         }
         Instruction::Select { cond, true_val, false_val, .. } => {
-            collect_op(cond, &mut vals);
-            collect_op(true_val, &mut vals);
-            collect_op(false_val, &mut vals);
+            collect_op(cond, &mut f);
+            collect_op(true_val, &mut f);
+            collect_op(false_val, &mut f);
         }
         Instruction::Intrinsic { args, .. } => {
-            for a in args { collect_op(a, &mut vals); }
+            for a in args { collect_op(a, &mut f); }
         }
         // All other instructions are non-hoistable and should never reach here.
-        _ => unreachable!("instruction_operand_values called on non-hoistable instruction")
+        _ => unreachable!("for_each_hoistable_operand called on non-hoistable instruction")
     }
-
-    vals
 }
 
 /// Analyze which allocas are stored to within a loop body.
@@ -600,10 +598,14 @@ fn hoist_loop_invariants(
                 // Determine if this instruction can be hoisted
                 let can_hoist = if is_hoistable(inst) {
                     // Pure instruction: check all operands are loop-invariant
-                    let operand_vals = instruction_operand_values(inst);
-                    operand_vals.iter().all(|&val_id| {
-                        !loop_defined.contains(&val_id) || invariant.contains(&val_id)
-                    })
+                    // Use callback to avoid Vec allocation in this hot loop
+                    let mut all_invariant = true;
+                    for_each_hoistable_operand(inst, |val_id| {
+                        if all_invariant && loop_defined.contains(&val_id) && !invariant.contains(&val_id) {
+                            all_invariant = false;
+                        }
+                    });
+                    all_invariant
                 } else if let Instruction::Load { ptr, ty, .. } = inst {
                     // TODO: Extend to also hoist float, long double, and i128
                     // loads once the backend register paths support them.
@@ -736,15 +738,14 @@ fn topological_sort_instructions(mut insts: Vec<Instruction>) -> Vec<Instruction
     let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
 
     for (i, inst) in insts.iter().enumerate() {
-        let operand_vals = instruction_operand_values(inst);
-        for val_id in operand_vals {
+        for_each_hoistable_operand(inst, |val_id| {
             if let Some(&def_idx) = def_to_idx.get(&val_id) {
                 if def_idx != i {
                     dependents[def_idx].push(i);
                     in_degree[i] += 1;
                 }
             }
-        }
+        });
     }
 
     // Kahn's algorithm

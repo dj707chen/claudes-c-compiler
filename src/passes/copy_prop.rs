@@ -29,10 +29,10 @@ pub(crate) fn propagate_copies(func: &mut IrFunction) -> usize {
     let max_id = func.max_value_id() as usize;
 
     // Phase 1: Build the copy map as a flat lookup table (dest -> resolved source)
-    let copy_map = build_copy_map(func, max_id);
+    let (copy_map, has_copies) = build_copy_map(func, max_id);
 
-    // Check if any copies exist
-    if !copy_map.iter().any(|e| e.is_some()) {
+    // Early exit if no copies found (avoids scanning the entire copy_map Vec)
+    if !has_copies {
         return 0;
     }
 
@@ -51,7 +51,8 @@ pub(crate) fn propagate_copies(func: &mut IrFunction) -> usize {
 
 /// Build a flat lookup table from Copy destinations to their ultimate sources.
 /// Follows chains: if %a = Copy %b and %b = Copy %c, resolves %a -> %c.
-fn build_copy_map(func: &IrFunction, max_id: usize) -> Vec<Option<Operand>> {
+/// Returns (copy_map, has_any_entries) to avoid scanning the map for emptiness.
+fn build_copy_map(func: &IrFunction, max_id: usize) -> (Vec<Option<Operand>>, bool) {
     // First pass: collect direct copy relationships into flat table.
     // If a Value has multiple Copy definitions (e.g. from single-phi elimination),
     // we skip it to avoid propagating the wrong source.
@@ -83,18 +84,20 @@ fn build_copy_map(func: &IrFunction, max_id: usize) -> Vec<Option<Operand>> {
     }
 
     if !has_copies {
-        return direct; // all None
+        return (direct, false); // all None
     }
 
     // Second pass: resolve chains with cycle detection
     let mut resolved: Vec<Option<Operand>> = vec![None; max_id + 1];
+    let mut any_resolved = false;
     for i in 0..=max_id {
         if direct[i].is_some() {
             resolved[i] = Some(resolve_chain(i as u32, &direct));
+            any_resolved = true;
         }
     }
 
-    resolved
+    (resolved, any_resolved)
 }
 
 /// Follow a chain of copies to find the ultimate source.
