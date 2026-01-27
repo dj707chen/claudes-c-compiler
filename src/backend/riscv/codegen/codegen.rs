@@ -11,18 +11,20 @@ use crate::backend::cast::{CastKind, classify_cast, FloatOp};
 use crate::backend::inline_asm::emit_inline_asm_common;
 use crate::backend::regalloc::PhysReg;
 
-/// RISC-V callee-saved registers available for register allocation.
-/// s0 is the frame pointer; s2-s6 are used as temporaries in emit_call_reg_args
-/// (they are added to used_callee_saved when needed, not allocated by regalloc).
-/// Available for allocation: s1, s7-s11 (6 registers).
+/// RISC-V callee-saved registers always available for register allocation.
+/// s0 is the frame pointer.
+/// These 6 registers are always safe to allocate: s1, s7-s11.
 /// PhysReg encoding: 1=s1, 7=s7, 8=s8, 9=s9, 10=s10, 11=s11.
 const RISCV_CALLEE_SAVED: [PhysReg; 6] = [
     PhysReg(1), PhysReg(7), PhysReg(8), PhysReg(9), PhysReg(10), PhysReg(11),
 ];
 
-/// The callee-saved registers used as temporaries in emit_call_reg_args.
+/// Callee-saved registers that are conditionally available for allocation.
+/// s2-s6 are used as staging temporaries in emit_call_reg_args when a call
+/// has >= 4 GP register arguments. Any that are NOT needed for call staging
+/// can be allocated by the register allocator, giving up to 11 callee-saved
+/// registers total (vs. 6 when all are reserved).
 /// PhysReg(2)=s2, PhysReg(3)=s3, PhysReg(4)=s4, PhysReg(5)=s5, PhysReg(6)=s6.
-/// These are used when a function call has >= 4 GP register arguments.
 const CALL_TEMP_CALLEE_SAVED: [PhysReg; 5] = [
     PhysReg(2), PhysReg(3), PhysReg(4), PhysReg(5), PhysReg(6),
 ];
@@ -716,7 +718,27 @@ impl ArchCodegen for RiscvCodegen {
         // causing kernel stack overflows.
         let mut asm_clobbered_regs: Vec<PhysReg> = Vec::new();
         collect_inline_asm_callee_saved_riscv(func, &mut asm_clobbered_regs);
-        let available_regs = crate::backend::generation::filter_available_regs(&RISCV_CALLEE_SAVED, &asm_clobbered_regs);
+
+        // Determine which s2-s6 registers are needed as call staging temporaries.
+        // emit_call_reg_args uses s2-s6 when a call has >= 4 GP register arguments.
+        // Any s2-s6 registers NOT needed for call staging can be used by the
+        // register allocator, giving us up to 11 callee-saved registers instead of 6.
+        let max_gp = max_gp_reg_args_in_calls(func, &self.call_abi_config());
+        let num_s_regs_for_calls = if max_gp > 3 {
+            (max_gp - 3).min(CALL_TEMP_CALLEE_SAVED.len())
+        } else {
+            0
+        };
+
+        // Build the full set of available callee-saved registers:
+        // Always available: s1, s7-s11 (RISCV_CALLEE_SAVED)
+        // Conditionally available: s2-s6 that are NOT reserved for call staging
+        let mut all_available: Vec<PhysReg> = RISCV_CALLEE_SAVED.to_vec();
+        for i in num_s_regs_for_calls..CALL_TEMP_CALLEE_SAVED.len() {
+            all_available.push(CALL_TEMP_CALLEE_SAVED[i]);
+        }
+
+        let available_regs = crate::backend::generation::filter_available_regs(&all_available, &asm_clobbered_regs);
         // NOTE: RISC-V caller-saved register allocation (t2-t6) is not yet feasible.
         // All five temporary registers are hardcoded as scratch throughout the codegen:
         // t2 = comparison RHS, binop RHS, indirect call target, atomic val/expected
@@ -732,20 +754,12 @@ impl ArchCodegen for RiscvCodegen {
         );
         // f128_load_sources is cleared by state.reset_for_function() at the start of each function.
 
-        // Scan all calls in the function to find the maximum number of GP register
-        // arguments. emit_call_reg_args uses callee-saved s2-s6 as staging temporaries
-        // when there are >= 4 GP register args. We must add those to used_callee_saved
+        // Add the s2-s6 registers that ARE needed for call staging to used_callee_saved,
         // so they are saved/restored in the prologue/epilogue.
-        let max_gp = max_gp_reg_args_in_calls(func, &self.call_abi_config());
-        // temp_regs = ["t3", "t4", "t5", "s2", "s3", "s4", "s5", "s6"]
-        // s2 is used when max_gp >= 4, s3 when >= 5, etc.
-        if max_gp > 3 {
-            let num_s_regs_needed = (max_gp - 3).min(CALL_TEMP_CALLEE_SAVED.len());
-            for i in 0..num_s_regs_needed {
-                let reg = CALL_TEMP_CALLEE_SAVED[i];
-                if !self.used_callee_saved.contains(&reg) {
-                    self.used_callee_saved.push(reg);
-                }
+        for i in 0..num_s_regs_for_calls {
+            let reg = CALL_TEMP_CALLEE_SAVED[i];
+            if !self.used_callee_saved.contains(&reg) {
+                self.used_callee_saved.push(reg);
             }
         }
 
