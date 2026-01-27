@@ -270,4 +270,32 @@ impl InlineAsmEmitter for RiscvCodegen {
         self.asm_gp_scratch_idx = 0;
         self.asm_fp_scratch_idx = 0;
     }
+
+    /// RISC-V-specific immediate constraint ranges.
+    ///
+    /// On RISC-V, 'K' means a 5-bit unsigned CSR immediate (0-31), used by
+    /// csrs/csrc/csrw instructions. This differs from x86 where 'K' means 0-255.
+    /// Without this override, values like 128 would be incorrectly emitted as
+    /// immediates in CSR instructions, causing assembler errors.
+    fn constant_fits_immediate(&self, constraint: &str, value: i64) -> bool {
+        let stripped = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
+        // If constraint has 'i' or 'n', any constant value is accepted
+        if stripped.contains('i') || stripped.contains('n') {
+            return true;
+        }
+        // Check each constraint letter with RISC-V-specific ranges
+        for ch in stripped.chars() {
+            let fits = match ch {
+                // RISC-V 'I': 12-bit signed immediate (-2048..2047)
+                'I' => value >= -2048 && value <= 2047,
+                // RISC-V 'K': 5-bit unsigned CSR immediate (0..31) for csrs/csrc/csrw
+                'K' => value >= 0 && value <= 31,
+                _ => continue,
+            };
+            if fits {
+                return true;
+            }
+        }
+        false
+    }
 }

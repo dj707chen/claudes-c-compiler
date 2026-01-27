@@ -141,6 +141,16 @@ pub trait InlineAsmEmitter {
     /// Reset scratch register allocation state (called at start of each inline asm).
     fn reset_scratch_state(&mut self);
 
+    /// Check whether a constant value fits the immediate constraint range for a given
+    /// constraint string. Backends can override this to provide architecture-specific
+    /// immediate ranges. The default implementation uses x86 semantics.
+    ///
+    /// For example, on RISC-V the 'K' constraint means a 5-bit unsigned CSR immediate
+    /// (0-31), while on x86 it means 0-255. Without this override, the shared framework
+    /// would incorrectly promote values like 128 to immediates on RISC-V.
+    fn constant_fits_immediate(&self, constraint: &str, value: i64) -> bool {
+        constant_fits_immediate_constraint(constraint, value)
+    }
 }
 
 /// Check whether a constraint string contains an immediate alternative character.
@@ -357,7 +367,7 @@ pub fn emit_inline_asm_common_impl(
         if matches!(op.kind, AsmOperandKind::GpReg) {
             if let Operand::Const(c) = val {
                 if let Some(v) = c.to_i64() {
-                    if constant_fits_immediate_constraint(constraint, v) {
+                    if emitter.constant_fits_immediate(constraint, v) {
                         op.imm_value = Some(v);
                         op.kind = AsmOperandKind::Immediate;
                     }

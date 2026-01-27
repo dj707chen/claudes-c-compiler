@@ -1,0 +1,17 @@
+Task: Fix RISC-V GOT relocation boot failure by passing -fno-pic to assembler
+Status: in_progress
+Started: 2026-01-27
+
+Problem: When compiling kernel .c files with ccc-riscv, the GNU assembler
+(riscv64-linux-gnu-gcc) expands `la` pseudo-instructions using R_RISCV_GOT_HI20
+(GOT indirection) instead of R_RISCV_PCREL_HI20 (direct PC-relative). This is
+because the RISC-V GNU assembler defaults to PIC mode, and our compiler was not
+passing -fno-pic to it when PIC is not requested.
+
+The GOT relocations cause kernel boot failures because the kernel linker creates
+GOT entries that reference addresses not yet mapped during early boot, leading to
+infinite page fault loops.
+
+Fix: In build_asm_extra_args(), pass -fno-pic to the assembler when the compiler
+is not in PIC mode (self.pic == false). This ensures `la` expands to PCREL
+relocations instead of GOT relocations.
