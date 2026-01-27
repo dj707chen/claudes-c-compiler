@@ -539,6 +539,14 @@ impl Driver {
             if self.riscv_no_relax {
                 args.push("-mno-relax".to_string());
             }
+            // The RISC-V GNU assembler defaults to PIC mode, which causes
+            // `la` pseudo-instructions to expand with R_RISCV_GOT_HI20 (GOT
+            // indirection) instead of R_RISCV_PCREL_HI20 (direct PC-relative).
+            // The Linux kernel does not have a GOT and expects PCREL relocations,
+            // so we must explicitly pass -fno-pic when PIC is not requested.
+            if !self.pic {
+                args.push("-fno-pic".to_string());
+            }
         }
         args
     }

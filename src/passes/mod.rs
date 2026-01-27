@@ -18,6 +18,7 @@ pub mod gvn;
 pub mod if_convert;
 pub mod inline;
 pub mod ipcp;
+pub mod iv_strength_reduce;
 pub mod licm;
 pub mod narrow;
 pub mod simplify;
@@ -275,6 +276,15 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
             let n = timed_pass!("licm", run_on_visited(module, &dirty, &mut changed, licm::licm_function));
             cur_pass_changes[6] = n;
             total_changes += n;
+        }
+
+        // Phase 6a: Induction variable strength reduction (first iteration only).
+        // Replaces expensive multiply-based array index computations (iv * stride + base)
+        // with pointer induction variables (ptr += stride). Run after LICM so that
+        // loop-invariant base pointers have been hoisted to preheaders.
+        if iter == 0 && !disabled.contains("ivsr") {
+            total_changes += timed_pass!("iv_strength_reduce",
+                run_on_visited(module, &dirty, &mut changed, iv_strength_reduce::ivsr_function));
         }
 
         // Phase 7: If-conversion
