@@ -22,7 +22,7 @@ pub mod licm;
 pub mod narrow;
 pub mod simplify;
 
-use crate::common::fx_hash::{FxHashMap, FxHashSet};
+use crate::common::fx_hash::FxHashMap;
 use crate::ir::ir::{Instruction, IrModule, IrFunction, GlobalInit, Operand, Value};
 
 /// Run a per-function pass only on functions in the visit set.
@@ -645,13 +645,6 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
         collect_global_init_addr_taken_indexed(&global.init, &name_to_id, &mut address_taken);
     }
 
-    // Phase 5: Build a set of reachable names (for symbol_attrs filtering)
-    // before dropping the name_to_id map.
-    let reachable_names: FxHashSet<String> = name_to_id.iter()
-        .filter(|(_, &id)| (id as usize) < reachable.len() && reachable[id as usize])
-        .map(|(&name, _)| name.to_string())
-        .collect();
-
     // Drop the borrow on module strings so we can mutate module below.
     drop(name_to_id);
 
@@ -682,9 +675,13 @@ fn eliminate_dead_static_functions(module: &mut IrModule) {
         id < reachable.len() && reachable[id]
     });
 
-    module.symbol_attrs.retain(|(name, _, _)| {
-        reachable_names.contains(name.as_str())
-    });
+    // Note: symbol_attrs are NOT filtered by reachability. They contain assembler
+    // directives (.weak, .hidden) for extern declarations. These symbols may not appear
+    // in the module's function/global lists (they're defined in other translation units),
+    // so they can't be tracked by the reachability graph. Emitting a .weak directive
+    // for an unreferenced symbol is harmless — the assembler and linker simply ignore it.
+    // Dropping these directives, however, would cause linker errors for weak extern
+    // symbols (e.g., the kernel's kallsyms_names declared as `extern __weak`).
 }
 
 /// Collect symbol references from a global initializer into a Vec.

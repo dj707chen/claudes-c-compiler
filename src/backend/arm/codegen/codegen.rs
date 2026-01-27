@@ -2905,6 +2905,14 @@ impl ArchCodegen for ArmCodegen {
         self.store_x0_to(dest);
     }
 
+    fn emit_label_addr(&mut self, dest: &Value, label: &str) {
+        // Labels are always local symbols -- never use GOT indirection, even in PIC mode.
+        // Always use direct PC-relative addressing (adrp + add).
+        self.state.emit_fmt(format_args!("    adrp x0, {}", label));
+        self.state.emit_fmt(format_args!("    add x0, x0, :lo12:{}", label));
+        self.store_x0_to(dest);
+    }
+
     fn emit_tls_global_addr(&mut self, dest: &Value, name: &str) {
         // Local Exec TLS model for AArch64:
         // mrs x0, tpidr_el0           ; load thread pointer

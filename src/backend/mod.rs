@@ -201,12 +201,14 @@ impl Target {
             }
             Target::Aarch64 => {
                 let mut cg = arm::ArmCodegen::new();
+                cg.set_pic(opts.pic);
                 cg.set_no_jump_tables(opts.no_jump_tables);
                 cg.set_general_regs_only(opts.general_regs_only);
                 generation::generate_module_with_debug(&mut cg, module, opts.debug_info, source_mgr)
             }
             Target::Riscv64 => {
                 let mut cg = riscv::RiscvCodegen::new();
+                cg.set_pic(opts.pic);
                 cg.set_no_jump_tables(opts.no_jump_tables);
                 cg.set_no_relax(opts.no_relax);
                 // Emit .option norelax before any code, matching generate() behavior

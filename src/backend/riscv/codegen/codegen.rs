@@ -1080,6 +1080,23 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    call __extenddftf2");
     }
 
+    fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {
+        if let Some(val) = val {
+            let ret_ty = self.current_return_type();
+            if ret_ty.is_long_double() {
+                // Full-precision F128 return: load the full 128-bit value into a0:a1
+                // (RISC-V LP64D ABI returns f128 in GP register pairs).
+                // This avoids the default path which would lose precision by going
+                // through an f64 approximation and __extenddftf2.
+                self.emit_f128_operand_to_a0_a1(val);
+                self.emit_epilogue_and_ret(frame_size);
+                return;
+            }
+        }
+        // For all non-F128 return types, use the default implementation.
+        crate::backend::traits::emit_return_default(self, val, frame_size);
+    }
+
     fn emit_return_f32_to_reg(&mut self) {
         self.state.emit("    fmv.w.x fa0, t0");
     }
@@ -2186,6 +2203,13 @@ impl ArchCodegen for RiscvCodegen {
         self.store_t0_to(dest);
     }
 
+    fn emit_label_addr(&mut self, dest: &Value, label: &str) {
+        // Labels are always local symbols -- use lla (local load address) to avoid
+        // GOT indirection that `la` may produce in PIC mode.
+        self.state.emit_fmt(format_args!("    lla t0, {}", label));
+        self.store_t0_to(dest);
+    }
+
     fn emit_tls_global_addr(&mut self, dest: &Value, name: &str) {
         // Local Exec TLS model for RISC-V:
         // lui t0, %tprel_hi(x)
@@ -2558,12 +2582,12 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    sd t2, 0(t0)");
     }
 
-    // emit_return: uses default implementation from ArchCodegen trait
+    // emit_return: overridden above (near emit_return_f128_to_reg) for F128 full-precision return
 
     // emit_branch, emit_cond_branch, emit_unreachable, emit_indirect_branch:
     // use default implementations from ArchCodegen trait
 
-    // emit_label_addr: uses default implementation (delegates to emit_global_addr)
+    // emit_label_addr: overridden above (near emit_global_addr) for local label addressing
 
     fn emit_get_return_f64_second(&mut self, dest: &Value) {
         // After a function call, the second F64 return value is in fa1.
