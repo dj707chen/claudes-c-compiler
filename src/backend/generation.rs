@@ -170,6 +170,134 @@ fn build_global_addr_map(func: &IrFunction) -> FxHashMap<u32, String> {
     map
 }
 
+/// Build a set of GlobalAddr value IDs that are used as Load/Store pointers.
+/// In kernel code model, GlobalAddr values used only as integer values
+/// (e.g., `(unsigned long)_text`) need absolute addressing (R_X86_64_32S)
+/// to produce the linked virtual address. But GlobalAddr values used as
+/// Load/Store pointers need RIP-relative addressing so they work at any
+/// physical/virtual address during early boot.
+fn build_global_addr_ptr_set(func: &IrFunction) -> FxHashSet<u32> {
+    // First collect all GlobalAddr dest values
+    let mut global_addrs: FxHashSet<u32> = FxHashSet::default();
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let Instruction::GlobalAddr { dest, .. } = inst {
+                global_addrs.insert(dest.0);
+            }
+        }
+    }
+    // Now find which ones (or values derived from them) are used as memory ptrs.
+    // Track derivation through Copy, Cast, GEP, Phi, and Select so that a
+    // GlobalAddr flowing through intermediate values to a Load/Store/Atomic
+    // ptr is still caught.
+    let mut ptr_set: FxHashSet<u32> = FxHashSet::default();
+    let mut derived_from: FxHashMap<u32, u32> = FxHashMap::default(); // derived_dest -> original GlobalAddr
+
+    // Helper: if `id` is a GlobalAddr or derived from one, mark it as pointer use
+    let mark_val = |id: u32, global_addrs: &FxHashSet<u32>, derived_from: &FxHashMap<u32, u32>, ptr_set: &mut FxHashSet<u32>| {
+        if global_addrs.contains(&id) {
+            ptr_set.insert(id);
+        } else if let Some(&orig) = derived_from.get(&id) {
+            ptr_set.insert(orig);
+        }
+    };
+    // Helper: same but for Operand (skips constants)
+    let mark_op = |op: &Operand, global_addrs: &FxHashSet<u32>, derived_from: &FxHashMap<u32, u32>, ptr_set: &mut FxHashSet<u32>| {
+        if let Operand::Value(v) = op {
+            if global_addrs.contains(&v.0) {
+                ptr_set.insert(v.0);
+            } else if let Some(&orig) = derived_from.get(&v.0) {
+                ptr_set.insert(orig);
+            }
+        }
+    };
+    // Helper: if src_id is a GlobalAddr or derived from one, record dest_id as derived
+    let track_val = |dest_id: u32, src_id: u32, global_addrs: &FxHashSet<u32>, derived_from: &mut FxHashMap<u32, u32>| {
+        if global_addrs.contains(&src_id) {
+            derived_from.insert(dest_id, src_id);
+        } else if let Some(&orig) = derived_from.get(&src_id) {
+            derived_from.insert(dest_id, orig);
+        }
+    };
+    // Helper: same but for Operand
+    let track_op = |dest_id: u32, op: &Operand, global_addrs: &FxHashSet<u32>, derived_from: &mut FxHashMap<u32, u32>| {
+        if let Operand::Value(v) = op {
+            if global_addrs.contains(&v.0) {
+                derived_from.insert(dest_id, v.0);
+            } else if let Some(&orig) = derived_from.get(&v.0) {
+                derived_from.insert(dest_id, orig);
+            }
+        }
+    };
+
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            match inst {
+                // Track derivation: these instructions produce a value that may
+                // carry a GlobalAddr through to a later pointer use.
+                Instruction::GetElementPtr { dest, base, .. } => {
+                    track_val(dest.0, base.0, &global_addrs, &mut derived_from);
+                }
+                Instruction::Copy { dest, src } => {
+                    track_op(dest.0, src, &global_addrs, &mut derived_from);
+                }
+                Instruction::Cast { dest, src, .. } => {
+                    track_op(dest.0, src, &global_addrs, &mut derived_from);
+                }
+                Instruction::Phi { dest, incoming, .. } => {
+                    for (op, _) in incoming {
+                        if let Operand::Value(v) = op {
+                            if global_addrs.contains(&v.0) || derived_from.contains_key(&v.0) {
+                                track_val(dest.0, v.0, &global_addrs, &mut derived_from);
+                                break;
+                            }
+                        }
+                    }
+                }
+                Instruction::Select { dest, true_val, false_val, .. } => {
+                    // If either branch carries a GlobalAddr, track the result
+                    track_op(dest.0, true_val, &global_addrs, &mut derived_from);
+                    if !derived_from.contains_key(&dest.0) {
+                        track_op(dest.0, false_val, &global_addrs, &mut derived_from);
+                    }
+                }
+                // Mark pointer uses: Load, Store, Memcpy, and atomic operations
+                Instruction::Load { ptr, .. } => {
+                    mark_val(ptr.0, &global_addrs, &derived_from, &mut ptr_set);
+                }
+                Instruction::Store { ptr, .. } => {
+                    mark_val(ptr.0, &global_addrs, &derived_from, &mut ptr_set);
+                }
+                Instruction::Memcpy { dest, src, .. } => {
+                    mark_val(dest.0, &global_addrs, &derived_from, &mut ptr_set);
+                    mark_val(src.0, &global_addrs, &derived_from, &mut ptr_set);
+                }
+                Instruction::AtomicLoad { ptr, .. } => {
+                    mark_op(ptr, &global_addrs, &derived_from, &mut ptr_set);
+                }
+                Instruction::AtomicStore { ptr, .. } => {
+                    mark_op(ptr, &global_addrs, &derived_from, &mut ptr_set);
+                }
+                Instruction::AtomicRmw { ptr, .. } => {
+                    mark_op(ptr, &global_addrs, &derived_from, &mut ptr_set);
+                }
+                Instruction::AtomicCmpxchg { ptr, .. } => {
+                    mark_op(ptr, &global_addrs, &derived_from, &mut ptr_set);
+                }
+                // Conservatively mark GlobalAddr passed to function calls as pointer use,
+                // since the callee may dereference it
+                Instruction::Call { args, .. } | Instruction::CallIndirect { args, .. } => {
+                    for arg in args {
+                        mark_op(arg, &global_addrs, &derived_from, &mut ptr_set);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    ptr_set
+}
+
 /// Returns the number of times each IR Value is used as an operand in
 /// instructions or terminators. Indexed by Value ID; used to identify
 /// single-use values eligible for compare-branch fusion.
@@ -504,6 +632,16 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
     // Used to emit direct symbol(%rip) references for segment-overridden loads/stores.
     let global_addr_map = build_global_addr_map(func);
 
+    // Pre-scan: identify GlobalAddr values used as Load/Store pointers.
+    // In kernel code model, non-pointer GlobalAddr values use absolute addressing
+    // (R_X86_64_32S) for the linked virtual address, while pointer GlobalAddr
+    // values use RIP-relative addressing for position-independent memory access.
+    let global_addr_ptr_set = if cg.state_ref().code_model_kernel {
+        build_global_addr_ptr_set(func)
+    } else {
+        FxHashSet::default()
+    };
+
     for block in &func.blocks {
         if Some(block.label) != entry_label {
             // Invalidate register cache at block boundaries: a value in a register
@@ -536,7 +674,7 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
                     continue;
                 }
             }
-            generate_instruction(cg, inst, &gep_fold_map, &global_addr_map);
+            generate_instruction(cg, inst, &gep_fold_map, &global_addr_map, &global_addr_ptr_set);
         }
 
         if let Some(fi) = fuse_idx {
@@ -568,7 +706,7 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction) {
 ///
 /// Instructions that clobber the accumulator unpredictably (calls, stores, atomics,
 /// inline asm, va_arg, memcpy, etc.) invalidate the cache after execution.
-fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_map: &FxHashMap<u32, GepFoldInfo>, global_addr_map: &FxHashMap<u32, String>) {
+fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_map: &FxHashMap<u32, GepFoldInfo>, global_addr_map: &FxHashMap<u32, String>, global_addr_ptr_set: &FxHashSet<u32>) {
     match inst {
         Instruction::Alloca { .. } => {
             // Space already allocated in prologue; does not touch registers
@@ -677,9 +815,18 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
             // Cache is set by emit_store_result(dest) inside emit_gep.
         }
         Instruction::GlobalAddr { dest, name } => {
-            // emit_global_addr loads an address and stores to dest.
-            cg.emit_global_addr(dest, name);
-            // The implementation calls emit_store_result(dest), so cache is valid.
+            // In kernel code model, use absolute addressing (R_X86_64_32S) for
+            // GlobalAddr values that are NOT used as Load/Store pointers. This
+            // gives the linked virtual address, needed for expressions like
+            // (unsigned long)_text. For GlobalAddr values used as pointers,
+            // keep RIP-relative addressing so memory accesses work at any
+            // physical/virtual address during early boot.
+            if cg.state_ref().code_model_kernel && !global_addr_ptr_set.contains(&dest.0) {
+                cg.emit_global_addr_absolute(dest, name);
+            } else {
+                cg.emit_global_addr(dest, name);
+            }
+            // The implementation calls store_rax_to(dest), so cache is valid.
         }
         Instruction::Select { dest, cond, true_val, false_val, ty } => {
             cg.emit_select(dest, cond, true_val, false_val, *ty);

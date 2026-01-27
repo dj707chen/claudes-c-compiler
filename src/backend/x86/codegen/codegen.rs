@@ -2906,23 +2906,26 @@ impl ArchCodegen for X86Codegen {
         if self.state.needs_got(name) {
             // PIC mode: load the address from the GOT
             self.state.emit_fmt(format_args!("    movq {}@GOTPCREL(%rip), %rax", name));
-        } else if self.state.code_model_kernel {
-            // Kernel code model: use absolute sign-extended 32-bit addressing.
-            // In mcmodel=kernel, all symbols are in the negative 2GB of the virtual
-            // address space, so they fit in a sign-extended 32-bit immediate.
-            // This produces R_X86_64_32S relocations, matching GCC's behavior.
-            // Using absolute addressing gives the link-time virtual address, which
-            // is what C code expects when casting a symbol to an integer (e.g.,
-            // `(unsigned long)_text`). RIP-relative `leaq` would give the runtime
-            // physical address, which differs from the virtual address during early
-            // boot before page tables are fully set up.
-            // Note: early boot code that needs the physical address uses explicit
-            // RIP-relative inline asm (e.g., `asm("leaq %c1(%%rip), %0")`).
-            self.state.out.emit_instr_sym_imm_reg("    movq", name, "rax");
         } else {
-            // Default code model: use RIP-relative LEA
+            // Use RIP-relative LEA for both default and kernel code models.
+            // In kernel model, emit_global_addr_absolute() is used instead
+            // for GlobalAddr values that are only used as integer values
+            // (not as pointers to dereference).
             self.state.out.emit_instr_sym_base_reg("    leaq", name, "rip", "rax");
         }
+        self.store_rax_to(dest);
+    }
+
+    fn emit_global_addr_absolute(&mut self, dest: &Value, name: &str) {
+        // Kernel code model: use absolute addressing to get the linked
+        // virtual address of the symbol. This generates an R_X86_64_32S
+        // relocation, giving the symbol's address in the negative 2GB of
+        // the virtual address space (e.g., 0xFFFFFFFF81000000 for _text).
+        // This matches GCC's behavior for expressions like
+        // (unsigned long)_text in kernel early boot code.
+        // Only used when the address is treated as an integer value,
+        // never for pointers that will be dereferenced.
+        self.state.out.emit_instr_sym_imm_reg("    movq", name, "rax");
         self.store_rax_to(dest);
     }
 

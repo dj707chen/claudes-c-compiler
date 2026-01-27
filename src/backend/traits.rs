@@ -474,6 +474,14 @@ pub trait ArchCodegen {
     /// Emit a global address load.
     fn emit_global_addr(&mut self, dest: &Value, name: &str);
 
+    /// Emit a global address using absolute addressing (R_X86_64_32S).
+    /// Used in kernel code model for GlobalAddr values that are only used
+    /// as integer values (e.g., `(unsigned long)_text`), not as pointers.
+    /// Default: falls back to emit_global_addr.
+    fn emit_global_addr_absolute(&mut self, dest: &Value, name: &str) {
+        self.emit_global_addr(dest, name);
+    }
+
     /// Emit a get-element-pointer (base + offset).
     fn emit_gep(&mut self, dest: &Value, base: &Value, offset: &Operand) {
         // Optimized path for constant offsets: avoid loading offset into acc
