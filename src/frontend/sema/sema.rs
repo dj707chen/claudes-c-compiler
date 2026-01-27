@@ -586,9 +586,11 @@ impl SemanticAnalyzer {
             // At global scope the scope stack is empty, so insert_enum_scoped
             // behaves identically to a direct insert.
             self.result.type_context.insert_enum_scoped(variant.name.clone(), self.enum_counter);
+            // GCC extension: enum constants that don't fit in int are promoted
+            let sym_ty = super::type_checker::enum_constant_type(self.enum_counter);
             self.symbol_table.declare(Symbol {
                 name: variant.name.clone(),
-                ty: CType::Int,
+                ty: sym_ty,
                 storage_class: StorageClass::Auto, // enum constants are like const int
                 span: Span::dummy(),
                 is_defined: true,

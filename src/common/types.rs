@@ -144,6 +144,11 @@ impl EnumType {
     /// smallest integer type that can represent all variant values.
     pub fn packed_size(&self) -> usize {
         if !self.is_packed {
+            // GCC extension: if any variant value exceeds int range,
+            // the enum size grows to 8 bytes (long long)
+            if self.variants.iter().any(|(_, v)| *v > i32::MAX as i64 || *v < i32::MIN as i64) {
+                return 8;
+            }
             return 4;
         }
         // Find the range of variant values to determine the minimum size
@@ -157,12 +162,14 @@ impl EnumType {
             // Unsigned range
             if max_val <= 0xFF { 1 }
             else if max_val <= 0xFFFF { 2 }
-            else { 4 }
+            else if max_val <= 0xFFFF_FFFF { 4 }
+            else { 8 }
         } else {
             // Signed range
             if min_val >= -128 && max_val <= 127 { 1 }
             else if min_val >= -32768 && max_val <= 32767 { 2 }
-            else { 4 }
+            else if min_val >= i32::MIN as i64 && max_val <= i32::MAX as i64 { 4 }
+            else { 8 }
         }
     }
 }
@@ -1055,11 +1062,12 @@ impl CType {
             CType::Short | CType::UShort => 2,
             CType::Int | CType::UInt => 3,
             CType::Enum(e) => {
-                // Packed enums may have a smaller underlying type
+                // Enum rank follows its underlying type size
                 match e.packed_size() {
                     1 => 1,
                     2 => 2,
-                    _ => 3,
+                    8 => 5, // same rank as long long
+                    _ => 3, // int
                 }
             }
             CType::Long | CType::ULong => 4,
@@ -1349,10 +1357,19 @@ impl IrType {
             CType::UShort => IrType::U16,
             CType::Int => IrType::I32,
             CType::Enum(e) => {
-                // Packed enums use the smallest integer type that fits all values
+                // Map enum to IR type based on its computed size.
+                // For non-packed enums with 64-bit values, packed_size() returns 8.
                 match e.packed_size() {
                     1 => IrType::I8,
                     2 => IrType::I16,
+                    8 => {
+                        // 64-bit enums: check signedness
+                        if e.variants.iter().any(|(_, v)| *v < 0) {
+                            IrType::I64
+                        } else {
+                            IrType::U64
+                        }
+                    }
                     _ => IrType::I32,
                 }
             }

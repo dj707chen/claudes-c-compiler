@@ -636,8 +636,17 @@ impl Lowerer {
                 if name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__" {
                     return IrType::Ptr;
                 }
-                if self.types.enum_constants.contains_key(name) {
-                    return IrType::I32;
+                if let Some(&val) = self.types.enum_constants.get(name) {
+                    // Enum constants follow GCC promotion: int -> unsigned int -> long long
+                    if val >= i32::MIN as i64 && val <= i32::MAX as i64 {
+                        return IrType::I32;
+                    } else if val >= 0 && val <= u32::MAX as i64 {
+                        return IrType::U32;
+                    } else if val >= 0 {
+                        return IrType::U64;
+                    } else {
+                        return IrType::I64;
+                    }
                 }
                 if let Some(vi) = self.lookup_var_info(name) {
                     if vi.is_array {

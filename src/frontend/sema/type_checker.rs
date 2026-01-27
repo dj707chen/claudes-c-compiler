@@ -21,6 +21,21 @@ use crate::frontend::parser::ast::*;
 use super::type_context::TypeContext;
 use super::sema::FunctionInfo;
 
+/// Determine the C type of an enum constant value, following GCC's promotion rules.
+/// GCC uses the progression: int -> unsigned int -> long long -> unsigned long long.
+/// (On LP64 targets, long == long long, so we skip long/unsigned long.)
+pub fn enum_constant_type(val: i64) -> CType {
+    if val >= i32::MIN as i64 && val <= i32::MAX as i64 {
+        CType::Int
+    } else if val >= 0 && val <= u32::MAX as i64 {
+        CType::UInt
+    } else if val >= 0 {
+        CType::ULongLong
+    } else {
+        CType::LongLong
+    }
+}
+
 /// Expression type checker that infers CTypes using only sema-available state.
 ///
 /// This struct borrows the sema state needed for type inference and provides
@@ -82,8 +97,8 @@ impl<'a> ExprTypeChecker<'a> {
                 if name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__" {
                     return Some(CType::Pointer(Box::new(CType::Char), AddressSpace::Default));
                 }
-                if self.types.enum_constants.contains_key(name) {
-                    return Some(CType::Int);
+                if let Some(&val) = self.types.enum_constants.get(name) {
+                    return Some(enum_constant_type(val));
                 }
                 if let Some(sym) = self.symbols.lookup(name) {
                     return Some(sym.ty.clone());
@@ -531,7 +546,43 @@ impl<'a> ExprTypeChecker<'a> {
                     CType::Int // fallback for unknown typedef
                 }
             }
-            TypeSpecifier::Enum(_, _, _) => CType::Int, // default enum underlying type
+            TypeSpecifier::Enum(name, variants, _is_packed) => {
+                // GCC extension: determine underlying enum type based on value range.
+                // Uses progression: int -> unsigned int -> long long -> unsigned long long.
+                let values = if let Some(vars) = variants {
+                    let mut vals = Vec::new();
+                    let mut next_val: i64 = 0;
+                    for v in vars {
+                        if let Some(ref val_expr) = v.value {
+                            if let Some(val) = self.eval_const_expr(val_expr) {
+                                next_val = val;
+                            }
+                        }
+                        vals.push(next_val);
+                        next_val += 1;
+                    }
+                    vals
+                } else if let Some(n) = name {
+                    if let Some(et) = self.types.packed_enum_types.get(n) {
+                        et.variants.iter().map(|(_, v)| *v).collect()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+                // Determine smallest type that fits all values
+                let fits_int = values.iter().all(|v| *v >= i32::MIN as i64 && *v <= i32::MAX as i64);
+                if fits_int {
+                    return CType::Int;
+                }
+                let fits_uint = values.iter().all(|v| *v >= 0 && *v <= u32::MAX as i64);
+                if fits_uint {
+                    return CType::UInt;
+                }
+                let has_negative = values.iter().any(|v| *v < 0);
+                if has_negative { CType::LongLong } else { CType::ULongLong }
+            }
             TypeSpecifier::Struct(tag, fields, is_packed, pragma_pack, struct_aligned) => {
                 if let Some(tag) = tag {
                     CType::Struct(format!("struct.{}", tag).into())
