@@ -1,0 +1,29 @@
+Task: Fix static inline functions not inlined in large callers causing linker errors
+Status: in_progress
+Started: 2026-01-27
+
+Problem:
+  The delta debugging tool (seed=101) found that compiling fs/netfs/buffered_write.c
+  with CCC causes an x86 kernel link failure:
+    undefined reference to `__fscache_clear_page_bits'
+
+  Root cause: fscache_clear_page_bits() is a static inline function declared in
+  include/linux/fscache.h that conditionally calls __fscache_clear_page_bits().
+  In this kernel config, __fscache_clear_page_bits is not compiled (CONFIG_FSCACHE
+  is not enabled), but GCC inlines fscache_clear_page_bits() into its caller,
+  making the conditional call part of a live code path that doesn't cause link errors.
+
+  Our compiler's inlining pass has a caller-size limit (MAX_CALLER_INSTRUCTIONS_AFTER_INLINE=200).
+  The caller function netfs_write_back_from_locked_folio() grows beyond this limit
+  after inlining other functions, so fscache_clear_page_bits() is not inlined.
+  The un-inlined static function retains a reference to __fscache_clear_page_bits,
+  causing the linker error.
+
+  The "tiny" callee first-pass check (<=5 instructions, 1 block) doesn't help because
+  fscache_clear_page_bits has 2+ blocks (if/then/join from the if statement).
+
+Fix:
+  Extend the "tiny" first-pass in the inline loop to also cover "small" static inline
+  functions (e.g., <=20 instructions, <=3 blocks). These are small enough that inlining
+  them doesn't meaningfully increase stack frame size, but not inlining them can cause
+  linker errors. This matches GCC's behavior.
