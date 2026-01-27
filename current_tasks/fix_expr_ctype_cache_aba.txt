@@ -1,0 +1,13 @@
+Fix expr_ctype_cache ABA address-reuse bug causing kernel miscompilation
+
+Root cause: expr_ctype_cache used raw pointer addresses as keys. Expressions
+inside TypeSpecifier trees (typeof, _Generic) cached during typeof resolution
+could share addresses with different Expr variants in the main AST, causing
+stale cache hits that returned the wrong CType. This made lower_deref suppress
+Load instructions for volatile pointer dereferences in the kernel READ_ONCE
+macro, producing lea (address) instead of mov (load).
+
+Fix: Store Expr discriminant alongside cached value; validate on cache hit.
+Discriminant mismatch triggers recomputation instead of returning stale data.
+
+Status: in progress
