@@ -1,0 +1,10 @@
+Task: Fix x86 kernel miscompilation in mm/page_alloc.c
+
+The delta debugging tool identified that mm/page_alloc.c compiled with our
+compiler causes an x86 boot failure (timeout - kernel hangs during boot).
+The page allocator is the kernel's most critical memory subsystem.
+
+Investigating the root cause by comparing gcc vs our compiler assembly output
+and narrowing down the specific function(s) being miscompiled.
+
+Status: in_progress
