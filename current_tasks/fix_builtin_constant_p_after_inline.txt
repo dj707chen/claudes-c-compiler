@@ -1,0 +1,22 @@
+Task: Fix __builtin_constant_p evaluation after inlining
+
+Problem:
+__builtin_constant_p(expr) is currently evaluated at IR lowering time,
+before inlining. When the expression is a function parameter that becomes
+constant after inlining, it incorrectly returns 0 instead of 1.
+
+This causes ARM kernel link failures because the Linux kernel uses
+__builtin_constant_p in cpucap_is_possible() to gate dead code behind
+extern declarations (as link-error traps). When __builtin_constant_p
+always returns 0, the dead code isn't eliminated and undefined symbols
+(preserve_sve_context, preserve_tpidr2_context, etc.) leak to the linker.
+
+Fix:
+1. Add IsConstant variant to IrUnaryOp
+2. Lower __builtin_constant_p to UnaryOp { op: IsConstant } instead of
+   immediately resolving to constant 0
+3. In constant_fold pass, resolve IsConstant to 1 if operand is constant,
+   leave as-is otherwise
+4. In codegen, emit 0 for any remaining unresolved IsConstant
+5. After inlining + constant prop + constant fold, the dead code is properly
+   eliminated

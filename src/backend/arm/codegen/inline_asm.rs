@@ -139,6 +139,31 @@ impl ArmCodegen {
     }
 
     pub(super) fn format_reg_static(reg: &str, modifier: Option<char>) -> String {
+        // Normalize r-prefix registers (GCC AArch64 aliases: r0-r30 = x0-x30)
+        // before processing modifiers so %w0/%x0 work correctly on r-prefixed operands.
+        let normalized;
+        let reg = if reg.starts_with('r') {
+            if let Some(suffix) = reg.strip_prefix('r') {
+                if suffix.chars().all(|c| c.is_ascii_digit()) {
+                    if let Ok(n) = suffix.parse::<u32>() {
+                        if n <= 30 {
+                            normalized = format!("x{}", n);
+                            &normalized
+                        } else {
+                            reg
+                        }
+                    } else {
+                        reg
+                    }
+                } else {
+                    reg
+                }
+            } else {
+                reg
+            }
+        } else {
+            reg
+        };
         // Extract the register number from any register form (x, w, d, s, q)
         let reg_num = || -> Option<&str> {
             if reg.starts_with('x') || reg.starts_with('w') || reg.starts_with('d')

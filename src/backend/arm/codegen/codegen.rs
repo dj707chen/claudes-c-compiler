@@ -299,6 +299,7 @@ impl ArmCodegen {
                         }
                         excluded.push(clobber.clone());
                         // Also exclude the alternate width alias (wN <-> xN)
+                        // and normalize rN (GCC AArch64 alias for xN)
                         if let Some(suffix) = clobber.strip_prefix('w') {
                             if suffix.chars().all(|c| c.is_ascii_digit()) {
                                 excluded.push(format!("x{}", suffix));
@@ -306,6 +307,15 @@ impl ArmCodegen {
                         } else if let Some(suffix) = clobber.strip_prefix('x') {
                             if suffix.chars().all(|c| c.is_ascii_digit()) {
                                 excluded.push(format!("w{}", suffix));
+                            }
+                        } else if let Some(suffix) = clobber.strip_prefix('r') {
+                            if suffix.chars().all(|c| c.is_ascii_digit()) {
+                                if let Ok(n) = suffix.parse::<u32>() {
+                                    if n <= 30 {
+                                        excluded.push(format!("x{}", n));
+                                        excluded.push(format!("w{}", n));
+                                    }
+                                }
                             }
                         }
                     }
@@ -319,7 +329,9 @@ impl ArmCodegen {
                         let c = constraint.trim_start_matches(|ch: char| ch == '=' || ch == '+' || ch == '&');
                         if c.starts_with('{') && c.ends_with('}') {
                             let reg_name = &c[1..c.len()-1];
-                            excluded.push(reg_name.to_string());
+                            // Normalize rN -> xN (GCC AArch64 alias)
+                            let normalized = super::asm_emitter::normalize_aarch64_register(reg_name);
+                            excluded.push(normalized);
                         } else if c == "m" || c == "Q" || c.contains('Q') || c.contains('m') {
                             // Memory operands may need a scratch reg for indirection.
                             // Conservatively count each one.
@@ -366,7 +378,9 @@ impl ArmCodegen {
                         let c = constraint.trim_start_matches(|ch: char| ch == '=' || ch == '+' || ch == '&');
                         if c.starts_with('{') && c.ends_with('}') {
                             let reg_name = &c[1..c.len()-1];
-                            excluded.push(reg_name.to_string());
+                            // Normalize rN -> xN (GCC AArch64 alias)
+                            let normalized = super::asm_emitter::normalize_aarch64_register(reg_name);
+                            excluded.push(normalized);
                         } else if c == "m" || c == "Q" || c.contains('Q') || c.contains('m') {
                             gp_scratch_needed += 1;
                         } else if c == "w" {

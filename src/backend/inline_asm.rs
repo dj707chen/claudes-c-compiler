@@ -461,6 +461,7 @@ pub fn emit_inline_asm_common_impl(
         // On ARM64, wN and xN refer to the same physical register (32-bit vs 64-bit view).
         // The scratch allocator uses xN notation, so also exclude xN when wN is clobbered
         // and vice versa, to prevent register conflicts.
+        // Also normalize rN (GCC AArch64 alias for xN) to both xN and wN forms.
         if let Some(suffix) = clobber.strip_prefix('w') {
             if suffix.chars().all(|c| c.is_ascii_digit()) {
                 specific_regs.push(format!("x{}", suffix));
@@ -468,6 +469,16 @@ pub fn emit_inline_asm_common_impl(
         } else if let Some(suffix) = clobber.strip_prefix('x') {
             if suffix.chars().all(|c| c.is_ascii_digit()) {
                 specific_regs.push(format!("w{}", suffix));
+            }
+        } else if let Some(suffix) = clobber.strip_prefix('r') {
+            // GCC treats r0-r30 as aliases for x0-x30 on AArch64.
+            if suffix.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(n) = suffix.parse::<u32>() {
+                    if n <= 30 {
+                        specific_regs.push(format!("x{}", n));
+                        specific_regs.push(format!("w{}", n));
+                    }
+                }
             }
         }
         // On x86-64, clobbers may use 8/16/32-bit register names (e.g., "edx", "al",

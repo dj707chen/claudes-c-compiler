@@ -26,7 +26,11 @@ impl InlineAsmEmitter for ArmCodegen {
         // Explicit register constraint from register variable: {regname}
         if c.starts_with('{') && c.ends_with('}') {
             let reg_name = &c[1..c.len()-1];
-            return AsmOperandKind::Specific(reg_name.to_string());
+            // On AArch64, GCC treats r0-r30 as aliases for x0-x30.
+            // The Linux kernel uses `register ... asm("r0")` extensively
+            // (e.g., arm-smccc.h). Normalize to the canonical x-register name.
+            let normalized = normalize_aarch64_register(reg_name);
+            return AsmOperandKind::Specific(normalized);
         }
         // TODO: ARM =@cc not fully implemented — needs CSET/CSINC in store_output_from_reg.
         // Currently stores incorrect results (just a GP register value, no condition capture).
@@ -317,6 +321,23 @@ impl InlineAsmEmitter for ArmCodegen {
         }
         false
     }
+}
+
+/// Normalize AArch64 register name aliases.
+///
+/// GCC treats `r0`-`r30` as aliases for `x0`-`x30` on AArch64. The Linux kernel
+/// uses this convention extensively in inline assembly (e.g., `register unsigned long
+/// r0 asm("r0")` in arm-smccc.h). This function maps these aliases to canonical
+/// AArch64 register names so the assembler accepts them.
+pub(super) fn normalize_aarch64_register(name: &str) -> String {
+    if let Some(suffix) = name.strip_prefix('r') {
+        if let Ok(n) = suffix.parse::<u32>() {
+            if n <= 30 {
+                return format!("x{}", n);
+            }
+        }
+    }
+    name.to_string()
 }
 
 /// Check whether a 32-bit value is a valid AArch64 32-bit logical immediate.
