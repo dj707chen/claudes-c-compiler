@@ -1,0 +1,8 @@
+Optimize IR pass pipeline speed (DCE, copy_prop, cfg_simplify)
+
+Goals:
+1. Convert DCE from fixpoint-loop to use-count-based single-pass (O(n) vs O(n*k))
+2. Add path compression to copy_prop's resolve_chain, eliminate redundant allocation
+3. Cache label_to_idx map across cfg_simplify sub-passes
+
+Expected impact: 5-15% compile time reduction on large files like sqlite3.c
