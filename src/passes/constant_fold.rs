@@ -273,6 +273,15 @@ fn try_fold_with_map(inst: &Instruction, const_map: &[Option<ConstMapEntry>]) ->
             })
         }
         Instruction::Select { dest, cond, true_val, false_val, .. } => {
+            // If both arms are the same operand, the result is that operand
+            // regardless of the condition. This handles patterns like
+            // Select(cond, 0, 0) from dead short-circuit branches.
+            if operands_equal(true_val, false_val) {
+                return Some(Instruction::Copy {
+                    dest: *dest,
+                    src: *true_val,
+                });
+            }
             // If the condition is a known constant, fold to the appropriate value
             if let Some(cond_const) = as_i64_const_mapped(cond, const_map) {
                 let result = if cond_const != 0 { *true_val } else { *false_val };
@@ -302,6 +311,15 @@ fn try_fold_with_map(inst: &Instruction, const_map: &[Option<ConstMapEntry>]) ->
             None
         }
         _ => None,
+    }
+}
+
+/// Check if two operands are structurally equal.
+fn operands_equal(a: &Operand, b: &Operand) -> bool {
+    match (a, b) {
+        (Operand::Value(va), Operand::Value(vb)) => va.0 == vb.0,
+        (Operand::Const(ca), Operand::Const(cb)) => ca.to_hash_key() == cb.to_hash_key(),
+        _ => false,
     }
 }
 

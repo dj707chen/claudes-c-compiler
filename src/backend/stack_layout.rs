@@ -557,7 +557,7 @@ pub fn calculate_stack_space_common(
     let enable_tier2 = num_blocks >= 2;
 
     // Build use-block map: for each value, which blocks reference it.
-    let use_blocks_map = if coalesce {
+    let mut use_blocks_map = if coalesce {
         compute_value_use_blocks(func)
     } else {
         FxHashMap::default()
@@ -583,48 +583,6 @@ pub fn calculate_stack_space_common(
             }
         }
     }
-
-    // Determine if a non-alloca value can be assigned to a block-local pool slot.
-    // Returns Some(def_block_idx) if the value is defined and used only within a
-    // single block (including the entry block), making it safe to share stack
-    // space with values from other blocks (since only one block executes at a time).
-    let coalescable_group = |val_id: u32| -> Option<usize> {
-        if !coalesce {
-            return None;
-        }
-        // Values defined in multiple blocks (from phi elimination) must use
-        // liveness-based packing (Tier 2), never block-local coalescing (Tier 3).
-        if multi_def_values.contains(&val_id) {
-            return None;
-        }
-        if let Some(&def_blk) = def_block.get(&val_id) {
-            if let Some(blocks) = use_blocks_map.get(&val_id) {
-                let mut unique: Vec<usize> = blocks.clone();
-                unique.sort_unstable();
-                unique.dedup();
-
-                if unique.is_empty() {
-                    return Some(def_blk); // Dead value, safe to coalesce.
-                }
-
-                // Single-block value (defined and used in the same block).
-                // Safe to share a pool slot: each block gets its own pool, and
-                // pools from different blocks share the same stack offset because
-                // only one block executes at a time.
-                // This includes entry block (def_blk == 0) values that are purely
-                // local to the entry block -- these are common intermediate results
-                // (sign extensions, casts, arithmetic) that don't cross block
-                // boundaries and can safely share pool slots.
-                if unique.len() == 1 && unique[0] == def_blk {
-                    return Some(def_blk);
-                }
-
-            } else {
-                return Some(def_blk); // No uses - dead value.
-            }
-        }
-        None
-    };
 
     // Three-tier allocation:
     // Tier 1: Allocas get permanent slots (addressable memory).
@@ -759,6 +717,20 @@ pub fn calculate_stack_space_common(
                     if use_count.get(&s).copied().unwrap_or(0) != 1 {
                         continue;
                     }
+                    // Only coalesce if the dest's uses are confined to the
+                    // same block as the source's definition. Cross-block
+                    // aliasing is unsafe because the root's liveness interval
+                    // (used by Tier 2 packing) and block-local classification
+                    // (Tier 3) don't account for the alias's uses in other
+                    // blocks, causing stack slot collisions.
+                    if let Some(&src_def_blk) = def_block.get(&s) {
+                        if let Some(dest_use_blocks) = use_blocks_map.get(&d) {
+                            let cross_block = dest_use_blocks.iter().any(|&b| b != src_def_blk);
+                            if cross_block {
+                                continue;
+                            }
+                        }
+                    }
                     raw_aliases.push((d, s));
                 }
             }
@@ -792,6 +764,68 @@ pub fn calculate_stack_space_common(
             !alloca_ids.contains(root_id) && !alloca_ids.contains(dest_id)
         });
     }
+
+    // ── Propagate copy-alias uses into use_blocks_map ─────────────────
+    // When `dest = Copy src` and dest is aliased to root, dest's uses
+    // effectively become uses of root (since they share the same stack slot).
+    // Without this propagation, root might be classified as block-local
+    // (Tier 3) based only on its own uses, but dest's uses in other blocks
+    // would cause a stack slot collision when different blocks' Tier 3 pools
+    // share the same physical memory.
+    if coalesce && !copy_alias.is_empty() {
+        for (&dest_id, &root_id) in &copy_alias {
+            if let Some(dest_blocks) = use_blocks_map.get(&dest_id).cloned() {
+                let root_blocks = use_blocks_map.entry(root_id).or_insert_with(Vec::new);
+                for blk in dest_blocks {
+                    if root_blocks.last() != Some(&blk) {
+                        root_blocks.push(blk);
+                    }
+                }
+            }
+        }
+    }
+
+    // Determine if a non-alloca value can be assigned to a block-local pool slot.
+    // Returns Some(def_block_idx) if the value is defined and used only within a
+    // single block (including the entry block), making it safe to share stack
+    // space with values from other blocks (since only one block executes at a time).
+    let coalescable_group = |val_id: u32| -> Option<usize> {
+        if !coalesce {
+            return None;
+        }
+        // Values defined in multiple blocks (from phi elimination) must use
+        // liveness-based packing (Tier 2), never block-local coalescing (Tier 3).
+        if multi_def_values.contains(&val_id) {
+            return None;
+        }
+        if let Some(&def_blk) = def_block.get(&val_id) {
+            if let Some(blocks) = use_blocks_map.get(&val_id) {
+                let mut unique: Vec<usize> = blocks.clone();
+                unique.sort_unstable();
+                unique.dedup();
+
+                if unique.is_empty() {
+                    return Some(def_blk); // Dead value, safe to coalesce.
+                }
+
+                // Single-block value (defined and used in the same block).
+                // Safe to share a pool slot: each block gets its own pool, and
+                // pools from different blocks share the same stack offset because
+                // only one block executes at a time.
+                // This includes entry block (def_blk == 0) values that are purely
+                // local to the entry block -- these are common intermediate results
+                // (sign extensions, casts, arithmetic) that don't cross block
+                // boundaries and can safely share pool slots.
+                if unique.len() == 1 && unique[0] == def_blk {
+                    return Some(def_blk);
+                }
+
+            } else {
+                return Some(def_blk); // No uses - dead value.
+            }
+        }
+        None
+    };
 
     let mut non_local_space = initial_offset;
     let mut deferred_slots: Vec<DeferredSlot> = Vec::new();

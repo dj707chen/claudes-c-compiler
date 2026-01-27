@@ -55,6 +55,18 @@ const MAX_ALWAYS_INLINE_INSTRUCTIONS: usize = 500;
 /// Maximum blocks for __attribute__((always_inline)) functions.
 const MAX_ALWAYS_INLINE_BLOCKS: usize = 200;
 
+/// Maximum instructions for a callee to be considered "tiny" and always inlined
+/// regardless of caller size. Tiny functions like `static inline bool f(void) { return false; }`
+/// must always be inlined because:
+/// 1. They have negligible impact on code/stack size
+/// 2. Not inlining them can cause linker errors (references to symbols that are
+///    only needed in dead code paths, e.g., kernel's folio_test_large_rmappable()
+///    returns false when CONFIG_TRANSPARENT_HUGEPAGE is disabled, making the call
+///    to folio_undo_large_rmappable() dead — but if not inlined, the linker sees
+///    the undefined reference)
+/// 3. GCC always inlines these trivial static inline functions
+const MAX_TINY_INLINE_INSTRUCTIONS: usize = 5;
+
 /// Budget for always_inline callees per caller.
 const MAX_ALWAYS_INLINE_BUDGET_PER_CALLER: usize = 20000;
 
@@ -149,26 +161,51 @@ pub fn run(module: &mut IrModule) -> usize {
             // When the caller is too large, skip non-always_inline callees instead
             // of breaking, so that always_inline callees (which must be inlined per
             // C semantics) are still processed.
+            //
+            // Prioritize tiny callees (≤ MAX_TINY_INLINE_INSTRUCTIONS, single block):
+            // Scan ALL call sites for tiny callees first, then fall back to the first
+            // eligible normal callee. This ensures critical constant-returning stubs
+            // (e.g., folio_test_large_rmappable returning false) are inlined even in
+            // very large functions with many earlier call sites. Without this priority,
+            // the max_rounds limit may be exhausted before reaching the tiny call site
+            // deep in the function's block list.
             let mut found_site = None;
+            // First pass: look for tiny callees anywhere in the function.
             for site in &call_sites {
                 let callee_data = &callee_map[&site.callee_name];
-                if caller_too_large && !callee_data.is_always_inline {
-                    continue;
-                }
                 let callee_inst_count: usize = callee_data.blocks.iter()
                     .map(|b| b.instructions.len())
                     .sum();
-                let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
-                let effective_budget = if use_relaxed {
-                    always_inline_budget_remaining
-                } else {
-                    budget_remaining
-                };
-                if callee_inst_count > effective_budget {
-                    continue;
+                let is_tiny = callee_inst_count <= MAX_TINY_INLINE_INSTRUCTIONS
+                    && callee_data.blocks.len() <= 1;
+                if is_tiny {
+                    let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
+                    found_site = Some((site.clone(), callee_inst_count, use_relaxed));
+                    break;
                 }
-                found_site = Some((site.clone(), callee_inst_count, use_relaxed));
-                break;
+            }
+            // Second pass: if no tiny callee found, use the first eligible normal callee.
+            if found_site.is_none() {
+                for site in &call_sites {
+                    let callee_data = &callee_map[&site.callee_name];
+                    let callee_inst_count: usize = callee_data.blocks.iter()
+                        .map(|b| b.instructions.len())
+                        .sum();
+                    if caller_too_large && !callee_data.is_always_inline {
+                        continue;
+                    }
+                    let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
+                    let effective_budget = if use_relaxed {
+                        always_inline_budget_remaining
+                    } else {
+                        budget_remaining
+                    };
+                    if callee_inst_count > effective_budget {
+                        continue;
+                    }
+                    found_site = Some((site.clone(), callee_inst_count, use_relaxed));
+                    break;
+                }
             }
             let (site, callee_inst_count, use_relaxed_budget) = match found_site {
                 Some(s) => s,

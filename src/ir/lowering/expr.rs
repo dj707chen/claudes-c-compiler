@@ -1657,6 +1657,25 @@ impl Lowerer {
             }
         }
 
+        // Check if the RHS is a compile-time constant. When it is, we can
+        // simplify the short-circuit result without emitting the RHS branch.
+        // This helps patterns like `expr && 0` or `expr || 1` where the RHS
+        // is a literal or compile-time constant expression.
+        if let Some(rhs_const) = self.eval_const_expr(rhs) {
+            let rhs_is_true = rhs_const.is_nonzero();
+            if is_and && !rhs_is_true {
+                // LHS && false => always false. Evaluate LHS for side effects, return 0.
+                let _lhs_val = self.lower_condition_expr(lhs);
+                return Operand::Const(IrConst::I64(0));
+            } else if !is_and && rhs_is_true {
+                // LHS || true => always true. Evaluate LHS for side effects, return 1.
+                let _lhs_val = self.lower_condition_expr(lhs);
+                return Operand::Const(IrConst::I64(1));
+            }
+            // For "LHS && true" or "LHS || false", fall through to normal lowering
+            // since the result depends on LHS.
+        }
+
         // Use emit_entry_alloca so the alloca is in the entry block, ensuring
         // mem2reg can promote it to SSA/Phi form. Previously this used self.emit()
         // which placed the alloca in the current block — if the expression was inside

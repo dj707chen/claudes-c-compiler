@@ -1,0 +1,16 @@
+Fix: emit_global_addr uses RIP-relative instead of absolute addressing for mcmodel=kernel
+
+When compiling with -mcmodel=kernel, our compiler was generating `leaq symbol(%rip), %rax`
+for GlobalAddr instructions (taking the address of a global symbol). This gives the
+runtime physical address, but in kernel code model, the correct behavior is to use
+`movq $symbol, %rax` (absolute sign-extended 32-bit addressing) which gives the
+link-time virtual address.
+
+This matches GCC's behavior and is critical for early boot code like __startup_64 in
+arch/x86/kernel/head64.c, where `(unsigned long)_text` must evaluate to the kernel's
+virtual address, not the physical address.
+
+Fix: Add a code_model_kernel branch in emit_global_addr that uses `movq $symbol, %rax`
+with R_X86_64_32S relocations.
+
+Status: in_progress
