@@ -767,6 +767,44 @@ fn replace_line(store: &mut LineStore, info: &mut LineInfo, idx: usize, new_text
     *info = classify_line(store.get(idx));
 }
 
+/// Find the next non-NOP line at or after `start`, returning its index.
+/// Returns `len` (infos.len()) if no non-NOP line is found before `limit`.
+#[inline]
+fn next_non_nop(infos: &[LineInfo], start: usize, limit: usize) -> usize {
+    let mut j = start;
+    while j < limit && infos[j].is_nop() {
+        j += 1;
+    }
+    j
+}
+
+/// Collect up to `N` non-NOP line indices starting after `start`.
+/// Returns the number of indices found (may be < N if we hit the end).
+#[inline]
+fn collect_non_nop_indices<const N: usize>(
+    infos: &[LineInfo],
+    start: usize,
+    limit: usize,
+    out: &mut [usize; N],
+) -> usize {
+    let mut count = 0;
+    let mut j = start + 1;
+    while j < limit && count < N {
+        if !infos[j].is_nop() {
+            out[count] = j;
+            count += 1;
+        }
+        j += 1;
+    }
+    count
+}
+
+/// Check if two byte ranges `[a, a+a_size)` and `[b, b+b_size)` overlap.
+#[inline]
+fn ranges_overlap(a: i32, a_size: i32, b: i32, b_size: i32) -> bool {
+    a < b + b_size && b < a + a_size
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 /// Run peephole optimization on x86-64 assembly text.
@@ -904,10 +942,7 @@ fn eliminate_unused_callee_saves(store: &LineStore, infos: &mut [LineInfo]) {
         }
 
         // Next non-nop should be "movq %rsp, %rbp"
-        let mut j = i + 1;
-        while j < len && infos[j].is_nop() {
-            j += 1;
-        }
+        let mut j = next_non_nop(infos, i + 1, len);
         if j >= len {
             i = j;
             continue;
@@ -921,9 +956,7 @@ fn eliminate_unused_callee_saves(store: &LineStore, infos: &mut [LineInfo]) {
         j += 1;
 
         // Next non-nop should be "subq $N, %rsp"
-        while j < len && infos[j].is_nop() {
-            j += 1;
-        }
+        j = next_non_nop(infos, j, len);
         if j >= len {
             i = j;
             continue;
@@ -955,9 +988,7 @@ fn eliminate_unused_callee_saves(store: &LineStore, infos: &mut [LineInfo]) {
             save_line_idx: usize,
         }
         let mut saves: Vec<CalleeSave> = Vec::new();
-        while j < len && infos[j].is_nop() {
-            j += 1;
-        }
+        j = next_non_nop(infos, j, len);
         while j < len {
             if infos[j].is_nop() {
                 j += 1;
@@ -1297,15 +1328,7 @@ fn eliminate_binop_push_pop_pattern(store: &mut LineStore, infos: &mut [LineInfo
 
         // Find next 3 non-NOP lines
         let mut real_indices = [0usize; 3];
-        let mut count = 0;
-        let mut j = i + 1;
-        while j < len && count < 3 {
-            if !infos[j].is_nop() {
-                real_indices[count] = j;
-                count += 1;
-            }
-            j += 1;
-        }
+        let count = collect_non_nop_indices(infos, i, len, &mut real_indices);
 
         if count == 3 {
             let load_idx = real_indices[0];
@@ -1353,17 +1376,13 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
             continue;
         }
 
-        // Collect next non-NOP lines (up to 8)
+        // Collect next non-NOP lines (up to 8): cmp itself + 7 following
         let mut seq_indices = [0usize; 8];
-        let mut seq_count = 0;
-        let mut j = i;
-        while j < len && seq_count < 8 {
-            if !infos[j].is_nop() {
-                seq_indices[seq_count] = j;
-                seq_count += 1;
-            }
-            j += 1;
-        }
+        seq_indices[0] = i;
+        let mut rest = [0usize; 7];
+        let rest_count = collect_non_nop_indices::<7>(infos, i, len, &mut rest);
+        for k in 0..rest_count { seq_indices[k + 1] = rest[k]; }
+        let seq_count = 1 + rest_count;
 
         if seq_count < 4 {
             i += 1;
@@ -1551,10 +1570,8 @@ fn eliminate_dead_stores(store: &LineStore, infos: &mut [LineInfo]) -> bool {
             }
 
             // Load from overlapping range = slot is read.
-            // Two ranges [a, a+sa) and [b, b+sb) overlap iff a < b+sb && b < a+sa.
             if let LineKind::LoadRbp { offset: load_off, size: load_sz, .. } = infos[j].kind {
-                let load_bytes = load_sz.byte_size();
-                if store_offset < load_off + load_bytes && load_off < store_offset + store_bytes {
+                if ranges_overlap(store_offset, store_bytes, load_off, load_sz.byte_size()) {
                     slot_read = true;
                     break;
                 }
@@ -1564,16 +1581,12 @@ fn eliminate_dead_stores(store: &LineStore, infos: &mut [LineInfo]) -> bool {
             // store fully covers the original store's byte range.
             if let LineKind::StoreRbp { offset: new_off, size: new_sz, .. } = infos[j].kind {
                 let new_bytes = new_sz.byte_size();
-                // The new store covers [new_off, new_off+new_bytes).
-                // It fully overwrites the original iff new_off <= store_offset
-                // && new_off + new_bytes >= store_offset + store_bytes.
                 if new_off <= store_offset && new_off + new_bytes >= store_offset + store_bytes {
                     slot_overwritten = true;
                     break;
                 }
-                // If the new store partially overlaps the original's range, treat
-                // it as a read (conservatively) to prevent eliminating the original.
-                if new_off < store_offset + store_bytes && store_offset < new_off + new_bytes {
+                // Partial overlap: conservatively treat as a read.
+                if ranges_overlap(store_offset, store_bytes, new_off, new_bytes) {
                     slot_read = true;
                     break;
                 }
@@ -1913,148 +1926,90 @@ fn register_family(reg: &str) -> Option<u8> {
 
 /// Fast register family lookup using byte-level dispatch.
 /// Returns REG_NONE if the register is not recognized.
-/// This avoids the 60-pattern string match in `register_family` for the hot path.
+///
+/// Handles all x86-64 GP register aliases:
+///   64-bit: %rax..%rdi, %r8..%r15
+///   32-bit: %eax..%edi, %r8d..%r15d
+///   16-bit: %ax..%di,   %r8w..%r15w
+///    8-bit: %al..%dil,  %r8b..%r15b, %ah/%bh/%ch/%dh
 #[inline]
 fn register_family_fast(reg: &str) -> RegId {
     let b = reg.as_bytes();
     let len = b.len();
-    // All register names start with '%'
     if len < 3 || b[0] != b'%' {
         return REG_NONE;
     }
+    // Dispatch on the prefix character after '%' to find the family.
+    // 64-bit (%r..) and 32-bit (%e..) prefixes use a shared lookup on b[2..],
+    // since %rax/%eax, %rcx/%ecx, etc. share the same suffix→family mapping.
     match b[1] {
-        b'r' => {
-            // %rax, %rcx, %rdx, %rbx, %rsp, %rbp, %rsi, %rdi, %r8..%r15, %r8d..%r15b
-            if len >= 4 {
-                match b[2] {
-                    b'a' => if b[3] == b'x' { 0 } else { REG_NONE },  // %rax
-                    b'c' => if b[3] == b'x' { 1 } else { REG_NONE },  // %rcx
-                    b'd' => if b[3] == b'x' { 2 } else if b[3] == b'i' { 7 } else { REG_NONE }, // %rdx, %rdi
-                    b'b' => if b[3] == b'x' { 3 } else if b[3] == b'p' { 5 } else { REG_NONE }, // %rbx, %rbp
-                    b's' => if b[3] == b'p' { 4 } else if b[3] == b'i' { 6 } else { REG_NONE }, // %rsp, %rsi
-                    b'1' if len >= 4 => {
-                        // %r10..%r15, %r10d..%r15b
-                        match b[3] {
-                            b'0' => 10, b'1' => 11, b'2' => 12,
-                            b'3' => 13, b'4' => 14, b'5' => 15,
-                            _ => REG_NONE,
-                        }
-                    }
-                    b'8' => 8,  // %r8, %r8d, %r8w, %r8b
-                    b'9' => 9,  // %r9, %r9d, %r9w, %r9b
-                    _ => REG_NONE,
-                }
-            } else if len == 3 {
-                // %r8, %r9
-                match b[2] {
-                    b'8' => 8,
-                    b'9' => 9,
-                    _ => REG_NONE,
-                }
-            } else {
-                REG_NONE
+        b'r' | b'e' => {
+            if len < 4 {
+                // len==3: only %r8, %r9 are valid
+                return if b[1] == b'r' { reg_digit_to_id(b[2]) } else { REG_NONE };
+            }
+            // For len>=4, map (b[2], b[3]) to family id.
+            // This covers %rax/%eax, %rcx/%ecx, etc. and %r10..%r15.
+            match (b[2], b[3]) {
+                (b'a', b'x') => 0,  // %rax / %eax
+                (b'c', b'x') => 1,  // %rcx / %ecx
+                (b'd', b'x') => 2,  // %rdx / %edx
+                (b'd', b'i') => 7,  // %rdi / %edi
+                (b'b', b'x') => 3,  // %rbx / %ebx
+                (b'b', b'p') => 5,  // %rbp / %ebp
+                (b's', b'p') => 4,  // %rsp / %esp
+                (b's', b'i') => 6,  // %rsi / %esi
+                (b'8', _)    => 8,  // %r8d / %r8w / %r8b
+                (b'9', _)    => 9,  // %r9d / %r9w / %r9b
+                (b'1', b'0') => 10, (b'1', b'1') => 11, (b'1', b'2') => 12,
+                (b'1', b'3') => 13, (b'1', b'4') => 14, (b'1', b'5') => 15,
+                _ => REG_NONE,
             }
         }
-        b'e' => {
-            // %eax, %ecx, %edx, %ebx, %esp, %ebp, %esi, %edi
-            if len >= 4 {
-                match b[2] {
-                    b'a' => if b[3] == b'x' { 0 } else { REG_NONE },  // %eax
-                    b'c' => if b[3] == b'x' { 1 } else { REG_NONE },  // %ecx
-                    b'd' => if b[3] == b'x' { 2 } else if b[3] == b'i' { 7 } else { REG_NONE },
-                    b'b' => if b[3] == b'x' { 3 } else if b[3] == b'p' { 5 } else { REG_NONE },
-                    b's' => if b[3] == b'p' { 4 } else if b[3] == b'i' { 6 } else { REG_NONE },
-                    _ => REG_NONE,
-                }
-            } else {
-                REG_NONE
-            }
-        }
-        b'a' => {
-            // %ax, %al, %ah
-            if len >= 3 && (b[2] == b'x' || b[2] == b'l' || b[2] == b'h') { 0 } else { REG_NONE }
-        }
-        b'c' => {
-            // %cx, %cl, %ch
-            if len >= 3 && (b[2] == b'x' || b[2] == b'l' || b[2] == b'h') { 1 } else { REG_NONE }
-        }
-        b'd' => {
-            // %dx, %dl, %dh, %di, %dil
-            if len >= 3 {
-                match b[2] {
-                    b'i' => 7,  // %di, %dil
-                    b'x' | b'l' | b'h' => 2,  // %dx, %dl, %dh
-                    _ => REG_NONE,
-                }
-            } else {
-                REG_NONE
-            }
-        }
-        b'b' => {
-            // %bx, %bl, %bh, %bp, %bpl
-            if len >= 3 {
-                match b[2] {
-                    b'p' => 5,  // %bp, %bpl
-                    b'x' | b'l' | b'h' => 3,  // %bx, %bl, %bh
-                    _ => REG_NONE,
-                }
-            } else {
-                REG_NONE
-            }
-        }
-        b's' => {
-            // %sp, %spl, %si, %sil
-            if len >= 3 {
-                match b[2] {
-                    b'p' => 4,  // %sp, %spl
-                    b'i' => 6,  // %si, %sil
-                    _ => REG_NONE,
-                }
-            } else {
-                REG_NONE
-            }
-        }
+        // 16-bit / 8-bit short forms: %ax, %al, %ah, %cx, %cl, etc.
+        b'a' => if matches!(b[2], b'x' | b'l' | b'h') { 0 } else { REG_NONE },
+        b'c' => if matches!(b[2], b'x' | b'l' | b'h') { 1 } else { REG_NONE },
+        b'd' => match b[2] { b'i' => 7, b'x' | b'l' | b'h' => 2, _ => REG_NONE },
+        b'b' => match b[2] { b'p' => 5, b'x' | b'l' | b'h' => 3, _ => REG_NONE },
+        b's' => match b[2] { b'p' => 4, b'i' => 6, _ => REG_NONE },
         _ => REG_NONE,
     }
 }
 
+/// Map a single ASCII digit byte to a register family id (8 or 9), or REG_NONE.
+#[inline]
+fn reg_digit_to_id(digit: u8) -> RegId {
+    match digit { b'8' => 8, b'9' => 9, _ => REG_NONE }
+}
+
+/// Register name table indexed by [size][family_id].
+/// Sizes: 0=Q/SLQ(64-bit), 1=L(32-bit), 2=W(16-bit), 3=B(8-bit).
+const REG_NAMES: [[&str; 16]; 4] = [
+    // Q / SLQ (64-bit)
+    ["%rax", "%rcx", "%rdx", "%rbx", "%rsp", "%rbp", "%rsi", "%rdi",
+     "%r8",  "%r9",  "%r10", "%r11", "%r12", "%r13", "%r14", "%r15"],
+    // L (32-bit)
+    ["%eax",  "%ecx",  "%edx",  "%ebx",  "%esp",  "%ebp",  "%esi",  "%edi",
+     "%r8d",  "%r9d",  "%r10d", "%r11d", "%r12d", "%r13d", "%r14d", "%r15d"],
+    // W (16-bit)
+    ["%ax",   "%cx",   "%dx",   "%bx",   "%sp",   "%bp",   "%si",   "%di",
+     "%r8w",  "%r9w",  "%r10w", "%r11w", "%r12w", "%r13w", "%r14w", "%r15w"],
+    // B (8-bit)
+    ["%al",  "%cl",  "%dl",  "%bl",  "%spl", "%bpl", "%sil", "%dil",
+     "%r8b", "%r9b", "%r10b","%r11b","%r12b","%r13b","%r14b","%r15b"],
+];
+
 /// Convert a register family ID and move size to the register name string.
-/// This avoids re-parsing assembly lines when we just need the register name.
-///
-/// # Panics
-/// Debug-asserts that `id` is a valid register family (0..=15).
+#[inline]
 fn reg_id_to_name(id: RegId, size: MoveSize) -> &'static str {
     debug_assert!(id <= 15, "invalid register family id: {}", id);
-    match size {
-        MoveSize::Q | MoveSize::SLQ => match id {
-            0 => "%rax", 1 => "%rcx", 2 => "%rdx", 3 => "%rbx",
-            4 => "%rsp", 5 => "%rbp", 6 => "%rsi", 7 => "%rdi",
-            8 => "%r8", 9 => "%r9", 10 => "%r10", 11 => "%r11",
-            12 => "%r12", 13 => "%r13", 14 => "%r14", 15 => "%r15",
-            _ => unreachable!(),
-        },
-        MoveSize::L => match id {
-            0 => "%eax", 1 => "%ecx", 2 => "%edx", 3 => "%ebx",
-            4 => "%esp", 5 => "%ebp", 6 => "%esi", 7 => "%edi",
-            8 => "%r8d", 9 => "%r9d", 10 => "%r10d", 11 => "%r11d",
-            12 => "%r12d", 13 => "%r13d", 14 => "%r14d", 15 => "%r15d",
-            _ => unreachable!(),
-        },
-        MoveSize::W => match id {
-            0 => "%ax", 1 => "%cx", 2 => "%dx", 3 => "%bx",
-            4 => "%sp", 5 => "%bp", 6 => "%si", 7 => "%di",
-            8 => "%r8w", 9 => "%r9w", 10 => "%r10w", 11 => "%r11w",
-            12 => "%r12w", 13 => "%r13w", 14 => "%r14w", 15 => "%r15w",
-            _ => unreachable!(),
-        },
-        MoveSize::B => match id {
-            0 => "%al", 1 => "%cl", 2 => "%dl", 3 => "%bl",
-            4 => "%spl", 5 => "%bpl", 6 => "%sil", 7 => "%dil",
-            8 => "%r8b", 9 => "%r9b", 10 => "%r10b", 11 => "%r11b",
-            12 => "%r12b", 13 => "%r13b", 14 => "%r14b", 15 => "%r15b",
-            _ => unreachable!(),
-        },
-    }
+    let row = match size {
+        MoveSize::Q | MoveSize::SLQ => 0,
+        MoveSize::L => 1,
+        MoveSize::W => 2,
+        MoveSize::B => 3,
+    };
+    REG_NAMES[row][id as usize]
 }
 
 // ── Global store forwarding across basic block boundaries ─────────────────────
@@ -2213,11 +2168,9 @@ fn global_store_forwarding(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
                 // this store. A store of N bytes at `offset` covers the range
                 // [offset, offset + N). Any active mapping at `e.offset` with
                 // size `e.mapping.size` covers [e.offset, e.offset + e_bytes).
-                // Two ranges overlap iff: a < b_end && b < a_end.
-                let store_end = offset + size.byte_size();
+                let store_bytes = size.byte_size();
                 for entry in slot_entries.iter_mut().filter(|e| e.active) {
-                    let e_end = entry.offset + entry.mapping.size.byte_size();
-                    if offset < e_end && entry.offset < store_end {
+                    if ranges_overlap(offset, store_bytes, entry.offset, entry.mapping.size.byte_size()) {
                         let old_reg = entry.mapping.reg_id;
                         entry.active = false;
                         reg_offsets[old_reg as usize].remove_val(entry.offset);
