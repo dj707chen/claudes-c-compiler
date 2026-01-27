@@ -39,6 +39,18 @@ impl Lowerer {
 
         match init {
             Initializer::Expr(expr) => {
+                // Complex global initializer: handle before scalar evaluation to prevent
+                // scalar values (e.g., `_Complex float g = 1.0f;`) from being misinterpreted.
+                // Without this early check, `eval_const_expr` would succeed on the scalar
+                // and coerce it to the base_ty (Ptr for complex), producing a wrong init.
+                {
+                    let ctype = self.type_spec_to_ctype(_type_spec);
+                    if ctype.is_complex() {
+                        if let Some(init) = self.eval_complex_global_init(expr, &ctype) {
+                            return init;
+                        }
+                    }
+                }
                 // Try to evaluate as a constant
                 if let Some(val) = self.eval_const_expr(expr) {
                     // Convert integer constants to float if target type is float/double
@@ -170,15 +182,6 @@ impl Lowerer {
                 // Try label difference: &&lab1 - &&lab2 (computed goto dispatch tables)
                 if let Some(label_diff) = self.eval_label_diff_expr(expr, base_ty.size().max(4)) {
                     return label_diff;
-                }
-                // Complex global initializer: try to evaluate as {real, imag} pair
-                {
-                    let ctype = self.type_spec_to_ctype(_type_spec);
-                    if ctype.is_complex() {
-                        if let Some(init) = self.eval_complex_global_init(expr, &ctype) {
-                            return init;
-                        }
-                    }
                 }
                 // Can't evaluate - zero init as fallback
                 GlobalInit::Zero
