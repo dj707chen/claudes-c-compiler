@@ -28,6 +28,8 @@ mod global_init_compound_struct;
 mod global_init_compound_ptrs;
 pub(crate) mod global_init_helpers;
 pub mod const_eval;
+mod const_eval_global_addr;
+mod const_eval_init_size;
 pub mod expr_types;
 mod pointer_analysis;
 mod ref_collection;
