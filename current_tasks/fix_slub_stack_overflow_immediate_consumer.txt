@@ -1,0 +1,24 @@
+Task: Fix mm/slub.c kernel stack overflow via immediate-consumer slot elimination
+Status: in_progress
+Started: 2026-01-27
+
+Problem: mm/slub.c causes x86 kernel boot failure (stack overflow) because
+our compiler generates ~15x larger stack frames than GCC for key SLUB allocator
+functions (e.g., get_partial_node: 1104 bytes vs GCC's 72 bytes; ___slab_alloc:
+4096 bytes vs GCC's ~128 bytes).
+
+Root cause: Every SSA intermediate value gets a stack slot even if it's defined
+at instruction N and only consumed at instruction N+1 in the same basic block.
+These values exist only in the accumulator register between consecutive
+instructions and never need to be persisted to stack.
+
+Approach: In calculate_stack_space_common, skip slot allocation for values
+that are:
+1. Defined at instruction N in a block
+2. Used exactly once at instruction N+1 in the same block
+3. Used as the FIRST operand (which gets loaded into %rax first)
+4. Not an alloca, not register-assigned, not copy-aliased
+
+This keeps the value in %rax between consecutive instructions, eliminating
+the need for a stack slot. This is different from the reduce_stack_frame_size
+task (which uses 4-byte slots for i32 types) - these are complementary.
