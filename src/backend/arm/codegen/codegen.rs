@@ -8,8 +8,9 @@ use crate::backend::generation::{generate_module, is_i128_type, calculate_stack_
 use crate::backend::call_abi::{CallAbiConfig, CallArgClass, compute_stack_arg_space};
 use crate::backend::call_emit::{ParamClass, classify_params};
 use crate::backend::cast::{CastKind, classify_cast, FloatOp};
-use crate::backend::inline_asm::{InlineAsmEmitter, AsmOperandKind, AsmOperand, emit_inline_asm_common};
+use crate::backend::inline_asm::emit_inline_asm_common;
 use crate::backend::regalloc::{self, PhysReg, RegAllocConfig};
+use super::asm_emitter::ARM_GP_SCRATCH;
 
 /// Callee-saved registers available for register allocation: x20-x28.
 /// x19 is reserved (some ABIs use it), x29=fp, x30=lr.
@@ -87,7 +88,7 @@ fn arm_invert_cond_code(cc: &str) -> &'static str {
 /// AArch64 code generator. Implements the ArchCodegen trait for the shared framework.
 /// Uses AAPCS64 calling convention with stack-based allocation.
 pub struct ArmCodegen {
-    state: CodegenState,
+    pub(super) state: CodegenState,
     /// Frame size for the current function (needed for epilogue in terminators).
     current_frame_size: i64,
     current_return_type: IrType,
@@ -103,13 +104,13 @@ pub struct ArmCodegen {
     /// This includes all stack-passed scalars, F128, I128, and structs with alignment.
     va_named_stack_bytes: usize,
     /// Scratch register index for inline asm GP register allocation
-    asm_scratch_idx: usize,
+    pub(super) asm_scratch_idx: usize,
     /// Scratch register index for inline asm FP register allocation
-    asm_fp_scratch_idx: usize,
+    pub(super) asm_fp_scratch_idx: usize,
     /// Register allocator: value ID -> physical callee-saved register.
     reg_assignments: FxHashMap<u32, PhysReg>,
     /// Which callee-saved registers are actually used (for save/restore).
-    used_callee_saved: Vec<PhysReg>,
+    pub(super) used_callee_saved: Vec<PhysReg>,
     /// SP offset where callee-saved registers are stored.
     callee_save_offset: i64,
     /// For large stack frames: reserved for future x19 frame base optimization.
@@ -618,7 +619,7 @@ impl ArmCodegen {
     /// Emit store to [base, #offset], handling large offsets.
     /// For large frames with x19 as frame base register, tries x19-relative addressing
     /// before falling back to the expensive movz+movk+add sequence.
-    fn emit_store_to_sp(&mut self, reg: &str, offset: i64, instr: &str) {
+    pub(super) fn emit_store_to_sp(&mut self, reg: &str, offset: i64, instr: &str) {
         // When DynAlloca is present, use x29 (frame pointer) as base.
         let base = if self.state.has_dyn_alloca { "x29" } else { "sp" };
         if Self::is_valid_imm_offset(offset, instr, reg) {
@@ -642,7 +643,7 @@ impl ArmCodegen {
 
     /// Emit load from [base, #offset], handling large offsets.
     /// For large frames with x19 as frame base register, tries x19-relative addressing.
-    fn emit_load_from_sp(&mut self, reg: &str, offset: i64, instr: &str) {
+    pub(super) fn emit_load_from_sp(&mut self, reg: &str, offset: i64, instr: &str) {
         let base = if self.state.has_dyn_alloca { "x29" } else { "sp" };
         if Self::is_valid_imm_offset(offset, instr, reg) {
             self.state.emit_fmt(format_args!("    {} {}, [{}, #{}]", instr, reg, base, offset));
@@ -720,7 +721,7 @@ impl ArmCodegen {
 
     /// Emit `add dest, sp, #offset` handling large offsets.
     /// Uses x19 frame base when available, falls back to x17 scratch.
-    fn emit_add_sp_offset(&mut self, dest: &str, offset: i64) {
+    pub(super) fn emit_add_sp_offset(&mut self, dest: &str, offset: i64) {
         let base = if self.state.has_dyn_alloca { "x29" } else { "sp" };
         if offset >= 0 && offset <= 4095 {
             self.state.emit_fmt(format_args!("    add {}, {}, #{}", dest, base, offset));
@@ -785,7 +786,7 @@ impl ArmCodegen {
     /// Load a 64-bit immediate value into a register using movz/movn + movk sequence.
     /// Uses MOVN (move-not) for values where most halfwords are 0xFFFF, which
     /// gives shorter sequences for negative numbers and large values.
-    fn emit_load_imm64(&mut self, reg: &str, val: i64) {
+    pub(super) fn emit_load_imm64(&mut self, reg: &str, val: i64) {
         let bits = val as u64;
         if bits == 0 {
             self.state.emit_fmt(format_args!("    mov {}, #0", reg));
@@ -900,7 +901,7 @@ impl ArmCodegen {
     }
 
     /// Load an operand into x0.
-    fn operand_to_x0(&mut self, op: &Operand) {
+    pub(super) fn operand_to_x0(&mut self, op: &Operand) {
         match op {
             Operand::Const(c) => {
                 self.state.reg_cache.invalidate_acc();
@@ -1115,7 +1116,7 @@ impl ArmCodegen {
 
     /// Load the address represented by a pointer Value into the given register.
     /// For alloca values, computes the address; for others, loads the stored pointer.
-    fn load_ptr_to_reg(&mut self, ptr: &Value, reg: &str) {
+    pub(super) fn load_ptr_to_reg(&mut self, ptr: &Value, reg: &str) {
         if let Some(slot) = self.state.get_slot(ptr.0) {
             if self.state.is_alloca(ptr.0) {
                 self.emit_add_sp_offset(reg, slot.0);
@@ -1125,354 +1126,6 @@ impl ArmCodegen {
         }
     }
 
-    /// Emit a NEON binary 128-bit operation: load from args[0] and args[1] pointers,
-    /// apply the NEON instruction, store result to dest_ptr.
-    fn emit_neon_binary_128(&mut self, dest_ptr: &Value, args: &[Operand], neon_inst: &str) {
-        // Load first 128-bit operand pointer into x0, then load q0
-        self.operand_to_x0(&args[0]);
-        self.state.emit("    ldr q0, [x0]");
-        // Load second 128-bit operand pointer into x1, then load q1
-        match &args[1] {
-            Operand::Value(v) => {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    if self.state.is_alloca(v.0) {
-                        self.emit_add_sp_offset("x1", slot.0);
-                    } else {
-                        self.emit_load_from_sp("x1", slot.0, "ldr");
-                    }
-                }
-            }
-            Operand::Const(_) => {
-                self.operand_to_x0(&args[1]);
-                self.state.emit("    mov x1, x0");
-            }
-        }
-        self.state.emit("    ldr q1, [x1]");
-        // Apply the binary NEON operation
-        self.state.emit_fmt(format_args!("    {} v0.16b, v0.16b, v1.16b", neon_inst));
-        // Store result to dest_ptr
-        self.load_ptr_to_reg(dest_ptr, "x0");
-        self.state.emit("    str q0, [x0]");
-    }
-
-    fn emit_intrinsic_arm(&mut self, dest: &Option<Value>, op: &IntrinsicOp, dest_ptr: &Option<Value>, args: &[Operand]) {
-        match op {
-            IntrinsicOp::Lfence | IntrinsicOp::Mfence => {
-                self.state.emit("    dmb ish");
-            }
-            IntrinsicOp::Sfence => {
-                self.state.emit("    dmb ishst");
-            }
-            IntrinsicOp::Pause => {
-                self.state.emit("    yield");
-            }
-            IntrinsicOp::Clflush => {
-                // ARM has no direct clflush; use dc civac (clean+invalidate to PoC)
-                self.operand_to_x0(&args[0]);
-                self.state.emit("    dc civac, x0");
-            }
-            IntrinsicOp::Movnti => {
-                // Non-temporal 32-bit store: dest_ptr = target address, args[0] = value
-                if let Some(ptr) = dest_ptr {
-                    self.operand_to_x0(&args[0]);
-                    self.state.emit("    mov w9, w0");
-                    self.load_ptr_to_reg(ptr, "x0");
-                    self.state.emit("    str w9, [x0]");
-                }
-            }
-            IntrinsicOp::Movnti64 => {
-                // Non-temporal 64-bit store
-                if let Some(ptr) = dest_ptr {
-                    self.operand_to_x0(&args[0]);
-                    self.state.emit("    mov x9, x0");
-                    self.load_ptr_to_reg(ptr, "x0");
-                    self.state.emit("    str x9, [x0]");
-                }
-            }
-            IntrinsicOp::Movntdq | IntrinsicOp::Movntpd => {
-                // Non-temporal 128-bit store: dest_ptr = target, args[0] = source ptr
-                if let Some(ptr) = dest_ptr {
-                    self.operand_to_x0(&args[0]);
-                    self.state.emit("    ldr q0, [x0]");
-                    self.load_ptr_to_reg(ptr, "x0");
-                    self.state.emit("    str q0, [x0]");
-                }
-            }
-            IntrinsicOp::Loaddqu => {
-                // Load 128-bit unaligned: args[0] = source ptr, dest_ptr = result storage
-                if let Some(dptr) = dest_ptr {
-                    self.operand_to_x0(&args[0]);
-                    self.state.emit("    ldr q0, [x0]");
-                    self.load_ptr_to_reg(dptr, "x0");
-                    self.state.emit("    str q0, [x0]");
-                }
-            }
-            IntrinsicOp::Storedqu => {
-                // Store 128-bit unaligned: dest_ptr = target ptr, args[0] = source data ptr
-                if let Some(ptr) = dest_ptr {
-                    self.operand_to_x0(&args[0]);
-                    self.state.emit("    ldr q0, [x0]");
-                    self.load_ptr_to_reg(ptr, "x0");
-                    self.state.emit("    str q0, [x0]");
-                }
-            }
-            IntrinsicOp::Pcmpeqb128 => {
-                if let Some(dptr) = dest_ptr {
-                    // cmeq compares and sets all bits in each lane on equality
-                    self.emit_neon_binary_128(dptr, args, "cmeq");
-                }
-            }
-            IntrinsicOp::Pcmpeqd128 => {
-                if let Some(dptr) = dest_ptr {
-                    // For 32-bit lane equality, load q regs, use cmeq with .4s arrangement
-                    self.operand_to_x0(&args[0]);
-                    self.state.emit("    ldr q0, [x0]");
-                    if let Operand::Value(v) = &args[1] {
-                        self.load_ptr_to_reg(v, "x1");
-                    } else {
-                        self.operand_to_x0(&args[1]);
-                        self.state.emit("    mov x1, x0");
-                    }
-                    self.state.emit("    ldr q1, [x1]");
-                    self.state.emit("    cmeq v0.4s, v0.4s, v1.4s");
-                    self.load_ptr_to_reg(dptr, "x0");
-                    self.state.emit("    str q0, [x0]");
-                }
-            }
-            IntrinsicOp::Psubusb128 => {
-                if let Some(dptr) = dest_ptr {
-                    self.emit_neon_binary_128(dptr, args, "uqsub");
-                }
-            }
-            IntrinsicOp::Por128 => {
-                if let Some(dptr) = dest_ptr {
-                    self.emit_neon_binary_128(dptr, args, "orr");
-                }
-            }
-            IntrinsicOp::Pand128 => {
-                if let Some(dptr) = dest_ptr {
-                    self.emit_neon_binary_128(dptr, args, "and");
-                }
-            }
-            IntrinsicOp::Pxor128 => {
-                if let Some(dptr) = dest_ptr {
-                    self.emit_neon_binary_128(dptr, args, "eor");
-                }
-            }
-            IntrinsicOp::Pmovmskb128 => {
-                // Extract the high bit of each byte in a 128-bit vector into a 16-bit mask.
-                // NEON has no pmovmskb equivalent, so we use a multi-step sequence:
-                //   1. Load 128-bit data into v0
-                //   2. Shift right each byte by 7 to isolate the sign bit (ushr v0.16b, v0.16b, #7)
-                //   3. Collect bits using successive narrowing and shifts
-                // Efficient approach: multiply by power-of-2 bit positions, then add across lanes.
-                self.operand_to_x0(&args[0]);
-                self.state.emit("    ldr q0, [x0]");
-                // Shift right by 7 to get 0 or 1 in each byte lane
-                self.state.emit("    ushr v0.16b, v0.16b, #7");
-                // Load the bit position constants: [1,2,4,8,16,32,64,128, 1,2,4,8,16,32,64,128]
-                // 0x8040201008040201 loaded via movz/movk sequence
-                self.state.emit("    movz x0, #0x0201");
-                self.state.emit("    movk x0, #0x0804, lsl #16");
-                self.state.emit("    movk x0, #0x2010, lsl #32");
-                self.state.emit("    movk x0, #0x8040, lsl #48");
-                self.state.emit("    fmov d1, x0");
-                self.state.emit("    mov v1.d[1], x0");
-                // Multiply each byte: v0[i] * v1[i] gives the bit contribution
-                self.state.emit("    mul v0.16b, v0.16b, v1.16b");
-                // Now sum bytes 0-7 into low byte, and bytes 8-15 into high byte
-                // addv sums all lanes into a scalar - but we need two separate sums
-                // Use ext to split, then addv each half
-                self.state.emit("    ext v1.16b, v0.16b, v0.16b, #8");
-                // v0 has low 8 bytes, v1 has high 8 bytes (shifted)
-                // Sum low 8 bytes
-                self.state.emit("    addv b0, v0.8b");
-                self.state.emit("    umov w0, v0.b[0]");
-                // Sum high 8 bytes
-                self.state.emit("    addv b1, v1.8b");
-                self.state.emit("    umov w1, v1.b[0]");
-                // Combine: result = low_sum | (high_sum << 8)
-                self.state.emit("    orr w0, w0, w1, lsl #8");
-                // Store scalar result
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.emit_store_to_sp("x0", slot.0, "str");
-                    }
-                }
-            }
-            IntrinsicOp::SetEpi8 => {
-                // Splat a byte value to all 16 bytes: args[0] = byte value
-                if let Some(dptr) = dest_ptr {
-                    self.operand_to_x0(&args[0]);
-                    self.state.emit("    dup v0.16b, w0");
-                    self.load_ptr_to_reg(dptr, "x0");
-                    self.state.emit("    str q0, [x0]");
-                }
-            }
-            IntrinsicOp::SetEpi32 => {
-                // Splat a 32-bit value to all 4 lanes: args[0] = 32-bit value
-                if let Some(dptr) = dest_ptr {
-                    self.operand_to_x0(&args[0]);
-                    self.state.emit("    dup v0.4s, w0");
-                    self.load_ptr_to_reg(dptr, "x0");
-                    self.state.emit("    str q0, [x0]");
-                }
-            }
-            IntrinsicOp::Crc32_8 | IntrinsicOp::Crc32_16
-            | IntrinsicOp::Crc32_32 | IntrinsicOp::Crc32_64 => {
-                let is_64 = matches!(op, IntrinsicOp::Crc32_64);
-                let (save_reg, crc_inst) = match op {
-                    IntrinsicOp::Crc32_8  => ("w9", "crc32cb w9, w9, w0"),
-                    IntrinsicOp::Crc32_16 => ("w9", "crc32ch w9, w9, w0"),
-                    IntrinsicOp::Crc32_32 => ("w9", "crc32cw w9, w9, w0"),
-                    IntrinsicOp::Crc32_64 => ("x9", "crc32cx w9, w9, x0"),
-                    _ => unreachable!(),
-                };
-                self.operand_to_x0(&args[0]);
-                self.state.emit_fmt(format_args!("    mov {}, {}", save_reg, if is_64 { "x0" } else { "w0" }));
-                self.operand_to_x0(&args[1]);
-                self.state.emit_fmt(format_args!("    {}", crc_inst));
-                self.state.emit("    mov x0, x9");
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.emit_store_to_sp("x0", slot.0, "str");
-                    }
-                }
-            }
-            IntrinsicOp::FrameAddress => {
-                // __builtin_frame_address(0): return current frame pointer (x29)
-                self.state.emit("    mov x0, x29");
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.emit_store_to_sp("x0", slot.0, "str");
-                    }
-                }
-            }
-            IntrinsicOp::ReturnAddress => {
-                // __builtin_return_address(0): return address saved at [x29, #8]
-                // x30 (lr) is clobbered by bl instructions, so read from stack
-                self.state.emit("    ldr x0, [x29, #8]");
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.emit_store_to_sp("x0", slot.0, "str");
-                    }
-                }
-            }
-            IntrinsicOp::SqrtF64 => {
-                self.operand_to_x0(&args[0]);
-                self.state.emit("    fmov d0, x0");
-                self.state.emit("    fsqrt d0, d0");
-                self.state.emit("    fmov x0, d0");
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.emit_store_to_sp("x0", slot.0, "str");
-                    }
-                }
-            }
-            IntrinsicOp::SqrtF32 => {
-                self.operand_to_x0(&args[0]);
-                self.state.emit("    fmov s0, w0");
-                self.state.emit("    fsqrt s0, s0");
-                self.state.emit("    fmov w0, s0");
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.emit_store_to_sp("w0", slot.0, "str");
-                    }
-                }
-            }
-            IntrinsicOp::FabsF64 => {
-                self.operand_to_x0(&args[0]);
-                self.state.emit("    fmov d0, x0");
-                self.state.emit("    fabs d0, d0");
-                self.state.emit("    fmov x0, d0");
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.emit_store_to_sp("x0", slot.0, "str");
-                    }
-                }
-            }
-            IntrinsicOp::FabsF32 => {
-                self.operand_to_x0(&args[0]);
-                self.state.emit("    fmov s0, w0");
-                self.state.emit("    fabs s0, s0");
-                self.state.emit("    fmov w0, s0");
-                if let Some(d) = dest {
-                    if let Some(slot) = self.state.get_slot(d.0) {
-                        self.emit_store_to_sp("w0", slot.0, "str");
-                    }
-                }
-            }
-        }
-    }
-
-    // ---- F128 (long double / IEEE quad precision) soft-float helpers ----
-    //
-    // On AArch64, long double is IEEE 754 binary128 (16 bytes).
-    // Hardware has no quad-precision FP ops, so we use compiler-rt/libgcc soft-float:
-    //   Comparison: __eqtf2, __lttf2, __letf2, __gttf2, __getf2
-    //   Arithmetic: __addtf3, __subtf3, __multf3, __divtf3
-    //   Conversion: __extenddftf2 (f64->f128), __trunctfdf2 (f128->f64)
-    // ABI: f128 passed/returned in Q registers (q0, q1). Int result in w0/x0.
-
-    /// Load an F128 operand into Q0 via f64->f128 conversion.
-    /// Since ARM F128 values are stored internally as f64 approximations (the
-    /// backend doesn't store full 16-byte f128 in allocas), we consistently use
-    /// __extenddftf2 to convert the f64 to f128 for both values and constants.
-    /// This ensures that `x == 1.2L` works correctly when x was stored as f64.
-    fn emit_f128_operand_to_q0(&mut self, op: &Operand) {
-        // Load the f64 approximation into x0, then convert to f128 via __extenddftf2.
-        self.operand_to_x0(op);
-        self.state.emit("    fmov d0, x0");
-        self.state.emit("    bl __extenddftf2");
-    }
-
-    /// Emit F128 arithmetic via soft-float libcalls.
-    /// Called from emit_float_binop_impl when ty == F128.
-    /// At entry: x1 = lhs f64 bits, x0 = rhs f64 bits (from shared float binop dispatch).
-    fn emit_f128_binop_softfloat(&mut self, mnemonic: &str) {
-        let libcall = match crate::backend::cast::f128_binop_libcall(mnemonic) {
-            Some(lc) => lc,
-            None => {
-                // Unknown op: fall back to f64 hardware path
-                self.state.emit("    mov x2, x0");
-                self.state.emit("    fmov d0, x1");
-                self.state.emit("    fmov d1, x2");
-                self.state.emit_fmt(format_args!("    {} d0, d0, d1", mnemonic));
-                self.state.emit("    fmov x0, d0");
-                return;
-            }
-        };
-
-        // At entry from shared emit_float_binop: x1=lhs(f64 bits), x0=rhs(f64 bits)
-        // Save rhs to stack, convert lhs to f128, save, convert rhs to f128.
-        // Use raw sp addressing for our temp area (not x29-relative) since we
-        // adjust sp ourselves and these are OUR temp slots, not frame slots.
-        self.state.emit("    sub sp, sp, #32");
-        // Save rhs f64
-        self.state.emit("    str x0, [sp, #16]");
-        // Convert lhs (x1) from f64 to f128
-        self.state.emit("    fmov d0, x1");
-        self.state.emit("    bl __extenddftf2");
-        // Save lhs f128 (Q0)
-        self.state.emit("    str q0, [sp]");
-        // Load rhs f64 and convert to f128
-        self.state.emit("    ldr x0, [sp, #16]");
-        self.state.emit("    fmov d0, x0");
-        self.state.emit("    bl __extenddftf2");
-        // RHS f128 now in Q0, move to Q1 (second arg)
-        self.state.emit("    mov v1.16b, v0.16b");
-        // Load LHS f128 back to Q0 (first arg)
-        self.state.emit("    ldr q0, [sp]");
-        // Call the arithmetic libcall: result f128 in Q0
-        self.state.emit_fmt(format_args!("    bl {}", libcall));
-        // Convert result f128 back to f64 via __trunctfdf2
-        self.state.emit("    bl __trunctfdf2");
-        // f64 result in D0, move to x0
-        self.state.emit("    fmov x0, d0");
-        // Free temp space
-        self.state.emit("    add sp, sp, #32");
-        self.state.reg_cache.invalidate_all();
-    }
 }
 
 const ARM_ARG_REGS: [&str; 8] = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
@@ -4013,256 +3666,3 @@ impl Default for ArmCodegen {
     }
 }
 
-/// AArch64 scratch registers for inline asm (caller-saved temporaries).
-const ARM_GP_SCRATCH: &[&str] = &["x9", "x10", "x11", "x12", "x13", "x14", "x15", "x19", "x20", "x21"];
-/// AArch64 FP/SIMD scratch registers for inline asm (d8-d15 are callee-saved,
-/// d16-d31 are caller-saved; we use d16+ as scratch to avoid save/restore).
-const ARM_FP_SCRATCH: &[&str] = &["d16", "d17", "d18", "d19", "d20", "d21", "d22", "d23", "d24", "d25"];
-
-impl InlineAsmEmitter for ArmCodegen {
-    fn asm_state(&mut self) -> &mut CodegenState { &mut self.state }
-    fn asm_state_ref(&self) -> &CodegenState { &self.state }
-
-    // TODO: Support multi-alternative constraint parsing (e.g., "rm", "ri") like x86.
-    // TODO: Support ARM-specific immediate constraints ("I", "J", "K", "L", etc.).
-    fn classify_constraint(&self, constraint: &str) -> AsmOperandKind {
-        let c = constraint.trim_start_matches(|c: char| c == '=' || c == '+' || c == '&');
-        // Explicit register constraint from register variable: {regname}
-        if c.starts_with('{') && c.ends_with('}') {
-            let reg_name = &c[1..c.len()-1];
-            return AsmOperandKind::Specific(reg_name.to_string());
-        }
-        // TODO: ARM =@cc not fully implemented — needs CSET/CSINC in store_output_from_reg.
-        // Currently stores incorrect results (just a GP register value, no condition capture).
-        if let Some(cond) = c.strip_prefix("@cc") {
-            return AsmOperandKind::ConditionCode(cond.to_string());
-        }
-        if !c.is_empty() && c.chars().all(|ch| ch.is_ascii_digit()) {
-            if let Ok(n) = c.parse::<usize>() {
-                return AsmOperandKind::Tied(n);
-            }
-        }
-        if c == "m" || c == "Q" { return AsmOperandKind::Memory; }
-        // Multi-char constraints containing Q (e.g., "Qm") — treat as memory if Q is present
-        if c.contains('Q') || c.contains('m') { return AsmOperandKind::Memory; }
-        // "w" = AArch64 floating-point/SIMD register (d0-d31/s0-s31)
-        if c == "w" { return AsmOperandKind::FpReg; }
-        // ARM doesn't use specific single-letter constraints like x86,
-        // all "r" constraints get GP scratch registers.
-        AsmOperandKind::GpReg
-    }
-
-    fn setup_operand_metadata(&self, op: &mut AsmOperand, val: &Operand, _is_output: bool) {
-        if matches!(op.kind, AsmOperandKind::Memory) {
-            if let Operand::Value(v) = val {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    if self.state.is_alloca(v.0) {
-                        // Alloca: stack slot IS the memory location
-                        op.mem_offset = slot.0;
-                    } else {
-                        // Non-alloca: slot holds a pointer that needs indirection.
-                        // Mark with empty mem_addr; resolve_memory_operand will handle it.
-                        op.mem_addr = String::new();
-                        op.mem_offset = 0;
-                    }
-                }
-            }
-        }
-    }
-
-    fn resolve_memory_operand(&mut self, op: &mut AsmOperand, val: &Operand, excluded: &[String]) -> bool {
-        if !op.mem_addr.is_empty() || op.mem_offset != 0 {
-            return false;
-        }
-        // Each memory operand gets its own unique register via assign_scratch_reg,
-        // so multiple "=m" outputs don't overwrite each other's addresses.
-        match val {
-            Operand::Value(v) => {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
-                    self.emit_load_from_sp(&tmp_reg, slot.0, "ldr");
-                    op.mem_addr = format!("[{}]", tmp_reg);
-                    return true;
-                }
-            }
-            Operand::Const(c) => {
-                // Constant address (e.g., from MMIO reads at compile-time constant addresses).
-                // Copy propagation can replace Value operands with Const in inline asm inputs.
-                // Load the constant into a scratch register for indirect addressing.
-                if let Some(addr) = c.to_i64() {
-                    let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
-                    self.emit_load_imm64(&tmp_reg, addr);
-                    op.mem_addr = format!("[{}]", tmp_reg);
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn assign_scratch_reg(&mut self, kind: &AsmOperandKind, excluded: &[String]) -> String {
-        if matches!(kind, AsmOperandKind::FpReg) {
-            let idx = self.asm_fp_scratch_idx;
-            self.asm_fp_scratch_idx += 1;
-            if idx < ARM_FP_SCRATCH.len() {
-                ARM_FP_SCRATCH[idx].to_string()
-            } else {
-                format!("d{}", 16 + idx)
-            }
-        } else {
-            loop {
-                let idx = self.asm_scratch_idx;
-                self.asm_scratch_idx += 1;
-                let reg = if idx < ARM_GP_SCRATCH.len() {
-                    ARM_GP_SCRATCH[idx].to_string()
-                } else {
-                    format!("x{}", 9 + idx)
-                };
-                if !excluded.iter().any(|e| e == &reg) {
-                    // If this is a callee-saved register (x19-x28), ensure it is
-                    // saved/restored in the prologue/epilogue.
-                    let reg_num = reg.strip_prefix('x')
-                        .and_then(|s| s.parse::<u8>().ok());
-                    if let Some(n) = reg_num {
-                        if (19..=28).contains(&n) {
-                            let phys = PhysReg(n);
-                            if !self.used_callee_saved.contains(&phys) {
-                                self.used_callee_saved.push(phys);
-                                self.used_callee_saved.sort_by_key(|r| r.0);
-                            }
-                        }
-                    }
-                    return reg;
-                }
-            }
-        }
-    }
-
-    fn load_input_to_reg(&mut self, op: &AsmOperand, val: &Operand, _constraint: &str) {
-        let reg = &op.reg;
-        let is_fp = reg.starts_with('d') || reg.starts_with('s');
-        match val {
-            Operand::Const(c) => {
-                if is_fp {
-                    // Load FP constant: move to GP reg first, then fmov to FP reg
-                    let bits = c.to_i64().unwrap_or(0);
-                    self.emit_load_imm64("x9", bits);
-                    if op.operand_type == IrType::F32 {
-                        // Convert d-register name to s-register for single-precision
-                        let s_reg = Self::d_to_s_reg(reg);
-                        self.state.emit_fmt(format_args!("    fmov {}, w9", s_reg));
-                    } else {
-                        self.state.emit_fmt(format_args!("    fmov {}, x9", reg));
-                    }
-                } else {
-                    self.emit_load_imm64(reg, c.to_i64().unwrap_or(0));
-                }
-            }
-            Operand::Value(v) => {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    if is_fp {
-                        // Load FP value from stack: load raw bits to GP reg, then fmov
-                        if op.operand_type == IrType::F32 {
-                            self.state.emit_fmt(format_args!("    ldr w9, [sp, #{}]", slot.0));
-                            let s_reg = Self::d_to_s_reg(reg);
-                            self.state.emit_fmt(format_args!("    fmov {}, w9", s_reg));
-                        } else {
-                            self.state.emit_fmt(format_args!("    ldr x9, [sp, #{}]", slot.0));
-                            self.state.emit_fmt(format_args!("    fmov {}, x9", reg));
-                        }
-                    } else if self.state.is_alloca(v.0) {
-                        // Alloca: the stack slot IS the variable's memory;
-                        // compute its address instead of loading from it.
-                        self.emit_add_sp_offset(reg, slot.0);
-                    } else {
-                        self.emit_load_from_sp(reg, slot.0, "ldr");
-                    }
-                }
-            }
-        }
-    }
-
-    fn preload_readwrite_output(&mut self, op: &AsmOperand, ptr: &Value) {
-        let reg = &op.reg;
-        let is_fp = reg.starts_with('d') || reg.starts_with('s');
-        if let Some(slot) = self.state.get_slot(ptr.0) {
-            if is_fp {
-                // Load current FP value for read-write constraint
-                if op.operand_type == IrType::F32 {
-                    self.state.emit_fmt(format_args!("    ldr w9, [sp, #{}]", slot.0));
-                    let s_reg = Self::d_to_s_reg(reg);
-                    self.state.emit_fmt(format_args!("    fmov {}, w9", s_reg));
-                } else {
-                    self.state.emit_fmt(format_args!("    ldr x9, [sp, #{}]", slot.0));
-                    self.state.emit_fmt(format_args!("    fmov {}, x9", reg));
-                }
-            } else {
-                self.emit_load_from_sp(reg, slot.0, "ldr");
-            }
-        }
-    }
-
-    fn substitute_template_line(&self, line: &str, operands: &[AsmOperand], gcc_to_internal: &[usize], _operand_types: &[IrType], goto_labels: &[(String, BlockId)]) -> String {
-        // For memory operands (Q/m constraints), use mem_addr (e.g., "[x9]") or
-        // format as [sp, #offset] for stack-based memory. For register operands,
-        // use the register name directly.
-        let op_regs: Vec<String> = operands.iter().map(|o| {
-            if matches!(o.kind, AsmOperandKind::Memory) {
-                if !o.mem_addr.is_empty() {
-                    // Non-alloca pointer: mem_addr already formatted as "[xN]"
-                    o.mem_addr.clone()
-                } else if o.mem_offset != 0 {
-                    // Alloca: stack-relative address
-                    format!("[sp, #{}]", o.mem_offset)
-                } else {
-                    // Fallback: wrap register in brackets
-                    if o.reg.is_empty() {
-                        "[sp]".to_string()
-                    } else {
-                        format!("[{}]", o.reg)
-                    }
-                }
-            } else {
-                o.reg.clone()
-            }
-        }).collect();
-        let op_names: Vec<Option<String>> = operands.iter().map(|o| o.name.clone()).collect();
-        let mut result = Self::substitute_asm_operands_static(line, &op_regs, &op_names, gcc_to_internal);
-        // Substitute %l[name] goto label references
-        result = crate::backend::inline_asm::substitute_goto_labels(&result, goto_labels, operands.len());
-        result
-    }
-
-    fn store_output_from_reg(&mut self, op: &AsmOperand, ptr: &Value, _constraint: &str) {
-        if matches!(op.kind, AsmOperandKind::Memory) {
-            return;
-        }
-        let reg = &op.reg;
-        let is_fp = reg.starts_with('d') || reg.starts_with('s');
-        if let Some(slot) = self.state.get_slot(ptr.0) {
-            if is_fp {
-                // Store FP register output: fmov to GP reg, then store to stack
-                if op.operand_type == IrType::F32 {
-                    let s_reg = Self::d_to_s_reg(reg);
-                    self.state.emit_fmt(format_args!("    fmov w9, {}", s_reg));
-                    self.state.emit_fmt(format_args!("    str w9, [sp, #{}]", slot.0));
-                } else {
-                    self.state.emit_fmt(format_args!("    fmov x9, {}", reg));
-                    self.state.emit_fmt(format_args!("    str x9, [sp, #{}]", slot.0));
-                }
-            } else if self.state.is_alloca(ptr.0) {
-                self.emit_store_to_sp(reg, slot.0, "str");
-            } else {
-                // Non-alloca: slot holds a pointer, store through it
-                let scratch = if reg != "x9" { "x9" } else { "x10" };
-                self.emit_load_from_sp(scratch, slot.0, "ldr");
-                self.state.emit_fmt(format_args!("    str {}, [{}]", reg, scratch));
-            }
-        }
-    }
-
-    fn reset_scratch_state(&mut self) {
-        self.asm_scratch_idx = 0;
-        self.asm_fp_scratch_idx = 0;
-    }
-}
