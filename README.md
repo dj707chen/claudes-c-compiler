@@ -86,7 +86,10 @@ and PostgreSQL.
 - **i686**: The 32-bit x86 backend is new. Inline assembly with full
   operand substitution and register constraints is supported. The
   `__attribute__((fastcall))` calling convention is supported (first two
-  DWORD int/ptr args in ECX/EDX, callee cleans stack). SSE2 intrinsics
+  DWORD int/ptr args in ECX/EDX, callee cleans stack). 64-bit builtins
+  (`__builtin_clzll`, `__builtin_ctzll`, `__builtin_popcountll`,
+  `__builtin_bswap64`) correctly split operations across eax:edx.
+  SQLite passes all 622 sqllogictest tests. SSE2 intrinsics
   (including `_mm_shuffle_epi32` and AES-NI) work correctly via bundled
   headers. Redis builds and passes SET/GET roundtrip tests. libffi builds
   and passes all tests including closures. Projects with C++ dependencies

@@ -1,14 +1,29 @@
 Fix remaining i686 project failures
 =====================================
-Date: 2026-01-28 (updated after bitfield I32 ops fix)
+Date: 2026-01-28 (updated after i128 store register clobber fix)
 
 Current status:
 - Unit tests: 99.9% pass - up from 99.7%
-- Projects passing: 11/15 (zlib, lua, mquickjs, libpng, jq, libjpeg, libuv, redis, musl, tcc*, libsodium)
-  * tcc build succeeds; test suite fails due to missing i686 CRT/headers (same as GCC)
-- Projects failing: sqlite, mbedtls, postgres
+- Standard projects (run_all_verify): 12/12 pass
+  (zlib, lua, mquickjs, libpng, jq, libjpeg, libuv, libsodium, mbedtls, libffi, musl + redis*, tcc*)
+  * redis: passes (tested separately, not in standard run)
+  * tcc: build succeeds; test suite fails due to missing i686 CRT/headers (same as GCC)
+- Slow projects: sqlite (195/622), postgres (build fails)
 - Projects fixed this round: libffi (was crashing due to __CET__ mismatch),
-  libsodium (mode(TI) rejection), mquickjs (ROM table mismatch + compound init stride)
+  libsodium (mode(TI) rejection + i128 store register clobber),
+  mquickjs (ROM table mismatch + compound init stride)
+
+Fixed (i128 store register clobber on i686):
+- emit_store_default i128 Indirect path clobbered callee-saved registers (esi/edi)
+  before loading the destination pointer, destroying it when register-allocated
+  to esi or edi. This caused SIGSEGV in libsodium's Ed25519 crypto_sign operations.
+  - Root cause: In traits.rs emit_store_default(), the sequence was:
+    emit_load_acc_pair -> emit_save_acc_pair -> emit_load_ptr_from_slot
+    emit_save_acc_pair moves eax->esi, edx->edi, clobbering the pointer.
+  - Fix: Reorder to load pointer before save_acc_pair:
+    emit_load_acc_pair -> emit_load_ptr_from_slot -> emit_save_acc_pair
+  - Fixes libsodium sign/box (was SIGSEGV, now 7/7 pass)
+  - No regressions on any target
 
 Fixed (mode(TI) and __int128 rejection on i686):
 - CCC-i686 silently accepted mode(TI) and __int128 on 32-bit targets
@@ -74,20 +89,15 @@ Fixed (inline asm "g" constraint register conflict):
 
 Known remaining issues:
 
-1. sqlite: 2/622 tests pass (was 0/622) -- READONLY_DBMOVED bug
-   - Root cause FOUND: After inlining fileHasMoved() into unixFileControl(),
-     the codegen reads buf.st_ino from the WRONG stack offset.
-   - stat buffer allocated at -120(%ebp), st_ino at offset 12 -> should be -108(%ebp)
-   - But codegen reads from -32(%ebp) = buf + 88 = past end of buffer
-   - This reads stale/uninitialized data, causing fileHasMoved() to return true,
-     which makes sqlite think the database file was moved/renamed (SQLITE_READONLY_DBMOVED)
-   - Workaround: journal_mode=OFF or :memory: databases work correctly
-   - The struct layout is correct (verified offset 12 for st_ino on both CCC and GCC)
-   - The standalone function generates correct code (-92(%ebp) for buf at -104)
-   - The bug is specific to the INLINED version in the large unixFileControl() function
-   - This is likely a codegen bug in stack slot assignment or value remapping after inlining
-   - Investigation needed in: src/passes/inline.rs (value remapping) or
-     src/backend/i686/codegen/ (stack frame layout for large functions)
+1. sqlite: 195/622 tests pass (was 2/622) -- READONLY_DBMOVED was fixed by asm redirect
+   - The READONLY_DBMOVED bug was caused by function __asm__("stat64") redirect
+     not being applied when taking address of stat (e.g., (sqlite3_syscall_ptr)stat
+     in aSyscall[] table). CCC emitted `.long stat` instead of `.long stat64`.
+     This caused stat() to fill 88-byte non-LFS struct but code expected 96-byte LFS struct.
+   - FIXED by asm-label-redirect-global-init commit (upstream).
+   - Remaining 427 failures are query-level computational errors, likely related to
+     i686 64-bit arithmetic edge cases in complex SQL expressions (UNION, EXCEPT, etc.)
+   - Investigation: compare CCC vs GCC query results for specific failing test patterns
 
 2. mquickjs: FIXED — all 5 tests pass
    - Was crashing in js_string_compare during JS parsing

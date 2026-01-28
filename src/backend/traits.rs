@@ -1297,8 +1297,12 @@ pub fn emit_store_default(cg: &mut (impl ArchCodegen + ?Sized), val: &Operand, p
                 }
                 SlotAddr::Direct(slot) => cg.emit_store_pair_to_slot(slot),
                 SlotAddr::Indirect(slot) => {
-                    cg.emit_save_acc_pair();
+                    // Load the pointer into the ptr register (ecx/x9/t5) BEFORE
+                    // saving the accumulator pair to callee-saved regs (esi:edi on i686).
+                    // On i686, the pointer may be register-allocated to esi or edi,
+                    // so emit_save_acc_pair() would clobber it if done first.
                     cg.emit_load_ptr_from_slot(slot, ptr.0);
+                    cg.emit_save_acc_pair();
                     cg.emit_store_pair_indirect();
                 }
             }
