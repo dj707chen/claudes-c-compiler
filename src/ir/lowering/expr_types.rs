@@ -244,6 +244,44 @@ impl Lowerer {
         None
     }
 
+    /// Check if a builtin name is a polymorphic atomic builtin whose return type
+    /// depends on the pointee type of the first argument. These include all
+    /// __atomic_fetch_*, __atomic_*_fetch, __sync_fetch_and_*, __sync_*_and_fetch,
+    /// __atomic_exchange, __atomic_load, and __sync_val_compare_and_swap.
+    fn is_polymorphic_atomic_builtin(name: &str) -> bool {
+        // fetch-op family (returns old value)
+        name == "__atomic_fetch_add"
+        || name == "__atomic_fetch_sub"
+        || name == "__atomic_fetch_and"
+        || name == "__atomic_fetch_or"
+        || name == "__atomic_fetch_xor"
+        || name == "__atomic_fetch_nand"
+        || name == "__sync_fetch_and_add"
+        || name == "__sync_fetch_and_sub"
+        || name == "__sync_fetch_and_and"
+        || name == "__sync_fetch_and_or"
+        || name == "__sync_fetch_and_xor"
+        || name == "__sync_fetch_and_nand"
+        // op-fetch family (returns new value)
+        || name == "__atomic_add_fetch"
+        || name == "__atomic_sub_fetch"
+        || name == "__atomic_and_fetch"
+        || name == "__atomic_or_fetch"
+        || name == "__atomic_xor_fetch"
+        || name == "__atomic_nand_fetch"
+        || name == "__sync_add_and_fetch"
+        || name == "__sync_sub_and_fetch"
+        || name == "__sync_and_and_fetch"
+        || name == "__sync_or_and_fetch"
+        || name == "__sync_xor_and_fetch"
+        || name == "__sync_nand_and_fetch"
+        // exchange and load (returns value of the atomic type)
+        || name == "__atomic_exchange_n"
+        || name == "__atomic_load_n"
+        || name == "__sync_lock_test_and_set"
+        || name == "__sync_val_compare_and_swap"
+    }
+
     /// Return the IR type for known builtins that return float or specific types.
     /// Returns None for builtins without special return type handling.
     pub(super) fn builtin_return_type(name: &str) -> Option<IrType> {
@@ -695,9 +733,9 @@ impl Lowerer {
                 self.resolve_generic_selection_type(controlling, associations)
             }
             Expr::FunctionCall(func, args, _) => {
-                // __builtin_choose_expr(const_expr, expr1, expr2): return type of
-                // the selected branch expression, not a fixed return type.
                 if let Expr::Identifier(name, _) = func.as_ref() {
+                    // __builtin_choose_expr(const_expr, expr1, expr2): return type of
+                    // the selected branch expression, not a fixed return type.
                     if name == "__builtin_choose_expr" && args.len() >= 3 {
                         let cond = self.eval_const_expr(&args[0]);
                         let is_nonzero = match cond {
@@ -710,6 +748,14 @@ impl Lowerer {
                         } else {
                             self.get_expr_type(&args[2])
                         };
+                    }
+                    // Polymorphic atomic builtins: return type matches the pointee
+                    // type of the first argument. Without this, i686 defaults to I32
+                    // and inserts a spurious IntWiden cast that truncates 64-bit results.
+                    if Self::is_polymorphic_atomic_builtin(name) {
+                        if let Some(pointee_ty) = args.first().and_then(|a| self.get_pointee_type_of_expr(a)) {
+                            return pointee_ty;
+                        }
                     }
                 }
                 self.get_call_return_type(func)
@@ -1585,6 +1631,16 @@ impl Lowerer {
                         } else {
                             self.get_expr_ctype(&args[2])
                         };
+                    }
+                    // Polymorphic atomic builtins: return CType from first arg's pointee.
+                    if Self::is_polymorphic_atomic_builtin(name) {
+                        if let Some(first_arg) = args.first() {
+                            if let Some(ctype) = self.get_expr_ctype(first_arg) {
+                                if let CType::Pointer(inner, _) = ctype {
+                                    return Some(*inner);
+                                }
+                            }
+                        }
                     }
                     // First check lowerer's own func_meta (has ABI-adjusted return_ctype)
                     if let Some(ctype) = self.func_meta.sigs.get(name.as_str()).and_then(|s| s.return_ctype.as_ref()) {
