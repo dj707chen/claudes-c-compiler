@@ -104,8 +104,16 @@ impl InlineAsmEmitter for X86Codegen {
                 Operand::Value(v) => {
                     if let Some(slot) = self.state.get_slot(v.0) {
                         if self.state.is_alloca(v.0) {
-                            // Alloca: stack slot IS the memory location
-                            op.mem_addr = format!("{}(%rbp)", slot.0);
+                            if self.state.alloca_over_align(v.0).is_some() {
+                                // Over-aligned alloca (e.g., __attribute__((aligned(32)))):
+                                // the raw rbp-relative offset is NOT guaranteed to be aligned.
+                                // Leave mem_addr empty so resolve_memory_operand computes the
+                                // runtime-aligned address into a scratch register.
+                                op.mem_addr = String::new();
+                            } else {
+                                // Normal alloca: stack slot IS the memory location
+                                op.mem_addr = format!("{}(%rbp)", slot.0);
+                            }
                         } else {
                             // Non-alloca: slot holds a pointer that needs indirection.
                             // Mark with empty mem_addr; resolve_memory_operand will load
@@ -127,7 +135,7 @@ impl InlineAsmEmitter for X86Codegen {
     }
 
     fn resolve_memory_operand(&mut self, op: &mut AsmOperand, val: &Operand, excluded: &[String]) -> bool {
-        // If mem_addr is already set (alloca case), nothing to do
+        // If mem_addr is already set (normal alloca case), nothing to do
         if !op.mem_addr.is_empty() {
             return false;
         }
@@ -147,7 +155,23 @@ impl InlineAsmEmitter for X86Codegen {
             Operand::Value(v) => {
                 if let Some(slot) = self.state.get_slot(v.0) {
                     let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
-                    self.state.out.emit_instr_rbp_reg("    movq", slot.0, &tmp_reg);
+                    if self.state.is_alloca(v.0) {
+                        if let Some(align) = self.state.alloca_over_align(v.0) {
+                            // Over-aligned alloca: compute runtime-aligned address.
+                            // The raw stack slot has extra padding; the aligned address
+                            // is (slot_addr + align-1) & ~(align-1).
+                            self.state.out.emit_instr_rbp_reg("    leaq", slot.0, &tmp_reg);
+                            self.state.out.emit_instr_imm_reg("    addq", (align - 1) as i64, &tmp_reg);
+                            self.state.out.emit_instr_imm_reg("    andq", -(align as i64), &tmp_reg);
+                        } else {
+                            // Normal alloca (shouldn't reach here since setup_operand_metadata
+                            // would have set mem_addr, but handle defensively)
+                            self.state.out.emit_instr_rbp_reg("    leaq", slot.0, &tmp_reg);
+                        }
+                    } else {
+                        // Non-alloca: slot holds a pointer, load it
+                        self.state.out.emit_instr_rbp_reg("    movq", slot.0, &tmp_reg);
+                    }
                     op.mem_addr = format!("(%{})", tmp_reg);
                     return true;
                 }

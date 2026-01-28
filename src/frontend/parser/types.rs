@@ -399,7 +399,14 @@ impl Parser {
         is_packed = is_packed || packed2;
         if aligned2.is_some() { struct_aligned = aligned2; }
         let fields = if matches!(self.peek(), TokenKind::LBrace) {
-            Some(self.parse_struct_fields())
+            // Save and restore parsing_const across struct field parsing.
+            // Field types may contain `const` (e.g., `const int *p`), and without
+            // this save/restore the const from field types leaks into the outer
+            // declaration, incorrectly marking non-const variables as const.
+            let saved_const = self.parsing_const;
+            let f = self.parse_struct_fields();
+            self.parsing_const = saved_const;
+            Some(f)
         } else {
             None
         };

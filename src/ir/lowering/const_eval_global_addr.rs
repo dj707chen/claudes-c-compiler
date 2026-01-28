@@ -177,6 +177,29 @@ impl Lowerer {
                 }
                 None
             }
+            // Conditional (ternary): cond ? then_expr : else_expr
+            // Evaluate the condition as a scalar constant, then resolve the
+            // selected branch as a global address. This is critical for the
+            // Linux kernel's _OF_DECLARE macro pattern:
+            //   .data = (fn == (fn_type)NULL) ? fn : fn
+            // Without this, the ternary falls through to GlobalInit::Zero and
+            // the function pointer is lost, causing NULL dereference at boot.
+            Expr::Conditional(cond, then_e, else_e, _) => {
+                // Try normal scalar constant evaluation of the condition first.
+                // If that fails (e.g., condition involves a function pointer
+                // comparison like `fn == NULL`), try address-aware evaluation.
+                let cond_val = self.eval_const_expr(cond)
+                    .or_else(|| self.eval_addr_comparison_cond(cond));
+                let cond_val = cond_val?;
+                let selected = if cond_val.is_nonzero() { then_e } else { else_e };
+                // Try the selected branch as a global address first
+                if let Some(addr) = self.eval_global_addr_expr(selected) {
+                    return Some(addr);
+                }
+                // If the selected branch is a scalar constant (e.g., 0 for NULL),
+                // return None and let the caller's eval_const_expr handle it.
+                None
+            }
             _ => None,
         }
     }
@@ -623,6 +646,63 @@ impl Lowerer {
             Some(GlobalInit::GlobalAddr(global_name))
         } else {
             Some(GlobalInit::GlobalAddrOffset(global_name, total_offset))
+        }
+    }
+
+    /// Evaluate a comparison condition that involves a global address (function
+    /// pointer or array) compared against a scalar constant (typically NULL/0).
+    ///
+    /// A defined function or global variable always has a non-zero address, so:
+    /// - `func == 0` / `func == NULL` -> 0 (false)
+    /// - `func != 0` / `func != NULL` -> 1 (true)
+    /// - `0 == func` / `NULL == func` -> 0 (false)
+    /// - `0 != func` / `NULL != func` -> 1 (true)
+    ///
+    /// This is used by the Linux kernel's _OF_DECLARE macro:
+    ///   .data = (fn == (fn_type)NULL) ? fn : fn
+    /// where the condition must be evaluated at compile time for a static initializer.
+    fn eval_addr_comparison_cond(&self, expr: &Expr) -> Option<IrConst> {
+        // Unwrap casts (e.g., (fn_type)NULL is Cast(fn_type, 0))
+        let expr = match expr {
+            Expr::Cast(_, inner, _) => inner.as_ref(),
+            _ => expr,
+        };
+        match expr {
+            Expr::BinaryOp(op, lhs, rhs, _) => {
+                let is_eq = match op {
+                    BinOp::Eq => true,
+                    BinOp::Ne => false,
+                    _ => return None,
+                };
+                // Check if one side is a global address and the other is zero/NULL
+                let (addr_side, scalar_side) = if self.eval_global_addr_expr(lhs).is_some() {
+                    (lhs.as_ref(), rhs.as_ref())
+                } else if self.eval_global_addr_expr(rhs).is_some() {
+                    (rhs.as_ref(), lhs.as_ref())
+                } else {
+                    return None;
+                };
+                // The scalar side must be zero (NULL)
+                let scalar_val = self.eval_const_expr(scalar_side)?;
+                if !scalar_val.is_zero() {
+                    return None;
+                }
+                // A defined function/global address is always non-zero
+                // (already validated by eval_global_addr_expr above).
+                let _addr = addr_side;
+                // fn == 0 is false (0), fn != 0 is true (1)
+                Some(IrConst::I64(if is_eq { 0 } else { 1 }))
+            }
+            // Handle !func (logical not of function pointer)
+            Expr::UnaryOp(UnaryOp::LogicalNot, inner, _) => {
+                if self.eval_global_addr_expr(inner).is_some() {
+                    // !func is false (0) since func is always non-zero
+                    Some(IrConst::I64(0))
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 }

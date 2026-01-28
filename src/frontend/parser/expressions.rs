@@ -153,6 +153,7 @@ impl Parser {
         if matches!(self.peek(), TokenKind::LParen) {
             let save = self.pos;
             let save_typedef = self.parsing_typedef;
+            let save_const = self.parsing_const;
             self.advance();
             if self.is_type_specifier() {
                 if let Some(type_spec) = self.parse_type_specifier() {
@@ -164,15 +165,18 @@ impl Parser {
                         if matches!(self.peek(), TokenKind::LBrace) {
                             let init = self.parse_initializer();
                             let lit = Expr::CompoundLiteral(result_type, Box::new(init), span);
+                            self.parsing_const = save_const;
                             return self.parse_postfix_ops(lit);
                         }
                         let expr = self.parse_cast_expr();
+                        self.parsing_const = save_const;
                         return Expr::Cast(result_type, Box::new(expr), span);
                     }
                 }
             }
             self.pos = save;
             self.parsing_typedef = save_typedef;
+            self.parsing_const = save_const;
         }
         self.parse_unary_expr()
     }
@@ -282,18 +286,21 @@ impl Parser {
         if matches!(self.peek(), TokenKind::LParen) {
             let save = self.pos;
             let save_typedef = self.parsing_typedef;
+            let save_const = self.parsing_const;
             self.advance();
             if self.is_type_specifier() {
                 if let Some(ts) = self.parse_type_specifier() {
                     let result_type = self.parse_abstract_declarator_suffix(ts);
                     if matches!(self.peek(), TokenKind::RParen) {
                         self.expect(&TokenKind::RParen);
+                        self.parsing_const = save_const;
                         return Expr::Sizeof(Box::new(SizeofArg::Type(result_type)), span);
                     }
                 }
             }
             self.pos = save;
             self.parsing_typedef = save_typedef;
+            self.parsing_const = save_const;
         }
         let expr = self.parse_unary_expr();
         Expr::Sizeof(Box::new(SizeofArg::Expr(expr)), span)

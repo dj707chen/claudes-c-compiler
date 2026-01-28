@@ -687,6 +687,16 @@ pub trait ArchCodegen {
     /// Emit 128-bit bitwise NOT on the accumulator pair.
     fn emit_i128_not(&mut self);
 
+    /// Emit i128/u128 -> f32/f64 conversion via compiler-rt call.
+    /// `src` is the i128 operand, `from_signed` indicates signed vs unsigned,
+    /// `to_ty` is F32 or F64. Result should be left in the accumulator (integer reg).
+    fn emit_i128_to_float_call(&mut self, src: &Operand, from_signed: bool, to_ty: IrType);
+
+    /// Emit f32/f64 -> i128/u128 conversion via compiler-rt call.
+    /// `src` is the float operand, `to_signed` indicates signed vs unsigned,
+    /// `from_ty` is F32 or F64. Result should be left in the acc pair.
+    fn emit_float_to_i128_call(&mut self, src: &Operand, to_signed: bool, from_ty: IrType);
+
     // --- Return primitives ---
 
     /// Get the current function's return type.
@@ -1332,6 +1342,21 @@ pub fn emit_load_default(cg: &mut (impl ArchCodegen + ?Sized), dest: &Value, ptr
 /// and delegates non-i128 casts to emit_cast_instrs.
 /// Backends that override `emit_cast` should call this for types they don't handle specially.
 pub fn emit_cast_default(cg: &mut (impl ArchCodegen + ?Sized), dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType) {
+    // float/double -> i128/u128: call compiler-rt __fixdfti/__fixsfti/__fixunsdfti/__fixunssfti
+    if is_i128_type(to_ty) && from_ty.is_float() {
+        let to_signed = to_ty.is_signed();
+        cg.emit_float_to_i128_call(src, to_signed, from_ty);
+        cg.emit_store_acc_pair(dest);
+        return;
+    }
+    // i128/u128 -> float/double: call compiler-rt __floattidf/__floattisf/__floatuntidf/__floatuntisf
+    if is_i128_type(from_ty) && to_ty.is_float() {
+        let from_signed = from_ty.is_signed();
+        cg.emit_i128_to_float_call(src, from_signed, to_ty);
+        cg.emit_store_result(dest);
+        return;
+    }
+    // integer -> i128/u128: widen to 64-bit then sign/zero extend high half
     if is_i128_type(to_ty) && !is_i128_type(from_ty) {
         cg.emit_load_operand(src);
         if from_ty.size() < 8 {
@@ -1346,6 +1371,7 @@ pub fn emit_cast_default(cg: &mut (impl ArchCodegen + ?Sized), dest: &Value, src
         cg.emit_store_acc_pair(dest);
         return;
     }
+    // i128/u128 -> integer: truncate (just use low 64 bits)
     if is_i128_type(from_ty) && !is_i128_type(to_ty) {
         cg.emit_load_acc_pair(src);
         if to_ty.size() < 8 {

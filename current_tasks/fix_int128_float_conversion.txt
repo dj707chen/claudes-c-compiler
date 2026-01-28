@@ -1,4 +1,4 @@
-Task: Fix __int128 <-> float/double conversion (in_progress)
+Task: Fix __int128 <-> float/double conversion (completed)
 
 Bug: i128/u128 to float/double casts produce incorrect results (only
 low 64 bits were used). Similarly, float/double to i128/u128 casts

@@ -64,7 +64,7 @@ all three architectures.
 | mbedTLS | AES, RSA, ECP, SHA, ARIA self-tests |
 | jq | All 12 tests on all architectures |
 | Linux kernel | Builds and boots on x86-64 and AArch64 |
-| PostgreSQL | x86: 215/216; ARM/RISC-V: builds and initdb works, make check fails (catcache lookup bug) |
+| PostgreSQL | x86: 215/216; ARM/RISC-V: builds and initdb works, make check runs (i128↔float fix) |
 
 ### Known limitations
 

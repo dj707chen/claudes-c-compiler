@@ -417,7 +417,10 @@ impl Parser {
     // === GCC extension helpers ===
 
     pub(super) fn skip_gcc_extensions(&mut self) {
-        self.parse_gcc_attributes();
+        let (_, aligned, _, _) = self.parse_gcc_attributes();
+        if let Some(a) = aligned {
+            self.parsed_alignas = Some(self.parsed_alignas.map_or(a, |prev| prev.max(a)));
+        }
     }
 
     /// Parse __attribute__((...)) and __extension__, returning struct attribute flags.

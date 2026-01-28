@@ -4176,6 +4176,48 @@ impl ArchCodegen for X86Codegen {
         self.store_rax_rdx_to(dest);
     }
 
+    fn emit_i128_to_float_call(&mut self, src: &Operand, from_signed: bool, to_ty: IrType) {
+        // Load i128 src into rax:rdx (acc pair), then move to rdi:rsi for SysV ABI
+        self.operand_to_rax_rdx(src);
+        self.state.emit("    movq %rax, %rdi");
+        self.state.emit("    movq %rdx, %rsi");
+        let func_name = match (from_signed, to_ty) {
+            (true, IrType::F64)  => "__floattidf",
+            (true, IrType::F32)  => "__floattisf",
+            (false, IrType::F64) => "__floatuntidf",
+            (false, IrType::F32) => "__floatuntisf",
+            _ => panic!("unsupported i128-to-float conversion: {:?}", to_ty),
+        };
+        self.state.emit_fmt(format_args!("    call {}@PLT", func_name));
+        self.state.reg_cache.invalidate_all();
+        // Result in xmm0; move to rax as bit pattern
+        if to_ty == IrType::F32 {
+            self.state.emit("    movd %xmm0, %eax");
+        } else {
+            self.state.emit("    movq %xmm0, %rax");
+        }
+    }
+
+    fn emit_float_to_i128_call(&mut self, src: &Operand, to_signed: bool, from_ty: IrType) {
+        // Load float operand into rax (as bit pattern), then move to xmm0 for SysV ABI
+        self.operand_to_rax(src);
+        if from_ty == IrType::F32 {
+            self.state.emit("    movd %eax, %xmm0");
+        } else {
+            self.state.emit("    movq %rax, %xmm0");
+        }
+        let func_name = match (to_signed, from_ty) {
+            (true, IrType::F64)  => "__fixdfti",
+            (true, IrType::F32)  => "__fixsfti",
+            (false, IrType::F64) => "__fixunsdfti",
+            (false, IrType::F32) => "__fixunssfti",
+            _ => panic!("unsupported float-to-i128 conversion: {:?}", from_ty),
+        };
+        self.state.emit_fmt(format_args!("    call {}@PLT", func_name));
+        self.state.reg_cache.invalidate_all();
+        // Result i128 in rax:rdx (acc pair)
+    }
+
     // ---- i128 cmp primitives ----
 
     fn emit_i128_cmp_eq(&mut self, is_ne: bool) {

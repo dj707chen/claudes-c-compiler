@@ -672,11 +672,12 @@ impl ArchCodegen for RiscvCodegen {
         if self.state.pic_mode {
             // PIC mode: use relative 32-bit offsets to avoid R_RISCV_64 relocations.
             // Each entry is .word (target - table_base), a signed 32-bit offset.
-            self.state.emit_fmt(format_args!("    la t1, {}", table_label));
+            // Use `lla` for the local jump table label to avoid GOT indirection.
+            self.state.emit_fmt(format_args!("    lla t1, {}", table_label));
             self.state.emit("    slli t0, t0, 2");  // index * 4 (32-bit entries)
             self.state.emit("    add t1, t1, t0");
             self.state.emit("    lw t0, 0(t1)");    // load 32-bit signed offset
-            self.state.emit_fmt(format_args!("    la t1, {}", table_label));
+            self.state.emit_fmt(format_args!("    lla t1, {}", table_label));
             self.state.emit("    add t1, t1, t0");   // base + offset
             self.state.emit("    jr t1");
 
@@ -692,7 +693,8 @@ impl ArchCodegen for RiscvCodegen {
             self.state.emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
         } else {
             // Non-PIC: absolute 64-bit addresses
-            self.state.emit_fmt(format_args!("    la t1, {}", table_label));
+            // Use `lla` since the jump table label is always local.
+            self.state.emit_fmt(format_args!("    lla t1, {}", table_label));
             self.state.emit("    slli t0, t0, 3");  // index * 8
             self.state.emit("    add t1, t1, t0");
             self.state.emit("    ld t1, 0(t1)");
@@ -2251,7 +2253,17 @@ impl ArchCodegen for RiscvCodegen {
     }
 
     fn emit_global_addr(&mut self, dest: &Value, name: &str) {
-        self.state.emit_fmt(format_args!("    la t0, {}", name));
+        if self.state.needs_got(name) {
+            // PIC mode, external symbol: use `la` which expands to GOT-indirect
+            // auipc + ld with R_RISCV_GOT_HI20 relocation.
+            self.state.emit_fmt(format_args!("    la t0, {}", name));
+        } else {
+            // Non-PIC mode or local symbol: use `lla` (local load address) which
+            // expands to PC-relative auipc + addi with R_RISCV_PCREL_HI20.
+            // This is critical for kernel PI (position-independent) early boot
+            // code compiled with -fpie, where no GOT exists.
+            self.state.emit_fmt(format_args!("    lla t0, {}", name));
+        }
         self.store_t0_to(dest);
     }
 
@@ -3191,6 +3203,50 @@ impl ArchCodegen for RiscvCodegen {
 
     fn emit_i128_store_result(&mut self, dest: &Value) {
         self.store_t0_t1_to(dest);
+    }
+
+    fn emit_i128_to_float_call(&mut self, src: &Operand, from_signed: bool, to_ty: IrType) {
+        // Load i128 src into t0:t1 (acc pair), then move to a0:a1 for LP64D ABI
+        self.operand_to_t0_t1(src);
+        self.state.emit("    mv a0, t0");
+        self.state.emit("    mv a1, t1");
+        let func_name = match (from_signed, to_ty) {
+            (true, IrType::F64)  => "__floattidf",
+            (true, IrType::F32)  => "__floattisf",
+            (false, IrType::F64) => "__floatuntidf",
+            (false, IrType::F32) => "__floatuntisf",
+            _ => panic!("unsupported i128-to-float conversion: {:?}", to_ty),
+        };
+        self.state.emit_fmt(format_args!("    call {}", func_name));
+        self.state.reg_cache.invalidate_all();
+        // Result in fa0; move to t0 as bit pattern
+        if to_ty == IrType::F32 {
+            self.state.emit("    fmv.x.w t0, fa0");
+        } else {
+            self.state.emit("    fmv.x.d t0, fa0");
+        }
+    }
+
+    fn emit_float_to_i128_call(&mut self, src: &Operand, to_signed: bool, from_ty: IrType) {
+        // Load float operand into t0 (as bit pattern), then move to fa0
+        self.operand_to_t0(src);
+        if from_ty == IrType::F32 {
+            self.state.emit("    fmv.w.x fa0, t0");
+        } else {
+            self.state.emit("    fmv.d.x fa0, t0");
+        }
+        let func_name = match (to_signed, from_ty) {
+            (true, IrType::F64)  => "__fixdfti",
+            (true, IrType::F32)  => "__fixsfti",
+            (false, IrType::F64) => "__fixunsdfti",
+            (false, IrType::F32) => "__fixunssfti",
+            _ => panic!("unsupported float-to-i128 conversion: {:?}", from_ty),
+        };
+        self.state.emit_fmt(format_args!("    call {}", func_name));
+        self.state.reg_cache.invalidate_all();
+        // Result i128 in a0:a1; move to t0:t1 (acc pair)
+        self.state.emit("    mv t0, a0");
+        self.state.emit("    mv t1, a1");
     }
 
     // ---- i128 cmp primitives ----

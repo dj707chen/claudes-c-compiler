@@ -4179,6 +4179,46 @@ impl ArchCodegen for ArmCodegen {
         self.store_x0_x1_to(dest);
     }
 
+    fn emit_i128_to_float_call(&mut self, src: &Operand, from_signed: bool, to_ty: IrType) {
+        // Load i128 src into x0:x1 (acc pair) — already in arg regs for AAPCS64
+        self.operand_to_x0_x1(src);
+        let func_name = match (from_signed, to_ty) {
+            (true, IrType::F64)  => "__floattidf",
+            (true, IrType::F32)  => "__floattisf",
+            (false, IrType::F64) => "__floatuntidf",
+            (false, IrType::F32) => "__floatuntisf",
+            _ => panic!("unsupported i128-to-float conversion: {:?}", to_ty),
+        };
+        self.state.emit_fmt(format_args!("    bl {}", func_name));
+        self.state.reg_cache.invalidate_all();
+        // Result in d0/s0; move to x0 as bit pattern
+        if to_ty == IrType::F32 {
+            self.state.emit("    fmov w0, s0");
+        } else {
+            self.state.emit("    fmov x0, d0");
+        }
+    }
+
+    fn emit_float_to_i128_call(&mut self, src: &Operand, to_signed: bool, from_ty: IrType) {
+        // Load float operand into x0 (as bit pattern), then move to d0/s0
+        self.operand_to_x0(src);
+        if from_ty == IrType::F32 {
+            self.state.emit("    fmov s0, w0");
+        } else {
+            self.state.emit("    fmov d0, x0");
+        }
+        let func_name = match (to_signed, from_ty) {
+            (true, IrType::F64)  => "__fixdfti",
+            (true, IrType::F32)  => "__fixsfti",
+            (false, IrType::F64) => "__fixunsdfti",
+            (false, IrType::F32) => "__fixunssfti",
+            _ => panic!("unsupported float-to-i128 conversion: {:?}", from_ty),
+        };
+        self.state.emit_fmt(format_args!("    bl {}", func_name));
+        self.state.reg_cache.invalidate_all();
+        // Result i128 in x0:x1 (acc pair)
+    }
+
     // ---- i128 cmp primitives ----
 
     fn emit_i128_cmp_eq(&mut self, is_ne: bool) {
