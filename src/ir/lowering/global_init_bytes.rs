@@ -1271,36 +1271,66 @@ impl Lowerer {
                 self.eval_complex_const_public(expr).unwrap_or((0.0, 0.0))
             }
             Initializer::List(items) => {
-                // {real, imag} or {real} (imag defaults to 0)
-                let real_val = items.first().and_then(|item| {
-                    if let Initializer::Expr(e) = &item.init {
-                        self.eval_const_expr(e).and_then(|c| match c {
-                            IrConst::F64(v) => Some(v),
-                            IrConst::F32(v) => Some(v as f64),
-                            IrConst::I64(v) => Some(v as f64),
-                            IrConst::I32(v) => Some(v as f64),
-                            IrConst::LongDouble(v, _) => Some(v),
-                            _ => None,
-                        })
-                    } else {
-                        None
+                // Handle "braces around scalar" for _Complex (C11 6.7.9):
+                // If the list has a single item that is itself a List, unwrap the extra braces.
+                if items.len() == 1 && items[0].designators.is_empty() {
+                    if let Initializer::List(_) = &items[0].init {
+                        return self.write_complex_field_to_bytes(bytes, field_offset, complex_ctype, &items[0].init);
                     }
-                }).unwrap_or(0.0);
-                let imag_val = items.get(1).and_then(|item| {
-                    if let Initializer::Expr(e) = &item.init {
-                        self.eval_const_expr(e).and_then(|c| match c {
-                            IrConst::F64(v) => Some(v),
-                            IrConst::F32(v) => Some(v as f64),
-                            IrConst::I64(v) => Some(v as f64),
-                            IrConst::I32(v) => Some(v as f64),
-                            IrConst::LongDouble(v, _) => Some(v),
-                            _ => None,
-                        })
+                }
+                // If the list has a single expression that is complex-typed,
+                // evaluate it as a whole complex constant.
+                if items.len() == 1 && items[0].designators.is_empty() {
+                    if let Initializer::Expr(e) = &items[0].init {
+                        if let Some(pair) = self.eval_complex_const_public(e) {
+                            pair
+                        } else {
+                            // Fall through to scalar {real} treatment below
+                            let real_val = self.eval_const_expr(e).and_then(|c| match c {
+                                IrConst::F64(v) => Some(v),
+                                IrConst::F32(v) => Some(v as f64),
+                                IrConst::I64(v) => Some(v as f64),
+                                IrConst::I32(v) => Some(v as f64),
+                                IrConst::LongDouble(v, _) => Some(v),
+                                _ => None,
+                            }).unwrap_or(0.0);
+                            (real_val, 0.0)
+                        }
                     } else {
-                        None
+                        (0.0, 0.0)
                     }
-                }).unwrap_or(0.0);
-                (real_val, imag_val)
+                } else {
+                    // {real, imag} or {real} (imag defaults to 0)
+                    let real_val = items.first().and_then(|item| {
+                        if let Initializer::Expr(e) = &item.init {
+                            self.eval_const_expr(e).and_then(|c| match c {
+                                IrConst::F64(v) => Some(v),
+                                IrConst::F32(v) => Some(v as f64),
+                                IrConst::I64(v) => Some(v as f64),
+                                IrConst::I32(v) => Some(v as f64),
+                                IrConst::LongDouble(v, _) => Some(v),
+                                _ => None,
+                            })
+                        } else {
+                            None
+                        }
+                    }).unwrap_or(0.0);
+                    let imag_val = items.get(1).and_then(|item| {
+                        if let Initializer::Expr(e) = &item.init {
+                            self.eval_const_expr(e).and_then(|c| match c {
+                                IrConst::F64(v) => Some(v),
+                                IrConst::F32(v) => Some(v as f64),
+                                IrConst::I64(v) => Some(v as f64),
+                                IrConst::I32(v) => Some(v as f64),
+                                IrConst::LongDouble(v, _) => Some(v),
+                                _ => None,
+                            })
+                        } else {
+                            None
+                        }
+                    }).unwrap_or(0.0);
+                    (real_val, imag_val)
+                }
             }
         };
 

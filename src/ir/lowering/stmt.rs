@@ -437,12 +437,43 @@ impl Lowerer {
 
     /// Lower a {real, imag} list initializer for a complex field.
     /// Stores the real and imaginary parts at dest_addr and dest_addr+comp_size.
+    ///
+    /// Also handles "braces around scalar" (C11 6.7.9): when _Complex is initialized
+    /// with extra braces like `{{expr}}`, the inner braces are unwrapped.
+    /// If the single expression is itself complex-typed, it is stored as a whole
+    /// complex value rather than being treated as just the real component.
     pub(super) fn lower_complex_list_init(
         &mut self,
         sub_items: &[InitializerItem],
         dest_addr: Value,
         complex_ctype: &CType,
     ) {
+        // Handle "braces around scalar" for _Complex types (C11 6.7.9):
+        // If the list has a single item that is itself a List, unwrap the extra braces.
+        if sub_items.len() == 1 && sub_items[0].designators.is_empty() {
+            if let Initializer::List(inner_items) = &sub_items[0].init {
+                return self.lower_complex_list_init(inner_items, dest_addr, complex_ctype);
+            }
+        }
+
+        // If the list has a single expression that is complex-typed, store it as a
+        // whole complex value (not as just the real component).
+        if sub_items.len() == 1 && sub_items[0].designators.is_empty() {
+            if let Initializer::Expr(e) = &sub_items[0].init {
+                let expr_ctype = self.expr_ctype(e);
+                if expr_ctype.is_complex() {
+                    let complex_size = complex_ctype.size();
+                    let src = self.lower_expr_to_complex(e, complex_ctype);
+                    self.emit(Instruction::Memcpy {
+                        dest: dest_addr,
+                        src,
+                        size: complex_size,
+                    });
+                    return;
+                }
+            }
+        }
+
         let comp_ty = Self::complex_component_ir_type(complex_ctype);
         let comp_size = Self::complex_component_size(complex_ctype);
         // Store real part
