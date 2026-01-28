@@ -1,0 +1,7 @@
+Task: Fix function pointer struct return type codegen bug
+Status: in_progress
+Description: param_ctype() peeled ALL pointer layers from function pointer type_spec,
+stripping the return type's pointer. For `struct Node *(*fn)(struct Node *)`, the return
+type became Struct instead of Pointer(Struct), causing incorrect two-register return
+handling. Fix: peel exactly ONE pointer layer (the is_func_ptr indirection).
+Files: src/ir/lowering/types_ctype.rs, tests/fptr-struct-return/main.c
