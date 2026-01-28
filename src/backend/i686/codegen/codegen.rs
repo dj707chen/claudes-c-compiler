@@ -492,7 +492,10 @@ impl ArchCodegen for I686Codegen {
 
         // Calculate stack space using the shared framework.
         // i686 uses negative offsets from ebp, 4-byte minimum alignment.
-        let space = calculate_stack_space_common(&mut self.state, func, 0, |space, alloc_size, align| {
+        // Reserve space for callee-saved register pushes at the top of the frame
+        // (between ebp and locals). Each push takes 4 bytes.
+        let callee_saved_bytes = self.used_callee_saved.len() as i64 * 4;
+        let space = calculate_stack_space_common(&mut self.state, func, callee_saved_bytes, |space, alloc_size, align| {
             let effective_align = if align > 0 { align.max(4) } else { 4 };
             let alloc = (alloc_size + 3) & !3; // round up to 4-byte boundary
             let new_space = ((space + alloc + effective_align - 1) / effective_align) * effective_align;
@@ -503,18 +506,20 @@ impl ArchCodegen for I686Codegen {
     }
 
     fn aligned_frame_size(&self, raw_space: i64) -> i64 {
-        // Each callee-saved register takes 4 bytes (pushl)
+        // raw_space includes callee_saved_bytes as initial_offset from
+        // calculate_stack_space, so subtract it to get raw locals space.
         let callee_saved_bytes = self.used_callee_saved.len() as i64 * 4;
-        // Total frame: raw_space + callee-saved registers
-        // Must be 16-byte aligned at the call site.
-        // At function entry: esp points to return address.
-        // After push %ebp: esp is 8 bytes below the return address.
-        // After pushing callee-saved: more bytes used.
-        // We need (raw_space + callee_saved_bytes + 8) to be 16-byte aligned.
-        let total_before_raw = callee_saved_bytes + 8; // 4 (ret addr) + 4 (saved ebp) + callee-saved
-        let needed = raw_space + total_before_raw;
+        let raw_locals = raw_space - callee_saved_bytes;
+        // Must be 16-byte aligned at call sites.
+        // At function entry: esp points to return address (4 bytes).
+        // After push %ebp: 8 bytes used.
+        // After pushing callee-saved regs: 8 + callee_saved_bytes used.
+        // After sub $frame_size: 8 + callee_saved_bytes + frame_size used.
+        // We need (8 + callee_saved_bytes + frame_size) % 16 == 0.
+        let fixed_overhead = callee_saved_bytes + 8;
+        let needed = raw_locals + fixed_overhead;
         let aligned = (needed + 15) & !15;
-        aligned - total_before_raw
+        aligned - fixed_overhead
     }
 
     fn emit_prologue(&mut self, _func: &IrFunction, frame_size: i64) {
@@ -522,28 +527,35 @@ impl ArchCodegen for I686Codegen {
         self.state.emit("    pushl %ebp");
         self.state.emit("    movl %esp, %ebp");
 
-        // Allocate stack space
+        // Save callee-saved registers using push (before allocating locals).
+        // This ensures saves are always above esp and within the valid stack.
+        for &reg in self.used_callee_saved.iter() {
+            let name = phys_reg_name(reg);
+            emit!(self.state, "    pushl %{}", name);
+        }
+
+        // Allocate stack space for locals
         if frame_size > 0 {
             emit!(self.state, "    subl ${}, %esp", frame_size);
         }
-
-        // Save callee-saved registers
-        for (i, &reg) in self.used_callee_saved.iter().enumerate() {
-            let name = phys_reg_name(reg);
-            let offset = -(frame_size + (i as i64 + 1) * 4);
-            emit!(self.state, "    movl %{}, {}(%ebp)", name, offset);
-        }
     }
 
-    fn emit_epilogue(&mut self, frame_size: i64) {
-        // Restore callee-saved registers
-        for (i, &reg) in self.used_callee_saved.iter().enumerate() {
-            let name = phys_reg_name(reg);
-            let offset = -(frame_size + (i as i64 + 1) * 4);
-            emit!(self.state, "    movl {}(%ebp), %{}", offset, name);
+    fn emit_epilogue(&mut self, _frame_size: i64) {
+        // Restore esp to point at the callee-saved register area.
+        // Use lea from ebp (robust against dynamic alloca changes to esp).
+        let callee_saved_bytes = self.used_callee_saved.len() as i64 * 4;
+        if callee_saved_bytes > 0 {
+            emit!(self.state, "    leal -{}(%ebp), %esp", callee_saved_bytes);
+        } else {
+            self.state.emit("    movl %ebp, %esp");
         }
 
-        self.state.emit("    movl %ebp, %esp");
+        // Restore callee-saved registers (reverse order of saves)
+        for &reg in self.used_callee_saved.iter().rev() {
+            let name = phys_reg_name(reg);
+            emit!(self.state, "    popl %{}", name);
+        }
+
         self.state.emit("    popl %ebp");
     }
 
