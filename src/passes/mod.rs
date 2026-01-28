@@ -187,7 +187,7 @@ fn run_gvn_licm_ivsr_shared(
 /// optimization tiers.
 // TODO: Restore per-level optimization tiers once the compiler is stable enough
 // to warrant differentiated behavior (e.g., -O0 skipping passes for faster builds).
-pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
+pub fn run_passes(module: &mut IrModule, _opt_level: u32, target: crate::backend::Target) {
     // Debug support: set CCC_DISABLE_PASSES=pass1,pass2,... to skip specific passes.
     // Useful for bisecting miscompilation bugs to a specific pass.
     // Pass names: cfg, copyprop, simplify, constfold, gvn, licm, ifconv, dce, all
@@ -351,7 +351,14 @@ pub fn run_passes(module: &mut IrModule, _opt_level: u32) {
         // Replaces slow div/idiv instructions with fast multiply-and-shift sequences.
         // Run early so subsequent passes (narrowing, simplify, constant folding, DCE)
         // can optimize the expanded instruction sequences.
-        if iter == 0 && !disabled.contains("divconst") {
+        //
+        // Disabled on i686: the pass generates I64 multiply + shift-right-32 sequences
+        // to extract the high 32 bits of a widened multiplication. The i686 backend
+        // cannot execute 64-bit arithmetic correctly (it truncates to 32 bits), so these
+        // sequences produce wrong results. Fall back to hardware idiv/div instead.
+        // TODO: Re-enable once i686 has proper 64-bit arithmetic support, or implement
+        // a 32-bit-aware variant that uses single-operand imull for mulhi.
+        if iter == 0 && !disabled.contains("divconst") && !target.is_32bit() {
             total_changes += timed_pass!("div_by_const", run_on_visited(module, &dirty, &mut changed, div_by_const::div_by_const_function));
         }
 
