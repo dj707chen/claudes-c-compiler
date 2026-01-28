@@ -306,6 +306,30 @@ impl X86Codegen {
         }
     }
 
+    /// Convert any register name (8/16/32-bit) to its 64-bit equivalent.
+    /// If the register is already 64-bit, returns it unchanged.
+    pub(super) fn reg_to_64(reg: &str) -> String {
+        match reg {
+            "eax" | "ax" | "al" | "ah" => "rax".to_string(),
+            "ebx" | "bx" | "bl" | "bh" => "rbx".to_string(),
+            "ecx" | "cx" | "cl" | "ch" => "rcx".to_string(),
+            "edx" | "dx" | "dl" | "dh" => "rdx".to_string(),
+            "esi" | "si" | "sil" => "rsi".to_string(),
+            "edi" | "di" | "dil" => "rdi".to_string(),
+            "ebp" | "bp" | "bpl" => "rbp".to_string(),
+            "esp" | "sp" | "spl" => "rsp".to_string(),
+            "r8d" | "r8w" | "r8b" => "r8".to_string(),
+            "r9d" | "r9w" | "r9b" => "r9".to_string(),
+            "r10d" | "r10w" | "r10b" => "r10".to_string(),
+            "r11d" | "r11w" | "r11b" => "r11".to_string(),
+            "r12d" | "r12w" | "r12b" => "r12".to_string(),
+            "r13d" | "r13w" | "r13b" => "r13".to_string(),
+            "r14d" | "r14w" | "r14b" => "r14".to_string(),
+            "r15d" | "r15w" | "r15b" => "r15".to_string(),
+            _ => reg.to_string(),
+        }
+    }
+
     /// Convert 64-bit register name to 16-bit variant.
     pub(super) fn reg_to_16(reg: &str) -> String {
         match reg {

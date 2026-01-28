@@ -304,10 +304,28 @@ impl InlineAsmEmitter for X86Codegen {
         match val {
             Operand::Const(c) => {
                 let imm = c.to_i64().unwrap_or(0);
+                // When the register is a sub-64-bit name (e.g., "esi" from
+                // `register uint32_t val asm("esi")`), we must use instructions
+                // compatible with that register width. movabsq/xorq require
+                // 64-bit register names; use the 64-bit equivalent instead.
+                // Always derive reg64 and reg32 from the canonical 64-bit form
+                // to handle 8-bit (al), 16-bit (ax), and 32-bit (eax) names.
+                let reg64 = Self::reg_to_64(reg);
+                let is_subreg = reg64.as_str() != reg;
+                let effective_reg: &str = if is_subreg { &reg64 } else { reg };
+                let reg32 = Self::reg_to_32(effective_reg);
                 if imm == 0 {
-                    self.state.out.emit_instr_reg_reg("    xorq", reg, reg);
+                    // Use xorl with 32-bit register: shorter encoding and
+                    // breaks dependencies, matching the codebase convention.
+                    self.state.out.emit_instr_reg_reg("    xorl", &reg32, &reg32);
+                } else if imm >= i32::MIN as i64 && imm <= i32::MAX as i64 {
+                    self.state.out.emit_instr_imm_reg("    movq", imm, effective_reg);
+                } else if imm >= 0 && imm <= u32::MAX as i64 {
+                    // Value fits in unsigned 32-bit: use movl which zero-extends
+                    // to 64 bits.
+                    self.state.out.emit_instr_imm_reg("    movl", imm, &reg32);
                 } else {
-                    self.state.out.emit_instr_imm_reg("    movabsq", imm, reg);
+                    self.state.out.emit_instr_imm_reg("    movabsq", imm, effective_reg);
                 }
             }
             Operand::Value(v) => {
