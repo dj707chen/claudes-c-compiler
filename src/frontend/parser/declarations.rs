@@ -212,19 +212,21 @@ impl Parser {
             params: final_params,
             variadic,
             body,
-            attrs: FunctionAttributes {
-                is_static,
-                is_inline,
-                is_extern,
-                is_gnu_inline,
-                is_always_inline,
-                is_noinline,
-                is_constructor,
-                is_destructor,
-                section,
-                visibility,
-                is_weak,
-                is_used,
+            attrs: {
+                let mut attrs = FunctionAttributes::new();
+                attrs.set_static(is_static);
+                attrs.set_inline(is_inline);
+                attrs.set_extern(is_extern);
+                attrs.set_gnu_inline(is_gnu_inline);
+                attrs.set_always_inline(is_always_inline);
+                attrs.set_noinline(is_noinline);
+                attrs.set_constructor(is_constructor);
+                attrs.set_destructor(is_destructor);
+                attrs.set_weak(is_weak);
+                attrs.set_used(is_used);
+                attrs.section = section;
+                attrs.visibility = visibility;
+                attrs
             },
             is_kr: is_kr_style,
             span: start,
@@ -424,18 +426,20 @@ impl Parser {
             name: name.unwrap_or_default(),
             derived,
             init,
-            attrs: DeclAttributes {
-                is_constructor,
-                is_destructor,
-                is_weak,
-                alias_target,
-                visibility,
-                section: section.clone(),
-                asm_register: first_asm_register,
-                is_error_attr,
-                is_noreturn,
-                cleanup_fn,
-                is_used,
+            attrs: {
+                let mut da = DeclAttributes::default();
+                da.set_constructor(is_constructor);
+                da.set_destructor(is_destructor);
+                da.set_weak(is_weak);
+                da.set_error_attr(is_error_attr);
+                da.set_noreturn(is_noreturn);
+                da.set_used(is_used);
+                da.alias_target = alias_target;
+                da.visibility = visibility;
+                da.section = section.clone();
+                da.asm_register = first_asm_register;
+                da.cleanup_fn = cleanup_fn;
+                da
             },
             span: start,
         });
@@ -447,14 +451,14 @@ impl Parser {
             declarators.last_mut().unwrap().attrs.asm_register = Some(reg);
         }
         if extra_ctor {
-            declarators.last_mut().unwrap().attrs.is_constructor = true;
+            declarators.last_mut().unwrap().attrs.set_constructor(true);
         }
         if extra_dtor {
-            declarators.last_mut().unwrap().attrs.is_destructor = true;
+            declarators.last_mut().unwrap().attrs.set_destructor(true);
         }
         // Merge weak/alias/visibility from post-declarator attributes
         if self.attrs.parsing_weak {
-            declarators.last_mut().unwrap().attrs.is_weak = true;
+            declarators.last_mut().unwrap().attrs.set_weak(true);
         }
         if let Some(ref target) = self.attrs.parsing_alias_target {
             declarators.last_mut().unwrap().attrs.alias_target = Some(target.clone());
@@ -469,7 +473,7 @@ impl Parser {
             declarators.last_mut().unwrap().attrs.cleanup_fn = Some(cleanup.clone());
         }
         if self.attrs.parsing_used {
-            declarators.last_mut().unwrap().attrs.is_used = true;
+            declarators.last_mut().unwrap().attrs.set_used(true);
         }
         self.attrs.parsing_weak = false;
         self.attrs.parsing_alias_target = None;
@@ -511,18 +515,20 @@ impl Parser {
                 name: dname.unwrap_or_default(),
                 derived: dderived,
                 init: dinit,
-                attrs: DeclAttributes {
-                    is_constructor: d_ctor,
-                    is_destructor: d_dtor,
-                    is_weak: d_weak,
-                    alias_target: d_alias,
-                    visibility: d_vis,
-                    section: d_section,
-                    asm_register: d_asm_reg,
-                    is_error_attr: d_error_attr,
-                    is_noreturn: d_noreturn,
-                    cleanup_fn: d_cleanup_fn,
-                    is_used: d_used,
+                attrs: {
+                    let mut da = DeclAttributes::default();
+                    da.set_constructor(d_ctor);
+                    da.set_destructor(d_dtor);
+                    da.set_weak(d_weak);
+                    da.set_error_attr(d_error_attr);
+                    da.set_noreturn(d_noreturn);
+                    da.set_used(d_used);
+                    da.alias_target = d_alias;
+                    da.visibility = d_vis;
+                    da.section = d_section;
+                    da.asm_register = d_asm_reg;
+                    da.cleanup_fn = d_cleanup_fn;
+                    da
                 },
                 span: start,
             });
@@ -613,11 +619,12 @@ impl Parser {
                 name: name.unwrap_or_default(),
                 derived,
                 init,
-                attrs: DeclAttributes {
-                    section: local_section,
-                    asm_register: skip_asm_reg,
-                    cleanup_fn: local_cleanup_fn,
-                    ..Default::default()
+                attrs: {
+                    let mut da = DeclAttributes::default();
+                    da.section = local_section;
+                    da.asm_register = skip_asm_reg;
+                    da.cleanup_fn = local_cleanup_fn;
+                    da
                 },
                 span: start,
             });

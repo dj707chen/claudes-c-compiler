@@ -46,7 +46,7 @@ impl Lowerer {
         // at lowering time. In inline candidates, it emits an IsConstant IR instruction
         // that can be resolved to 1 after inlining if the parameter becomes constant.
         self.func_mut().is_inline_candidate =
-            func.attrs.is_always_inline || func.attrs.is_inline || func.attrs.is_static;
+            func.attrs.is_always_inline() || func.attrs.is_inline() || func.attrs.is_static();
         self.push_scope();
 
         // Step 1: Compute ABI-adjusted return type
@@ -481,9 +481,9 @@ impl Lowerer {
         // (no external definition emitted), even if the function is referenced and lowered.
         // But plain inline + gnu_inline (without extern) provides an external definition
         // in GNU89 semantics, so it should be GLOBAL.
-        let is_gnu_inline_no_extern_def = func.attrs.is_gnu_inline && func.attrs.is_inline
-            && func.attrs.is_extern;
-        let is_static = func.attrs.is_static || self.static_functions.contains(&func.name)
+        let is_gnu_inline_no_extern_def = func.attrs.is_gnu_inline() && func.attrs.is_inline()
+            && func.attrs.is_extern();
+        let is_static = func.attrs.is_static() || self.static_functions.contains(&func.name)
             || is_gnu_inline_no_extern_def;
         let next_val = self.func_mut().next_value;
         let param_alloca_vals = std::mem::take(&mut self.func_mut().param_alloca_values);
@@ -491,15 +491,15 @@ impl Lowerer {
             name: func.name.clone(), return_type, params,
             blocks: std::mem::take(&mut self.func_mut().blocks),
             is_variadic: func.variadic, is_declaration: false, is_static,
-            is_inline: func.attrs.is_inline,
-            is_always_inline: func.attrs.is_always_inline,
-            is_noinline: func.attrs.is_noinline,
+            is_inline: func.attrs.is_inline(),
+            is_always_inline: func.attrs.is_always_inline(),
+            is_noinline: func.attrs.is_noinline(),
             stack_size: 0,
             next_value_id: next_val,
             section: func.attrs.section.clone(),
             visibility: func.attrs.visibility.clone(),
-            is_weak: func.attrs.is_weak,
-            is_used: func.attrs.is_used,
+            is_weak: func.attrs.is_weak(),
+            is_used: func.attrs.is_used(),
             has_inlined_calls: false,
             param_alloca_values: param_alloca_vals,
         };

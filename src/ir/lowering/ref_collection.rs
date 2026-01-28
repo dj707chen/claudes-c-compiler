@@ -17,9 +17,9 @@ impl Lowerer {
     /// This mirrors the skip logic in `lower()` — static, static inline,
     /// and extern inline with gnu_inline attribute can all be skipped.
     fn is_skippable_function(func: &FunctionDef) -> bool {
-        let is_gnu_inline_no_extern_def = func.attrs.is_gnu_inline && func.attrs.is_inline
-            && func.attrs.is_extern;
-        func.attrs.is_static || is_gnu_inline_no_extern_def
+        let is_gnu_inline_no_extern_def = func.attrs.is_gnu_inline() && func.attrs.is_inline()
+            && func.attrs.is_extern();
+        func.attrs.is_static() || is_gnu_inline_no_extern_def
     }
 
     /// Collect all function names that are transitively referenced from root

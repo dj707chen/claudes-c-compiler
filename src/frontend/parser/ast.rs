@@ -19,33 +19,101 @@ pub enum ExternalDecl {
 /// Attributes that can be applied to function definitions via storage-class
 /// specifiers (static, inline, extern) and GCC __attribute__((...)) syntax.
 ///
-/// Consolidates what were previously 13 separate boolean/Option fields on
-/// FunctionDef into a single struct, making it easier to add new attributes
-/// and pass attribute bundles around.
-#[derive(Debug, Clone, Default)]
+/// Boolean attributes are stored as a packed bitfield (`flags`) for memory
+/// efficiency — 10 booleans collapse from 10 bytes into 2 bytes. Accessor
+/// methods provide the same API as the old struct fields.
+///
+/// Non-boolean attributes (`section`, `visibility`) remain as `Option<String>`.
+#[derive(Clone, Default)]
 pub struct FunctionAttributes {
-    pub is_static: bool,
-    pub is_inline: bool,
-    /// True when `extern` storage class was used on the function definition.
-    pub is_extern: bool,
-    /// True when __attribute__((gnu_inline)) forces GNU89 inline semantics.
-    pub is_gnu_inline: bool,
-    /// True when __attribute__((always_inline)) is present.
-    /// These functions must always be inlined and should not be emitted as standalone.
-    pub is_always_inline: bool,
-    /// True when __attribute__((noinline)) is present.
-    /// These functions must never be inlined by the optimizer.
-    pub is_noinline: bool,
-    pub is_constructor: bool,
-    pub is_destructor: bool,
+    /// Packed boolean flags — see `FuncAttrFlag` constants.
+    flags: u16,
     /// __attribute__((section("..."))) - place in specific ELF section
     pub section: Option<String>,
     /// __attribute__((visibility("hidden"|"default"|...)))
     pub visibility: Option<String>,
-    /// __attribute__((weak)) - emit as a weak symbol
-    pub is_weak: bool,
-    /// __attribute__((used)) - prevent dead code elimination of this symbol
-    pub is_used: bool,
+}
+
+/// Bit masks for boolean flags in `FunctionAttributes::flags`.
+///
+/// Each attribute occupies one bit, allowing cheap test/set/clear operations.
+/// New attributes can be added by defining the next power-of-two constant.
+pub mod func_attr_flag {
+    pub const STATIC: u16        = 1 << 0;
+    pub const INLINE: u16        = 1 << 1;
+    /// `extern` storage class on the function definition.
+    pub const EXTERN: u16        = 1 << 2;
+    /// `__attribute__((gnu_inline))` — forces GNU89 inline semantics.
+    pub const GNU_INLINE: u16    = 1 << 3;
+    /// `__attribute__((always_inline))` — must always be inlined.
+    pub const ALWAYS_INLINE: u16 = 1 << 4;
+    /// `__attribute__((noinline))` — must never be inlined.
+    pub const NOINLINE: u16      = 1 << 5;
+    /// `__attribute__((constructor))` — run before main.
+    pub const CONSTRUCTOR: u16   = 1 << 6;
+    /// `__attribute__((destructor))` — run after main.
+    pub const DESTRUCTOR: u16    = 1 << 7;
+    /// `__attribute__((weak))` — emit as a weak symbol.
+    pub const WEAK: u16          = 1 << 8;
+    /// `__attribute__((used))` — prevent dead code elimination.
+    pub const USED: u16          = 1 << 9;
+}
+
+impl FunctionAttributes {
+    /// Create a new `FunctionAttributes` with all flags cleared.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    // --- flag getters ---
+
+    #[inline] pub fn is_static(&self) -> bool        { self.flags & func_attr_flag::STATIC != 0 }
+    #[inline] pub fn is_inline(&self) -> bool         { self.flags & func_attr_flag::INLINE != 0 }
+    #[inline] pub fn is_extern(&self) -> bool         { self.flags & func_attr_flag::EXTERN != 0 }
+    #[inline] pub fn is_gnu_inline(&self) -> bool     { self.flags & func_attr_flag::GNU_INLINE != 0 }
+    #[inline] pub fn is_always_inline(&self) -> bool  { self.flags & func_attr_flag::ALWAYS_INLINE != 0 }
+    #[inline] pub fn is_noinline(&self) -> bool       { self.flags & func_attr_flag::NOINLINE != 0 }
+    #[inline] pub fn is_constructor(&self) -> bool    { self.flags & func_attr_flag::CONSTRUCTOR != 0 }
+    #[inline] pub fn is_destructor(&self) -> bool     { self.flags & func_attr_flag::DESTRUCTOR != 0 }
+    #[inline] pub fn is_weak(&self) -> bool           { self.flags & func_attr_flag::WEAK != 0 }
+    #[inline] pub fn is_used(&self) -> bool           { self.flags & func_attr_flag::USED != 0 }
+
+    // --- flag setters ---
+
+    #[inline] pub fn set_static(&mut self, v: bool)        { self.set_flag(func_attr_flag::STATIC, v) }
+    #[inline] pub fn set_inline(&mut self, v: bool)        { self.set_flag(func_attr_flag::INLINE, v) }
+    #[inline] pub fn set_extern(&mut self, v: bool)        { self.set_flag(func_attr_flag::EXTERN, v) }
+    #[inline] pub fn set_gnu_inline(&mut self, v: bool)    { self.set_flag(func_attr_flag::GNU_INLINE, v) }
+    #[inline] pub fn set_always_inline(&mut self, v: bool) { self.set_flag(func_attr_flag::ALWAYS_INLINE, v) }
+    #[inline] pub fn set_noinline(&mut self, v: bool)      { self.set_flag(func_attr_flag::NOINLINE, v) }
+    #[inline] pub fn set_constructor(&mut self, v: bool)   { self.set_flag(func_attr_flag::CONSTRUCTOR, v) }
+    #[inline] pub fn set_destructor(&mut self, v: bool)    { self.set_flag(func_attr_flag::DESTRUCTOR, v) }
+    #[inline] pub fn set_weak(&mut self, v: bool)          { self.set_flag(func_attr_flag::WEAK, v) }
+    #[inline] pub fn set_used(&mut self, v: bool)          { self.set_flag(func_attr_flag::USED, v) }
+
+    #[inline]
+    fn set_flag(&mut self, mask: u16, v: bool) {
+        if v { self.flags |= mask; } else { self.flags &= !mask; }
+    }
+}
+
+impl std::fmt::Debug for FunctionAttributes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FunctionAttributes")
+            .field("is_static", &self.is_static())
+            .field("is_inline", &self.is_inline())
+            .field("is_extern", &self.is_extern())
+            .field("is_gnu_inline", &self.is_gnu_inline())
+            .field("is_always_inline", &self.is_always_inline())
+            .field("is_noinline", &self.is_noinline())
+            .field("is_constructor", &self.is_constructor())
+            .field("is_destructor", &self.is_destructor())
+            .field("is_weak", &self.is_weak())
+            .field("is_used", &self.is_used())
+            .field("section", &self.section)
+            .field("visibility", &self.visibility)
+            .finish()
+    }
 }
 
 /// A function definition.
@@ -142,14 +210,13 @@ impl Declaration {
 /// Attributes that can be applied to individual declarators via GCC
 /// __attribute__((...)) syntax.
 ///
-/// Consolidates what were previously 11 separate boolean/Option fields on
-/// InitDeclarator into a single struct.
-#[derive(Debug, Clone, Default)]
+/// Boolean attributes are stored as a packed bitfield (`flags`). Non-boolean
+/// attributes (`alias_target`, `visibility`, `section`, `asm_register`,
+/// `cleanup_fn`) remain as `Option<String>`.
+#[derive(Clone, Default)]
 pub struct DeclAttributes {
-    pub is_constructor: bool,
-    pub is_destructor: bool,
-    /// __attribute__((weak)) - emit as a weak symbol
-    pub is_weak: bool,
+    /// Packed boolean flags — see `decl_attr_flag` constants.
+    flags: u16,
     /// __attribute__((alias("target"))) - this symbol is an alias for target
     pub alias_target: Option<String>,
     /// __attribute__((visibility("hidden"))) etc.
@@ -158,18 +225,68 @@ pub struct DeclAttributes {
     pub section: Option<String>,
     /// register var __asm__("regname") - pin to specific register for inline asm
     pub asm_register: Option<String>,
-    /// __attribute__((error("msg"))) or __attribute__((warning("msg")))
-    /// Functions with this attribute are compile-time assertion traps.
-    /// Calls to them should be treated as unreachable.
-    pub is_error_attr: bool,
-    /// __attribute__((noreturn)) or _Noreturn - function never returns.
-    /// Calls to noreturn functions are followed by unreachable.
-    pub is_noreturn: bool,
     /// __attribute__((cleanup(func))) - call func(&var) when var goes out of scope.
     /// Used for RAII-style cleanup (e.g., Linux kernel guard()/scoped_guard() for mutex_unlock).
     pub cleanup_fn: Option<String>,
-    /// __attribute__((used)) - prevent dead code elimination of this symbol
-    pub is_used: bool,
+}
+
+/// Bit masks for boolean flags in `DeclAttributes::flags`.
+pub mod decl_attr_flag {
+    /// `__attribute__((constructor))` — run before main.
+    pub const CONSTRUCTOR: u16 = 1 << 0;
+    /// `__attribute__((destructor))` — run after main.
+    pub const DESTRUCTOR: u16  = 1 << 1;
+    /// `__attribute__((weak))` — emit as a weak symbol.
+    pub const WEAK: u16        = 1 << 2;
+    /// `__attribute__((error("...")))` or `__attribute__((warning("...")))`.
+    pub const ERROR_ATTR: u16  = 1 << 3;
+    /// `__attribute__((noreturn))` or `_Noreturn`.
+    pub const NORETURN: u16    = 1 << 4;
+    /// `__attribute__((used))` — prevent dead code elimination.
+    pub const USED: u16        = 1 << 5;
+}
+
+impl DeclAttributes {
+    // --- flag getters ---
+
+    #[inline] pub fn is_constructor(&self) -> bool { self.flags & decl_attr_flag::CONSTRUCTOR != 0 }
+    #[inline] pub fn is_destructor(&self) -> bool  { self.flags & decl_attr_flag::DESTRUCTOR != 0 }
+    #[inline] pub fn is_weak(&self) -> bool        { self.flags & decl_attr_flag::WEAK != 0 }
+    #[inline] pub fn is_error_attr(&self) -> bool  { self.flags & decl_attr_flag::ERROR_ATTR != 0 }
+    #[inline] pub fn is_noreturn(&self) -> bool    { self.flags & decl_attr_flag::NORETURN != 0 }
+    #[inline] pub fn is_used(&self) -> bool        { self.flags & decl_attr_flag::USED != 0 }
+
+    // --- flag setters ---
+
+    #[inline] pub fn set_constructor(&mut self, v: bool) { self.set_flag(decl_attr_flag::CONSTRUCTOR, v) }
+    #[inline] pub fn set_destructor(&mut self, v: bool)  { self.set_flag(decl_attr_flag::DESTRUCTOR, v) }
+    #[inline] pub fn set_weak(&mut self, v: bool)        { self.set_flag(decl_attr_flag::WEAK, v) }
+    #[inline] pub fn set_error_attr(&mut self, v: bool)  { self.set_flag(decl_attr_flag::ERROR_ATTR, v) }
+    #[inline] pub fn set_noreturn(&mut self, v: bool)    { self.set_flag(decl_attr_flag::NORETURN, v) }
+    #[inline] pub fn set_used(&mut self, v: bool)        { self.set_flag(decl_attr_flag::USED, v) }
+
+    #[inline]
+    fn set_flag(&mut self, mask: u16, v: bool) {
+        if v { self.flags |= mask; } else { self.flags &= !mask; }
+    }
+}
+
+impl std::fmt::Debug for DeclAttributes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeclAttributes")
+            .field("is_constructor", &self.is_constructor())
+            .field("is_destructor", &self.is_destructor())
+            .field("is_weak", &self.is_weak())
+            .field("is_error_attr", &self.is_error_attr())
+            .field("is_noreturn", &self.is_noreturn())
+            .field("is_used", &self.is_used())
+            .field("alias_target", &self.alias_target)
+            .field("visibility", &self.visibility)
+            .field("section", &self.section)
+            .field("asm_register", &self.asm_register)
+            .field("cleanup_fn", &self.cleanup_fn)
+            .finish()
+    }
 }
 
 /// A declarator with optional initializer.

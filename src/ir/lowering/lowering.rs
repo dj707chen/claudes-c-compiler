@@ -380,7 +380,7 @@ impl Lowerer {
             if let ExternalDecl::FunctionDef(func) = decl {
                 self.register_function_meta(
                     &func.name, &func.return_type, 0,
-                    &func.params, func.variadic, func.attrs.is_static, func.is_kr,
+                    &func.params, func.variadic, func.attrs.is_static(), func.is_kr,
                 );
             }
             if let ExternalDecl::Declaration(decl) = decl {
@@ -444,21 +444,21 @@ impl Lowerer {
         for decl in &tu.decls {
             match decl {
                 ExternalDecl::FunctionDef(func) => {
-                    if func.attrs.is_constructor && !self.module.constructors.contains(&func.name) {
+                    if func.attrs.is_constructor() && !self.module.constructors.contains(&func.name) {
                         self.module.constructors.push(func.name.clone());
                     }
-                    if func.attrs.is_destructor && !self.module.destructors.contains(&func.name) {
+                    if func.attrs.is_destructor() && !self.module.destructors.contains(&func.name) {
                         self.module.destructors.push(func.name.clone());
                     }
                 }
                 ExternalDecl::Declaration(decl) => {
                     for declarator in &decl.declarators {
-                        if declarator.attrs.is_constructor && !declarator.name.is_empty()
+                        if declarator.attrs.is_constructor() && !declarator.name.is_empty()
                             && !self.module.constructors.contains(&declarator.name)
                         {
                             self.module.constructors.push(declarator.name.clone());
                         }
-                        if declarator.attrs.is_destructor && !declarator.name.is_empty()
+                        if declarator.attrs.is_destructor() && !declarator.name.is_empty()
                             && !self.module.destructors.contains(&declarator.name)
                         {
                             self.module.destructors.push(declarator.name.clone());
@@ -469,16 +469,16 @@ impl Lowerer {
                                 self.module.aliases.push((
                                     declarator.name.clone(),
                                     target.clone(),
-                                    declarator.attrs.is_weak,
+                                    declarator.attrs.is_weak(),
                                 ));
                             }
                         }
                         // Collect __attribute__((error("..."))) / __attribute__((warning("...")))
-                        if declarator.attrs.is_error_attr && !declarator.name.is_empty() {
+                        if declarator.attrs.is_error_attr() && !declarator.name.is_empty() {
                             self.error_functions.insert(declarator.name.clone());
                         }
                         // Collect __attribute__((noreturn)) / _Noreturn
-                        if declarator.attrs.is_noreturn && !declarator.name.is_empty() {
+                        if declarator.attrs.is_noreturn() && !declarator.name.is_empty() {
                             self.noreturn_functions.insert(declarator.name.clone());
                         }
                         // Collect weak/visibility attributes on extern declarations (not aliases).
@@ -489,11 +489,11 @@ impl Lowerer {
                         if !decl.is_typedef
                             && declarator.attrs.alias_target.is_none()
                             && !declarator.name.is_empty()
-                            && (declarator.attrs.is_weak || declarator.attrs.visibility.is_some())
+                            && (declarator.attrs.is_weak() || declarator.attrs.visibility.is_some())
                         {
                             self.module.symbol_attrs.push((
                                 declarator.name.clone(),
-                                declarator.attrs.is_weak,
+                                declarator.attrs.is_weak(),
                                 declarator.attrs.visibility.clone(),
                             ));
                         }
@@ -524,22 +524,22 @@ impl Lowerer {
                     // Without gnu_inline (C99 semantics):
                     //   extern inline = provides external definition (must emit, global)
                     //   inline (alone) = inline definition only (no external def)
-                    let is_gnu_inline_no_extern_def = func.attrs.is_gnu_inline && func.attrs.is_inline
-                        && func.attrs.is_extern;
-                    let can_skip = if func.attrs.is_static {
+                    let is_gnu_inline_no_extern_def = func.attrs.is_gnu_inline() && func.attrs.is_inline()
+                        && func.attrs.is_extern();
+                    let can_skip = if func.attrs.is_static() {
                         // static or static inline: internal linkage, safe to skip if unreferenced
                         true
                     } else if is_gnu_inline_no_extern_def {
                         // extern inline with gnu_inline: no external definition, skip if unreferenced
                         true
-                    } else if func.attrs.is_inline {
+                    } else if func.attrs.is_inline() {
                         // C99: plain inline = inline definition only (no external def from this)
                         // gnu_inline without extern: provides external definition (must emit)
                         false
                     } else {
                         false
                     };
-                    if can_skip && !func.attrs.is_used && !referenced_statics.contains(&func.name) {
+                    if can_skip && !func.attrs.is_used() && !referenced_statics.contains(&func.name) {
                         continue;
                     }
                     self.lower_function(func);

@@ -128,7 +128,7 @@ impl Lowerer {
                         is_extern: true,
                         is_common: false,
                         section: None,
-                        is_weak: declarator.attrs.is_weak,
+                        is_weak: declarator.attrs.is_weak(),
                         visibility: declarator.attrs.visibility.clone(),
                         has_explicit_align: false,
                         is_const: false,
@@ -153,7 +153,7 @@ impl Lowerer {
                         // Even though we skip re-emitting, propagate __weak
                         // to the already-emitted global if this redeclaration
                         // carries the weak attribute.
-                        if declarator.attrs.is_weak {
+                        if declarator.attrs.is_weak() {
                             for g in &mut self.module.globals {
                                 if g.name == declarator.name {
                                     g.is_weak = true;
@@ -294,11 +294,11 @@ impl Lowerer {
                 is_extern: is_extern_decl,
                 is_common: decl.is_common,
                 section: declarator.attrs.section.clone(),
-                is_weak: declarator.attrs.is_weak || prior_was_weak,
+                is_weak: declarator.attrs.is_weak() || prior_was_weak,
                 visibility: declarator.attrs.visibility.clone(),
                 has_explicit_align,
                 is_const: var_is_const,
-                is_used: declarator.attrs.is_used,
+                is_used: declarator.attrs.is_used(),
                 is_thread_local: decl.is_thread_local,
             });
         }
