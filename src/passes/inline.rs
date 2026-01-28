@@ -102,9 +102,17 @@ const MAX_STATIC_NONINLINE_BLOCKS: usize = 4;
 
 /// Budget for always_inline callees per caller. Limits total instructions
 /// inlined from always_inline callees to prevent stack frame bloat.
-/// CCC spills every SSA value to stack (~8 bytes each), so inlining 2000+
-/// instructions creates 16KB+ frames that overflow the kernel stack.
-const MAX_ALWAYS_INLINE_BUDGET_PER_CALLER: usize = 2000;
+/// CCC spills every SSA value to stack (~8 bytes each), so excessive inlining
+/// creates frames that overflow the kernel's 16KB stack. After phi elimination,
+/// inlined code creates multi-def SSA values whose liveness intervals span
+/// the entire enclosing loop, causing simultaneous live value counts in the
+/// thousands. To keep stack frames under ~4KB (leaving headroom for callers
+/// in deep call chains like kernel_init → ... → shrink_folio_list), we must
+/// limit the total inlined instruction count. With ~1 SSA value per 6
+/// instructions and 8 bytes per value, 800 instructions ≈ ~1067 bytes of
+/// multi-block value slots. With Tier 2 packing and block-local coalescing,
+/// the actual frame is typically 2-3x this estimate.
+const MAX_ALWAYS_INLINE_BUDGET_PER_CALLER: usize = 100;
 
 /// Hard cap on caller instruction count. When a caller exceeds this threshold,
 /// even always_inline inlining is stopped (except for tiny callees that must be
@@ -242,6 +250,13 @@ pub fn run(module: &mut IrModule) -> usize {
             // 1. They have negligible impact on code/stack size
             // 2. Not inlining them can cause linker errors from conditional
             //    references to undefined symbols (e.g., fscache_clear_page_bits)
+            //
+            // However, once the always_inline budget is exhausted, only TINY
+            // callees (≤5 instructions, single block) are picked. Small callees
+            // (6-20 instructions) individually have "negligible" impact but
+            // collectively cause catastrophic stack bloat when a function has
+            // 200+ always_inline call sites (e.g., kernel's shrink_folio_list).
+            let budget_exhausted = always_inline_budget_remaining == 0;
             for site in &call_sites {
                 let callee_data = &callee_map[&site.callee_name];
                 let callee_inst_count: usize = callee_data.blocks.iter()
@@ -251,7 +266,7 @@ pub fn run(module: &mut IrModule) -> usize {
                     && callee_data.blocks.len() <= 1;
                 let is_small = callee_inst_count <= MAX_SMALL_INLINE_INSTRUCTIONS
                     && callee_data.blocks.len() <= MAX_SMALL_INLINE_BLOCKS;
-                if is_tiny || is_small {
+                if is_tiny || (is_small && !budget_exhausted) {
                     let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
                     found_site = Some((site.clone(), callee_inst_count, use_relaxed));
                     break;
@@ -302,13 +317,40 @@ pub fn run(module: &mut IrModule) -> usize {
                         continue;
                     }
                     let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
-                    // always_inline callees MUST be inlined unconditionally — this
-                    // is a C semantic requirement (__attribute__((always_inline))).
-                    // Not inlining them causes section mismatch errors in the kernel
-                    // when a .init.text caller's always_inline helper references
-                    // .init.rodata data but gets emitted as a standalone .text function.
-                    // Budget limits only apply to normal (non-always_inline) inlining.
-                    if !callee_data.is_always_inline {
+                    // Budget enforcement for inlining decisions.
+                    //
+                    // always_inline callees are normally inlined unconditionally per
+                    // C semantics. However, when the caller has already consumed its
+                    // always_inline budget (MAX_ALWAYS_INLINE_BUDGET_PER_CALLER),
+                    // we must stop inlining larger always_inline callees to prevent
+                    // stack frame blowup. CCC's accumulator-based codegen creates one
+                    // stack slot (~8 bytes) per SSA value, so inlining hundreds of
+                    // always_inline helpers (e.g., kernel's shrink_folio_list calling
+                    // ~200 inline helpers) produces 16KB+ frames that overflow the
+                    // kernel's 16KB stack.
+                    //
+                    // Tiny/small always_inline callees are ALWAYS inlined regardless
+                    // of budget because:
+                    // 1. They have negligible impact on code/stack size
+                    // 2. Not inlining them causes linker errors (conditional references
+                    //    to undefined symbols, inline asm "i" constraints)
+                    // 3. Section mismatch errors in kernel .init code
+                    //
+                    // Larger always_inline callees are skipped once the budget is
+                    // exhausted. This may cause GCC warnings about always_inline not
+                    // being honored, but avoids stack overflow at runtime.
+                    if callee_data.is_always_inline {
+                        let is_tiny = callee_inst_count <= MAX_TINY_INLINE_INSTRUCTIONS
+                            && callee_data.blocks.len() <= 1;
+                        // Once the always_inline budget is exhausted, only
+                        // tiny callees are inlined. This prevents functions
+                        // like shrink_folio_list (200+ always_inline calls)
+                        // from accumulating thousands of SSA values and
+                        // blowing up the stack frame beyond 16KB.
+                        if !is_tiny && callee_inst_count > always_inline_budget_remaining {
+                            continue;
+                        }
+                    } else {
                         let effective_budget = if use_relaxed {
                             always_inline_budget_remaining
                         } else {

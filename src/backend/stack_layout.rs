@@ -921,13 +921,11 @@ pub fn calculate_stack_space_common(
                         });
                         continue;
                     }
-                    // Multi-block non-escaping allocas get permanent slots.
-                    // Note: liveness-based interval packing using [min_block, max_block]
-                    // ranges is unsound because block index order does not correspond to
-                    // execution order in the presence of loops.
+                    // Multi-block non-escaping allocas get permanent slots below.
                 }
 
-                // Non-coalescable allocas get permanent slots.
+                // Non-coalescable allocas get permanent slots (escaped or
+                // multi-block non-escaping allocas that span multiple blocks).
                 let (slot, new_space) = assign_slot(non_local_space, raw_size + extra as i64, *align as i64);
                 state.value_locations.insert(dest.0, StackSlot(slot));
                 non_local_space = new_space;
@@ -1116,7 +1114,6 @@ pub fn calculate_stack_space_common(
         }
     }
 
-    // Pack multi-block non-escaping allocas using liveness-based interval packing.
     // Assign final offsets for deferred block-local values.
     // All deferred values share a pool starting at non_local_space.
     // Each value's final slot is computed by calling assign_slot with

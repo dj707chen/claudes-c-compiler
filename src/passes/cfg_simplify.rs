@@ -62,6 +62,7 @@ pub(crate) fn simplify_cfg(func: &mut IrFunction) -> usize {
         changed += thread_jump_chains_with_map(func, &label_to_idx);
         changed += remove_dead_blocks(func);
         changed += simplify_trivial_phis(func);
+        changed += merge_single_pred_blocks(func);
         if changed == 0 {
             break;
         }
@@ -855,6 +856,236 @@ fn simplify_trivial_phis(func: &mut IrFunction) -> usize {
                     count += 1;
                 }
             }
+        }
+    }
+
+    count
+}
+
+/// Merge single-predecessor blocks into their predecessor.
+///
+/// When block A ends with `Branch(B)` and B has exactly one predecessor (A),
+/// the two blocks can be fused: B's instructions are appended to A and A
+/// inherits B's terminator. This eliminates a block boundary, turning values
+/// that were "multi-block" (defined in A, used in B) into single-block values.
+///
+/// This is critical for stack frame reduction after inlining: each inlined
+/// function body creates a chain of blocks connected by unconditional branches.
+/// Without fusion, SSA values crossing these artificial block boundaries are
+/// classified as multi-block and each gets a permanent stack slot (8 bytes).
+/// After fusion, these values become block-local and participate in Tier 3
+/// coalescing, sharing stack space across non-overlapping regions.
+///
+/// Phi nodes in B with a single predecessor A are converted to Copy instructions
+/// (they should already have been simplified by `simplify_trivial_phis`, but we
+/// handle them defensively).
+fn merge_single_pred_blocks(func: &mut IrFunction) -> usize {
+    if func.blocks.len() <= 1 {
+        return 0;
+    }
+
+    // Build predecessor count and single-predecessor map.
+    // pred_count[B] = number of distinct predecessors of B.
+    // single_pred_from[B] = A if A is B's only predecessor (via Branch(B)).
+    let mut pred_count: FxHashMap<BlockId, u32> = FxHashMap::default();
+    for block in func.blocks.iter() {
+        for_each_terminator_target(&block.terminator, |target| {
+            *pred_count.entry(target).or_insert(0) += 1;
+        });
+    }
+
+    // Identify which blocks can be merged and build fusion map.
+    // A block B can be merged into A if:
+    // 1. B has exactly one predecessor
+    // 2. A's terminator is Branch(B) (unconditional)
+    // 3. B is not the entry block (block index 0)
+    // 4. B does not contain LabelAddr references to itself (computed goto targets)
+    // 5. B does not contain InlineAsm with goto_labels (asm goto targets must
+    //    remain as separate blocks for correct label emission)
+    //
+    // We process fusions iteratively: merge_into[A_label] = B_label means
+    // A should absorb B. We process in order so chains (A->B->C) are handled
+    // by the fixpoint loop in simplify_cfg.
+
+    let entry_label = func.blocks[0].label;
+    let label_to_idx: FxHashMap<BlockId, usize> = func.blocks.iter()
+        .enumerate().map(|(i, b)| (b.label, i)).collect();
+
+    // Collect fusion pairs: (pred_idx, succ_idx) where pred absorbs succ.
+    let mut fusions: Vec<(usize, usize)> = Vec::new();
+    // Track blocks that are already targets of a fusion (to prevent double-merging).
+    let mut absorbed: FxHashSet<usize> = FxHashSet::default();
+    // Track blocks that are already predecessors in a fusion.
+    let mut absorbers: FxHashSet<usize> = FxHashSet::default();
+
+    for (idx, block) in func.blocks.iter().enumerate() {
+        if let Terminator::Branch(target) = &block.terminator {
+            // Skip if target is entry block.
+            if *target == entry_label {
+                continue;
+            }
+            // Skip if target has multiple predecessors.
+            if pred_count.get(target).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let &succ_idx = match label_to_idx.get(target) {
+                Some(si) => si,
+                None => continue,
+            };
+            // Don't merge a block with itself.
+            if idx == succ_idx {
+                continue;
+            }
+            // Don't merge if the successor is already being absorbed or is an absorber.
+            if absorbed.contains(&succ_idx) || absorbers.contains(&succ_idx) {
+                continue;
+            }
+            // Don't merge if this block is already being absorbed.
+            if absorbed.contains(&idx) {
+                continue;
+            }
+            // Check if the successor contains any InlineAsm with goto_labels.
+            // These blocks must remain separate for correct label emission.
+            let has_asm_goto = func.blocks[succ_idx].instructions.iter().any(|inst| {
+                if let Instruction::InlineAsm { goto_labels, .. } = inst {
+                    !goto_labels.is_empty()
+                } else {
+                    false
+                }
+            });
+            if has_asm_goto {
+                continue;
+            }
+            // Check if any block references the successor's label via LabelAddr.
+            // Such blocks are computed goto targets and must keep their identity.
+            let label_addr_target = func.blocks.iter().any(|b| {
+                b.instructions.iter().any(|inst| {
+                    if let Instruction::LabelAddr { label, .. } = inst {
+                        *label == *target
+                    } else {
+                        false
+                    }
+                })
+            });
+            if label_addr_target {
+                continue;
+            }
+
+            fusions.push((idx, succ_idx));
+            absorbed.insert(succ_idx);
+            absorbers.insert(idx);
+        }
+    }
+
+    if fusions.is_empty() {
+        return 0;
+    }
+
+    let count = fusions.len();
+
+    // Perform the fusions.
+    // We need to be careful about indices since we're modifying func.blocks.
+    // Strategy: process fusions by swapping out instructions, then remove absorbed blocks.
+
+    for &(pred_idx, succ_idx) in &fusions {
+        // Take the successor's instructions and terminator.
+        let succ_instructions = std::mem::take(&mut func.blocks[succ_idx].instructions);
+        let succ_terminator = std::mem::replace(
+            &mut func.blocks[succ_idx].terminator,
+            Terminator::Unreachable,
+        );
+        let succ_spans = std::mem::take(&mut func.blocks[succ_idx].source_spans);
+        let pred_label = func.blocks[pred_idx].label;
+
+        // Convert any phi nodes in the successor to Copy instructions.
+        // Since B has exactly one predecessor A, each Phi([(val, A)]) -> Copy(val).
+        let mut converted_instructions: Vec<Instruction> = Vec::with_capacity(succ_instructions.len());
+        let mut converted_spans = Vec::with_capacity(succ_spans.len());
+        for (i, inst) in succ_instructions.into_iter().enumerate() {
+            if let Instruction::Phi { dest, incoming, .. } = &inst {
+                // Find the value from the predecessor.
+                let src = incoming.iter()
+                    .find(|(_, label)| *label == pred_label)
+                    .map(|(op, _)| *op)
+                    .unwrap_or_else(|| {
+                        // Fallback: use first incoming value if pred not found
+                        // (shouldn't happen for single-pred blocks).
+                        if !incoming.is_empty() {
+                            incoming[0].0
+                        } else {
+                            Operand::Const(IrConst::I64(0))
+                        }
+                    });
+                converted_instructions.push(Instruction::Copy { dest: *dest, src });
+            } else {
+                converted_instructions.push(inst);
+            }
+            if i < succ_spans.len() {
+                converted_spans.push(succ_spans[i]);
+            }
+        }
+
+        // Append to predecessor.
+        func.blocks[pred_idx].instructions.extend(converted_instructions);
+        func.blocks[pred_idx].terminator = succ_terminator;
+        if !converted_spans.is_empty() {
+            func.blocks[pred_idx].source_spans.extend(converted_spans);
+        }
+    }
+
+    // Remove absorbed blocks (mark as unreachable, then let remove_dead_blocks clean up).
+    // We already set their terminators to Unreachable and cleared instructions,
+    // so remove_dead_blocks will handle them on the next iteration.
+    // But we also need to update any phi nodes in other blocks that reference
+    // the absorbed block's label to reference the predecessor's label instead.
+    let absorbed_to_pred: FxHashMap<BlockId, BlockId> = fusions.iter()
+        .map(|&(pred_idx, succ_idx)| (func.blocks[succ_idx].label, func.blocks[pred_idx].label))
+        .collect();
+
+    for block in &mut func.blocks {
+        // Update phi nodes: replace references to absorbed blocks with their predecessors.
+        for inst in &mut block.instructions {
+            if let Instruction::Phi { incoming, .. } = inst {
+                for (_, label) in incoming.iter_mut() {
+                    if let Some(&new_label) = absorbed_to_pred.get(label) {
+                        *label = new_label;
+                    }
+                }
+            }
+        }
+        // Update terminators that reference absorbed blocks.
+        match &mut block.terminator {
+            Terminator::Branch(target) => {
+                if let Some(&new_target) = absorbed_to_pred.get(target) {
+                    *target = new_target;
+                }
+            }
+            Terminator::CondBranch { true_label, false_label, .. } => {
+                if let Some(&new_target) = absorbed_to_pred.get(true_label) {
+                    *true_label = new_target;
+                }
+                if let Some(&new_target) = absorbed_to_pred.get(false_label) {
+                    *false_label = new_target;
+                }
+            }
+            Terminator::Switch { cases, default, .. } => {
+                if let Some(&new_target) = absorbed_to_pred.get(default) {
+                    *default = new_target;
+                }
+                for (_, label) in cases.iter_mut() {
+                    if let Some(&new_target) = absorbed_to_pred.get(label) {
+                        *label = new_target;
+                    }
+                }
+            }
+            Terminator::IndirectBranch { possible_targets, .. } => {
+                for target in possible_targets.iter_mut() {
+                    if let Some(&new_target) = absorbed_to_pred.get(target) {
+                        *target = new_target;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
