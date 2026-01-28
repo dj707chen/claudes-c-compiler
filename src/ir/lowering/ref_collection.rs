@@ -17,9 +17,9 @@ impl Lowerer {
     /// This mirrors the skip logic in `lower()` — static, static inline,
     /// and extern inline with gnu_inline attribute can all be skipped.
     fn is_skippable_function(func: &FunctionDef) -> bool {
-        let is_gnu_inline_no_extern_def = func.is_gnu_inline && func.is_inline
-            && func.is_extern;
-        func.is_static || is_gnu_inline_no_extern_def
+        let is_gnu_inline_no_extern_def = func.attrs.is_gnu_inline && func.attrs.is_inline
+            && func.attrs.is_extern;
+        func.attrs.is_static || is_gnu_inline_no_extern_def
     }
 
     /// Collect all function names that are transitively referenced from root
@@ -56,7 +56,7 @@ impl Lowerer {
                             self.collect_refs_from_initializer(init, &mut referenced);
                         }
                         // Alias targets reference the aliased function
-                        if let Some(ref target) = declarator.alias_target {
+                        if let Some(ref target) = declarator.attrs.alias_target {
                             referenced.insert(target.clone());
                         }
                     }
@@ -94,7 +94,7 @@ impl Lowerer {
                             self.collect_refs_from_initializer(init, refs);
                         }
                         // __attribute__((cleanup(func))) references func
-                        if let Some(ref cleanup_fn) = declarator.cleanup_fn {
+                        if let Some(ref cleanup_fn) = declarator.attrs.cleanup_fn {
                             if self.known_functions.contains(cleanup_fn) {
                                 refs.insert(cleanup_fn.clone());
                             }
@@ -145,7 +145,7 @@ impl Lowerer {
                                     self.collect_refs_from_initializer(init, refs);
                                 }
                                 // __attribute__((cleanup(func))) references func
-                                if let Some(ref cleanup_fn) = declarator.cleanup_fn {
+                                if let Some(ref cleanup_fn) = declarator.attrs.cleanup_fn {
                                     if self.known_functions.contains(cleanup_fn) {
                                         refs.insert(cleanup_fn.clone());
                                     }
@@ -179,7 +179,7 @@ impl Lowerer {
                     if let Some(ref init) = declarator.init {
                         self.collect_refs_from_initializer(init, refs);
                     }
-                    if let Some(ref cleanup_fn) = declarator.cleanup_fn {
+                    if let Some(ref cleanup_fn) = declarator.attrs.cleanup_fn {
                         if self.known_functions.contains(cleanup_fn) {
                             refs.insert(cleanup_fn.clone());
                         }

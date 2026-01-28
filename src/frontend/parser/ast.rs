@@ -16,14 +16,14 @@ pub enum ExternalDecl {
     TopLevelAsm(String),
 }
 
-/// A function definition.
-#[derive(Debug)]
-pub struct FunctionDef {
-    pub return_type: TypeSpecifier,
-    pub name: String,
-    pub params: Vec<ParamDecl>,
-    pub variadic: bool,
-    pub body: CompoundStmt,
+/// Attributes that can be applied to function definitions via storage-class
+/// specifiers (static, inline, extern) and GCC __attribute__((...)) syntax.
+///
+/// Consolidates what were previously 13 separate boolean/Option fields on
+/// FunctionDef into a single struct, making it easier to add new attributes
+/// and pass attribute bundles around.
+#[derive(Debug, Clone, Default)]
+pub struct FunctionAttributes {
     pub is_static: bool,
     pub is_inline: bool,
     /// True when `extern` storage class was used on the function definition.
@@ -36,7 +36,6 @@ pub struct FunctionDef {
     /// True when __attribute__((noinline)) is present.
     /// These functions must never be inlined by the optimizer.
     pub is_noinline: bool,
-    pub is_kr: bool,
     pub is_constructor: bool,
     pub is_destructor: bool,
     /// __attribute__((section("..."))) - place in specific ELF section
@@ -47,6 +46,19 @@ pub struct FunctionDef {
     pub is_weak: bool,
     /// __attribute__((used)) - prevent dead code elimination of this symbol
     pub is_used: bool,
+}
+
+/// A function definition.
+#[derive(Debug)]
+pub struct FunctionDef {
+    pub return_type: TypeSpecifier,
+    pub name: String,
+    pub params: Vec<ParamDecl>,
+    pub variadic: bool,
+    pub body: CompoundStmt,
+    /// Function attributes (storage class, inline hints, GCC __attribute__).
+    pub attrs: FunctionAttributes,
+    pub is_kr: bool,
     pub span: Span,
 }
 
@@ -127,12 +139,13 @@ impl Declaration {
     }
 }
 
-/// A declarator with optional initializer.
-#[derive(Debug, Clone)]
-pub struct InitDeclarator {
-    pub name: String,
-    pub derived: Vec<DerivedDeclarator>,
-    pub init: Option<Initializer>,
+/// Attributes that can be applied to individual declarators via GCC
+/// __attribute__((...)) syntax.
+///
+/// Consolidates what were previously 11 separate boolean/Option fields on
+/// InitDeclarator into a single struct.
+#[derive(Debug, Clone, Default)]
+pub struct DeclAttributes {
     pub is_constructor: bool,
     pub is_destructor: bool,
     /// __attribute__((weak)) - emit as a weak symbol
@@ -157,6 +170,16 @@ pub struct InitDeclarator {
     pub cleanup_fn: Option<String>,
     /// __attribute__((used)) - prevent dead code elimination of this symbol
     pub is_used: bool,
+}
+
+/// A declarator with optional initializer.
+#[derive(Debug, Clone)]
+pub struct InitDeclarator {
+    pub name: String,
+    pub derived: Vec<DerivedDeclarator>,
+    pub init: Option<Initializer>,
+    /// Declarator attributes (GCC __attribute__, asm register, etc.).
+    pub attrs: DeclAttributes,
     pub span: Span,
 }
 

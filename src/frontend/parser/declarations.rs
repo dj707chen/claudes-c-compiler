@@ -232,19 +232,21 @@ impl Parser {
             params: final_params,
             variadic,
             body,
-            is_static,
-            is_inline,
-            is_extern,
-            is_gnu_inline,
-            is_always_inline,
-            is_noinline,
+            attrs: FunctionAttributes {
+                is_static,
+                is_inline,
+                is_extern,
+                is_gnu_inline,
+                is_always_inline,
+                is_noinline,
+                is_constructor,
+                is_destructor,
+                section,
+                visibility,
+                is_weak,
+                is_used,
+            },
             is_kr: is_kr_style,
-            is_constructor,
-            is_destructor,
-            section,
-            visibility,
-            is_weak,
-            is_used,
             span: start,
         }))
     }
@@ -442,17 +444,19 @@ impl Parser {
             name: name.unwrap_or_default(),
             derived,
             init,
-            is_constructor,
-            is_destructor,
-            is_weak,
-            alias_target,
-            visibility,
-            section: section.clone(),
-            asm_register: first_asm_register,
-            is_error_attr,
-            is_noreturn,
-            cleanup_fn,
-            is_used,
+            attrs: DeclAttributes {
+                is_constructor,
+                is_destructor,
+                is_weak,
+                alias_target,
+                visibility,
+                section: section.clone(),
+                asm_register: first_asm_register,
+                is_error_attr,
+                is_noreturn,
+                cleanup_fn,
+                is_used,
+            },
             span: start,
         });
 
@@ -460,32 +464,32 @@ impl Parser {
         // If the asm register was parsed after the declarator (post-declarator position),
         // apply it to the first declarator
         if let Some(reg) = extra_asm_reg {
-            declarators.last_mut().unwrap().asm_register = Some(reg);
+            declarators.last_mut().unwrap().attrs.asm_register = Some(reg);
         }
         if extra_ctor {
-            declarators.last_mut().unwrap().is_constructor = true;
+            declarators.last_mut().unwrap().attrs.is_constructor = true;
         }
         if extra_dtor {
-            declarators.last_mut().unwrap().is_destructor = true;
+            declarators.last_mut().unwrap().attrs.is_destructor = true;
         }
         // Merge weak/alias/visibility from post-declarator attributes
         if self.parsing_weak {
-            declarators.last_mut().unwrap().is_weak = true;
+            declarators.last_mut().unwrap().attrs.is_weak = true;
         }
         if let Some(ref target) = self.parsing_alias_target {
-            declarators.last_mut().unwrap().alias_target = Some(target.clone());
+            declarators.last_mut().unwrap().attrs.alias_target = Some(target.clone());
         }
         if let Some(ref vis) = self.parsing_visibility {
-            declarators.last_mut().unwrap().visibility = Some(vis.clone());
+            declarators.last_mut().unwrap().attrs.visibility = Some(vis.clone());
         }
         if let Some(ref sect) = self.parsing_section {
-            declarators.last_mut().unwrap().section = Some(sect.clone());
+            declarators.last_mut().unwrap().attrs.section = Some(sect.clone());
         }
         if let Some(ref cleanup) = self.parsing_cleanup_fn {
-            declarators.last_mut().unwrap().cleanup_fn = Some(cleanup.clone());
+            declarators.last_mut().unwrap().attrs.cleanup_fn = Some(cleanup.clone());
         }
         if self.parsing_used {
-            declarators.last_mut().unwrap().is_used = true;
+            declarators.last_mut().unwrap().attrs.is_used = true;
         }
         self.parsing_weak = false;
         self.parsing_alias_target = None;
@@ -527,22 +531,24 @@ impl Parser {
                 name: dname.unwrap_or_default(),
                 derived: dderived,
                 init: dinit,
-                is_constructor: d_ctor,
-                is_destructor: d_dtor,
-                is_weak: d_weak,
-                alias_target: d_alias,
-                visibility: d_vis,
-                section: d_section,
-                asm_register: d_asm_reg,
-                is_error_attr: d_error_attr,
-                is_noreturn: d_noreturn,
-                cleanup_fn: d_cleanup_fn,
-                is_used: d_used,
+                attrs: DeclAttributes {
+                    is_constructor: d_ctor,
+                    is_destructor: d_dtor,
+                    is_weak: d_weak,
+                    alias_target: d_alias,
+                    visibility: d_vis,
+                    section: d_section,
+                    asm_register: d_asm_reg,
+                    is_error_attr: d_error_attr,
+                    is_noreturn: d_noreturn,
+                    cleanup_fn: d_cleanup_fn,
+                    is_used: d_used,
+                },
                 span: start,
             });
             let (_, skip_aligned, skip_asm_reg) = self.skip_asm_and_attributes();
             if let Some(reg) = skip_asm_reg {
-                declarators.last_mut().unwrap().asm_register = Some(reg);
+                declarators.last_mut().unwrap().attrs.asm_register = Some(reg);
             }
             if let Some(a) = skip_aligned {
                 alignment = Some(alignment.map_or(a, |prev| prev.max(a)));
@@ -622,17 +628,12 @@ impl Parser {
                 name: name.unwrap_or_default(),
                 derived,
                 init,
-                is_constructor: false,
-                is_destructor: false,
-                is_weak: false,
-                alias_target: None,
-                visibility: None,
-                section: local_section,
-                asm_register: skip_asm_reg,
-                is_error_attr: false,
-                is_noreturn: false,
-                cleanup_fn: local_cleanup_fn,
-                is_used: false,
+                attrs: DeclAttributes {
+                    section: local_section,
+                    asm_register: skip_asm_reg,
+                    cleanup_fn: local_cleanup_fn,
+                    ..Default::default()
+                },
                 span: start,
             });
             let (_, post_init_aligned, _post_asm_reg) = self.skip_asm_and_attributes();

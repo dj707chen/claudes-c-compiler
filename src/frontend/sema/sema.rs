@@ -176,7 +176,7 @@ impl SemanticAnalyzer {
             params: params.clone(),
             variadic: func.variadic,
         }));
-        let storage_class = if func.is_static {
+        let storage_class = if func.attrs.is_static {
             StorageClass::Static
         } else {
             StorageClass::Extern

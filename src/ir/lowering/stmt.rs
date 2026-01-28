@@ -260,10 +260,10 @@ impl Lowerer {
                     local_info.vla_strides = strides;
                 }
             }
-            local_info.asm_register = declarator.asm_register.clone();
-            local_info.cleanup_fn = declarator.cleanup_fn.clone();
+            local_info.asm_register = declarator.attrs.asm_register.clone();
+            local_info.cleanup_fn = declarator.attrs.cleanup_fn.clone();
             // Register cleanup variable in the current scope frame for scope-exit cleanup
-            if let Some(ref cleanup_fn_name) = declarator.cleanup_fn {
+            if let Some(ref cleanup_fn_name) = declarator.attrs.cleanup_fn {
                 if let Some(frame) = self.func_mut().scope_stack.last_mut() {
                     frame.cleanup_vars.push((cleanup_fn_name.clone(), alloca));
                 }
@@ -395,7 +395,7 @@ impl Lowerer {
             is_static: true,
             is_extern: false,
             is_common: false,
-            section: declarator.section.clone(),
+            section: declarator.attrs.section.clone(),
             is_weak: false,
             visibility: None,
             has_explicit_align,

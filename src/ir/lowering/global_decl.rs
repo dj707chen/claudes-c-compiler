@@ -88,7 +88,7 @@ impl Lowerer {
 
             // Global register variable: `register <type> <name> __asm__("reg")`
             // No storage is emitted; reads/writes map directly to the named register.
-            if let Some(ref reg_name) = declarator.asm_register {
+            if let Some(ref reg_name) = declarator.attrs.asm_register {
                 let da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
                 let mut ginfo = GlobalInfo::from_analysis(&da);
                 ginfo.asm_register = Some(reg_name.clone());
@@ -119,8 +119,8 @@ impl Lowerer {
                         is_extern: true,
                         is_common: false,
                         section: None,
-                        is_weak: declarator.is_weak,
-                        visibility: declarator.visibility.clone(),
+                        is_weak: declarator.attrs.is_weak,
+                        visibility: declarator.attrs.visibility.clone(),
                         has_explicit_align: false,
                         is_const: false,
                         is_used: false,
@@ -144,7 +144,7 @@ impl Lowerer {
                         // Even though we skip re-emitting, propagate __weak
                         // to the already-emitted global if this redeclaration
                         // carries the weak attribute.
-                        if declarator.is_weak {
+                        if declarator.attrs.is_weak {
                             for g in &mut self.module.globals {
                                 if g.name == declarator.name {
                                     g.is_weak = true;
@@ -277,12 +277,12 @@ impl Lowerer {
                 is_static,
                 is_extern: is_extern_decl,
                 is_common: decl.is_common,
-                section: declarator.section.clone(),
-                is_weak: declarator.is_weak || prior_was_weak,
-                visibility: declarator.visibility.clone(),
+                section: declarator.attrs.section.clone(),
+                is_weak: declarator.attrs.is_weak || prior_was_weak,
+                visibility: declarator.attrs.visibility.clone(),
                 has_explicit_align,
                 is_const: var_is_const,
-                is_used: declarator.is_used,
+                is_used: declarator.attrs.is_used,
                 is_thread_local: decl.is_thread_local,
             });
         }
