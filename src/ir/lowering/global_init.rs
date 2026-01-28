@@ -416,6 +416,68 @@ impl Lowerer {
                         return GlobalInit::Compound(elements);
                     }
 
+                    // Array of vectors: flatten each vector element's scalars.
+                    // e.g., SV s[] = { (SV){1,2,3,4}, (SV){5,6,7,8} } with SV = int vector_size(16)
+                    // produces 8 I32 values: [1, 2, 3, 4, 5, 6, 7, 8].
+                    {
+                        let ctype = self.type_spec_to_ctype(_type_spec);
+                        if let Some((elem_ct, vec_num_elems)) = ctype.vector_info() {
+                            let elem_ir_ty = IrType::from_ctype(&elem_ct);
+                            let total_scalars = num_elems * vec_num_elems;
+                            let mut values = vec![self.zero_const(elem_ir_ty); total_scalars];
+                            for (arr_idx, item) in items.iter().enumerate() {
+                                if arr_idx >= num_elems { break; }
+                                let base_offset = arr_idx * vec_num_elems;
+                                match &item.init {
+                                    Initializer::Expr(expr) => {
+                                        // Handle compound literal: (SV){1,2,3,4}
+                                        if let Expr::CompoundLiteral(_ts, ref cl_init, _) = expr {
+                                            if let Initializer::List(sub_items) = cl_init.as_ref() {
+                                                for (vi, sub) in sub_items.iter().enumerate() {
+                                                    if vi >= vec_num_elems { break; }
+                                                    if let Initializer::Expr(ref sub_expr) = sub.init {
+                                                        if let Some(val) = self.eval_const_expr(sub_expr) {
+                                                            let expr_ty = self.get_expr_type(sub_expr);
+                                                            values[base_offset + vi] = self.coerce_const_to_type_with_src(val, elem_ir_ty, expr_ty);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } else if let Expr::Cast(ref _cast_type, ref inner, _) = expr {
+                                            // Handle cast-wrapped compound literal: (SV)(SV){1,2,3,4}
+                                            if let Expr::CompoundLiteral(_ts, ref cl_init, _) = inner.as_ref() {
+                                                if let Initializer::List(sub_items) = cl_init.as_ref() {
+                                                    for (vi, sub) in sub_items.iter().enumerate() {
+                                                        if vi >= vec_num_elems { break; }
+                                                        if let Initializer::Expr(ref sub_expr) = sub.init {
+                                                            if let Some(val) = self.eval_const_expr(sub_expr) {
+                                                                let expr_ty = self.get_expr_type(sub_expr);
+                                                                values[base_offset + vi] = self.coerce_const_to_type_with_src(val, elem_ir_ty, expr_ty);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Initializer::List(sub_items) => {
+                                        // Handle brace-enclosed: { {1,2,3,4}, {5,6,7,8} }
+                                        for (vi, sub) in sub_items.iter().enumerate() {
+                                            if vi >= vec_num_elems { break; }
+                                            if let Initializer::Expr(ref sub_expr) = sub.init {
+                                                if let Some(val) = self.eval_const_expr(sub_expr) {
+                                                    let expr_ty = self.get_expr_type(sub_expr);
+                                                    values[base_offset + vi] = self.coerce_const_to_type_with_src(val, elem_ir_ty, expr_ty);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            return GlobalInit::Array(values);
+                        }
+                    }
+
                     let zero_val = self.typed_zero_const(base_ty, is_long_double_target);
                     let mut values = vec![zero_val; num_elems];
                     // For multi-dim arrays, flatten nested init lists
@@ -479,6 +541,27 @@ impl Lowerer {
                 // Struct/union initializer list: emit field-by-field constants
                 if let Some(ref layout) = struct_layout {
                     return self.lower_struct_global_init(items, layout);
+                }
+
+                // Vector initializer list: emit each element as a constant.
+                // Vectors are aggregates (not arrays/structs), so they need special handling
+                // before the "scalar with braces" path which would only emit the first element.
+                {
+                    let ctype = self.type_spec_to_ctype(_type_spec);
+                    if let Some((elem_ct, num_elems)) = ctype.vector_info() {
+                        let elem_ir_ty = IrType::from_ctype(&elem_ct);
+                        let mut values = vec![self.zero_const(elem_ir_ty); num_elems];
+                        for (idx, item) in items.iter().enumerate() {
+                            if idx >= num_elems { break; }
+                            if let Initializer::Expr(expr) = &item.init {
+                                if let Some(val) = self.eval_const_expr(expr) {
+                                    let expr_ty = self.get_expr_type(expr);
+                                    values[idx] = self.coerce_const_to_type_with_src(val, elem_ir_ty, expr_ty);
+                                }
+                            }
+                        }
+                        return GlobalInit::Array(values);
+                    }
                 }
 
                 // Scalar with braces: int x = { 1 }; or int x = {{{1}}};

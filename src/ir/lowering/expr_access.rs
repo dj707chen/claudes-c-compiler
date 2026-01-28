@@ -725,7 +725,7 @@ impl Lowerer {
         let pointee_is_no_load = |ct: &CType| -> bool {
             if let CType::Pointer(ref pointee, _) = ct {
                 matches!(pointee.as_ref(),
-                    CType::Array(_, _) | CType::Struct(_) | CType::Union(_))
+                    CType::Array(_, _) | CType::Struct(_) | CType::Union(_) | CType::Vector(_, _))
                     || pointee.is_complex()
             } else {
                 false
@@ -756,7 +756,7 @@ impl Lowerer {
             // is an aggregate — so no Load is needed, just return the base address.
             if let CType::Array(ref elem, _) = inner_ct {
                 if elem.is_complex()
-                    || matches!(elem.as_ref(), CType::Struct(_) | CType::Union(_) | CType::Array(_, _))
+                    || matches!(elem.as_ref(), CType::Struct(_) | CType::Union(_) | CType::Array(_, _) | CType::Vector(_, _))
                 {
                     return self.lower_expr(inner);
                 }
@@ -783,7 +783,7 @@ impl Lowerer {
         }
         {
             let elem_ct = self.expr_ctype(expr);
-            if elem_ct.is_complex() {
+            if elem_ct.is_complex() || elem_ct.is_vector() {
                 let addr = self.compute_array_element_addr(base, index);
                 return Operand::Value(addr);
             }

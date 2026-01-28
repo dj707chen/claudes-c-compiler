@@ -275,9 +275,37 @@ impl DeclAnalysis {
             IrType::I8
         } else if self.is_struct && matches!(init, GlobalInit::Array(_)) {
             IrType::I8
+        } else if matches!(init, GlobalInit::Array(_)) {
+            // Check if this is a vector type or array of vectors.
+            // Vector globals store element values (e.g., 4x I32 for int vector_size(16)).
+            // Use the element type instead of Ptr so each element is emitted at the
+            // correct width (e.g., .long for I32 instead of .quad for Ptr on 64-bit).
+            if let Some(elem_ir_ty) = self.vector_element_ir_type() {
+                return elem_ir_ty;
+            }
+            self.var_ty
         } else {
             self.var_ty
         }
+    }
+
+    /// Get the IR element type if this is a vector or array-of-vectors type.
+    /// Returns None if this is not a vector-related type.
+    fn vector_element_ir_type(&self) -> Option<IrType> {
+        let ct = self.c_type.as_ref()?;
+        // Direct vector type: CType::Vector(elem, size)
+        if let Some((elem_ct, _)) = ct.vector_info() {
+            return Some(IrType::from_ctype(&elem_ct));
+        }
+        // Array of vectors: CType::Array(Vector(elem, size), count)
+        let mut inner = ct;
+        while let CType::Array(ref elem, _) = inner {
+            inner = elem.as_ref();
+        }
+        if let Some((elem_ct, _)) = inner.vector_info() {
+            return Some(IrType::from_ctype(&elem_ct));
+        }
+        None
     }
 }
 
