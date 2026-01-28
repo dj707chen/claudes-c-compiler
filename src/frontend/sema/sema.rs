@@ -243,7 +243,7 @@ impl SemanticAnalyzer {
         let base_type = self.type_spec_to_ctype(&decl.type_spec);
 
         // Handle typedef declarations: populate TypeContext with typedef info
-        if decl.is_typedef {
+        if decl.is_typedef() {
             for declarator in &decl.declarators {
                 if declarator.name.is_empty() {
                     continue;
@@ -355,9 +355,9 @@ impl SemanticAnalyzer {
                 }
             }
 
-            let storage = if decl.is_extern {
+            let storage = if decl.is_extern() {
                 StorageClass::Extern
-            } else if decl.is_static {
+            } else if decl.is_static() {
                 StorageClass::Static
             } else if is_global {
                 StorageClass::Extern

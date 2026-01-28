@@ -153,21 +153,42 @@ pub struct ParamDecl {
     pub vla_size_exprs: Vec<Box<Expr>>,
 }
 
+/// Bit masks for boolean flags in `Declaration::flags`.
+///
+/// Each flag occupies one bit of a `u16`, matching the pattern used by
+/// `FunctionAttributes` and `DeclAttributes`.  New flags can be added by
+/// defining the next power-of-two constant.
+pub mod decl_flag {
+    /// `static` storage class.
+    pub const STATIC: u16            = 1 << 0;
+    /// `extern` storage class.
+    pub const EXTERN: u16            = 1 << 1;
+    /// `typedef` storage class.
+    pub const TYPEDEF: u16           = 1 << 2;
+    /// `const` type qualifier.
+    pub const CONST: u16             = 1 << 3;
+    /// `volatile` type qualifier.
+    pub const VOLATILE: u16          = 1 << 4;
+    /// GCC `-fcommon` tentative definition (no initialiser, no `extern`).
+    pub const COMMON: u16            = 1 << 5;
+    /// `_Thread_local` or `__thread` storage class.
+    pub const THREAD_LOCAL: u16      = 1 << 6;
+    /// `__attribute__((transparent_union))` applied to a typedef.
+    pub const TRANSPARENT_UNION: u16 = 1 << 7;
+}
+
 /// A variable/type declaration.
-#[derive(Debug, Clone)]
+///
+/// Boolean storage-class / qualifier / attribute flags are stored as a packed
+/// bitfield (`flags`) for memory efficiency — 8 booleans collapse from 8 bytes
+/// into 2 bytes.  Accessor methods provide the same API as the old struct
+/// fields.
+#[derive(Clone)]
 pub struct Declaration {
     pub type_spec: TypeSpecifier,
     pub declarators: Vec<InitDeclarator>,
-    pub is_static: bool,
-    pub is_extern: bool,
-    pub is_typedef: bool,
-    pub is_const: bool,
-    pub is_volatile: bool,
-    pub is_common: bool,
-    /// Whether _Thread_local or __thread storage class was specified.
-    pub is_thread_local: bool,
-    /// Whether __attribute__((transparent_union)) was applied to this typedef.
-    pub is_transparent_union: bool,
+    /// Packed boolean flags — see `decl_flag` constants.
+    flags: u16,
     /// Alignment override from _Alignas(N) or __attribute__((aligned(N))).
     pub alignment: Option<usize>,
     /// Type specifier from _Alignas(type) that the lowerer should resolve for alignment.
@@ -189,26 +210,93 @@ pub struct Declaration {
 }
 
 impl Declaration {
+    // --- flag getters ---
+
+    #[inline] pub fn is_static(&self) -> bool            { self.flags & decl_flag::STATIC != 0 }
+    #[inline] pub fn is_extern(&self) -> bool             { self.flags & decl_flag::EXTERN != 0 }
+    #[inline] pub fn is_typedef(&self) -> bool             { self.flags & decl_flag::TYPEDEF != 0 }
+    #[inline] pub fn is_const(&self) -> bool              { self.flags & decl_flag::CONST != 0 }
+    #[inline] pub fn is_volatile(&self) -> bool           { self.flags & decl_flag::VOLATILE != 0 }
+    #[inline] pub fn is_common(&self) -> bool             { self.flags & decl_flag::COMMON != 0 }
+    #[inline] pub fn is_thread_local(&self) -> bool       { self.flags & decl_flag::THREAD_LOCAL != 0 }
+    #[inline] pub fn is_transparent_union(&self) -> bool  { self.flags & decl_flag::TRANSPARENT_UNION != 0 }
+
+    // --- flag setters ---
+
+    #[inline] pub fn set_static(&mut self, v: bool)            { self.set_flag(decl_flag::STATIC, v) }
+    #[inline] pub fn set_extern(&mut self, v: bool)             { self.set_flag(decl_flag::EXTERN, v) }
+    #[inline] pub fn set_typedef(&mut self, v: bool)             { self.set_flag(decl_flag::TYPEDEF, v) }
+    #[inline] pub fn set_const(&mut self, v: bool)              { self.set_flag(decl_flag::CONST, v) }
+    #[inline] pub fn set_volatile(&mut self, v: bool)           { self.set_flag(decl_flag::VOLATILE, v) }
+    #[inline] pub fn set_common(&mut self, v: bool)             { self.set_flag(decl_flag::COMMON, v) }
+    #[inline] pub fn set_thread_local(&mut self, v: bool)       { self.set_flag(decl_flag::THREAD_LOCAL, v) }
+    #[inline] pub fn set_transparent_union(&mut self, v: bool)  { self.set_flag(decl_flag::TRANSPARENT_UNION, v) }
+
+    #[inline]
+    fn set_flag(&mut self, mask: u16, v: bool) {
+        if v { self.flags |= mask; } else { self.flags &= !mask; }
+    }
+
+    /// Create a `Declaration` with all flags cleared.  Non-boolean fields must
+    /// be supplied; boolean qualifiers are set afterwards via the `set_*` methods.
+    pub fn new(
+        type_spec: TypeSpecifier,
+        declarators: Vec<InitDeclarator>,
+        alignment: Option<usize>,
+        alignas_type: Option<TypeSpecifier>,
+        alignment_sizeof_type: Option<TypeSpecifier>,
+        address_space: AddressSpace,
+        vector_size: Option<usize>,
+        span: Span,
+    ) -> Self {
+        Self {
+            type_spec,
+            declarators,
+            flags: 0,
+            alignment,
+            alignas_type,
+            alignment_sizeof_type,
+            address_space,
+            vector_size,
+            span,
+        }
+    }
+
     /// Create an empty declaration (used for skipped constructs like asm directives).
     pub fn empty() -> Self {
-        Self {
-            type_spec: TypeSpecifier::Void,
-            declarators: Vec::new(),
-            is_static: false,
-            is_extern: false,
-            is_typedef: false,
-            is_const: false,
-            is_volatile: false,
-            is_common: false,
-            is_thread_local: false,
-            is_transparent_union: false,
-            alignment: None,
-            alignas_type: None,
-            alignment_sizeof_type: None,
-            address_space: AddressSpace::Default,
-            vector_size: None,
-            span: Span::dummy(),
-        }
+        Self::new(
+            TypeSpecifier::Void,
+            Vec::new(),
+            None,
+            None,
+            None,
+            AddressSpace::Default,
+            None,
+            Span::dummy(),
+        )
+    }
+}
+
+impl std::fmt::Debug for Declaration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Declaration")
+            .field("type_spec", &self.type_spec)
+            .field("declarators", &self.declarators)
+            .field("is_static", &self.is_static())
+            .field("is_extern", &self.is_extern())
+            .field("is_typedef", &self.is_typedef())
+            .field("is_const", &self.is_const())
+            .field("is_volatile", &self.is_volatile())
+            .field("is_common", &self.is_common())
+            .field("is_thread_local", &self.is_thread_local())
+            .field("is_transparent_union", &self.is_transparent_union())
+            .field("alignment", &self.alignment)
+            .field("alignas_type", &self.alignas_type)
+            .field("alignment_sizeof_type", &self.alignment_sizeof_type)
+            .field("address_space", &self.address_space)
+            .field("vector_size", &self.vector_size)
+            .field("span", &self.span)
+            .finish()
     }
 }
 

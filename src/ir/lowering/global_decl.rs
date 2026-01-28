@@ -23,7 +23,7 @@ impl Lowerer {
         self.collect_enum_constants(&decl.type_spec);
 
         // If this is a typedef, register the mapping and skip variable emission
-        if decl.is_typedef {
+        if decl.is_typedef() {
             // Check if this typedef aliases an enum type (directly or transitively).
             // Used to treat enum-typedef bitfields as unsigned (GCC compat).
             let is_enum_type = self.is_enum_type_spec(&decl.type_spec);
@@ -56,7 +56,7 @@ impl Lowerer {
                 }
             }
             // Mark transparent_union on the union's StructLayout
-            if decl.is_transparent_union {
+            if decl.is_transparent_union() {
                 self.mark_transparent_union(decl);
             }
             return;
@@ -101,7 +101,7 @@ impl Lowerer {
             }
 
             // extern without initializer: track the type but don't emit a .bss entry
-            if decl.is_extern && declarator.init.is_none() {
+            if decl.is_extern() && declarator.init.is_none() {
                 if !self.globals.contains_key(&declarator.name) {
                     let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
                     if let Some(vs) = decl.vector_size {
@@ -113,7 +113,7 @@ impl Lowerer {
                 }
                 // For extern TLS variables, we still need an IrGlobal entry so the
                 // codegen layer knows to use TLS access patterns for this symbol.
-                if decl.is_thread_local && !self.emitted_global_names.contains(&declarator.name) {
+                if decl.is_thread_local() && !self.emitted_global_names.contains(&declarator.name) {
                     let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
                     if let Some(vs) = decl.vector_size {
                         da.apply_vector_size(vs);
@@ -200,7 +200,7 @@ impl Lowerer {
                 da.actual_alloc_size = c_size.max(da.var_ty.size());
             }
 
-            let is_extern_decl = decl.is_extern && declarator.init.is_none();
+            let is_extern_decl = decl.is_extern() && declarator.init.is_none();
 
             // Register the global before evaluating its initializer so that
             // self-referential initializers (e.g., `struct Node n = {&n}`)
@@ -262,7 +262,7 @@ impl Lowerer {
                 }
             }
 
-            let is_static = decl.is_static;
+            let is_static = decl.is_static();
 
             let global_ty = da.resolve_global_ty(&init);
 
@@ -280,7 +280,7 @@ impl Lowerer {
             // Only non-pointer variables get is_const from the declaration.
             // Our parser doesn't track `* const` (pointer-to-const qualifier), so for
             // pointers we conservatively mark as non-const.
-            let var_is_const = decl.is_const && !da.is_pointer
+            let var_is_const = decl.is_const() && !da.is_pointer
                 && !da.is_array_of_pointers && !da.is_array_of_func_ptrs;
 
             self.emitted_global_names.insert(declarator.name.clone());
@@ -292,14 +292,14 @@ impl Lowerer {
                 init,
                 is_static,
                 is_extern: is_extern_decl,
-                is_common: decl.is_common,
+                is_common: decl.is_common(),
                 section: declarator.attrs.section.clone(),
                 is_weak: declarator.attrs.is_weak() || prior_was_weak,
                 visibility: declarator.attrs.visibility.clone(),
                 has_explicit_align,
                 is_const: var_is_const,
                 is_used: declarator.attrs.is_used(),
-                is_thread_local: decl.is_thread_local,
+                is_thread_local: decl.is_thread_local(),
             });
         }
     }

@@ -97,7 +97,7 @@ impl Lowerer {
 
         self.register_struct_type(type_spec);
 
-        if decl.is_typedef {
+        if decl.is_typedef() {
             for declarator in &decl.declarators {
                 if !declarator.name.is_empty() {
                     if let Some(fti) = extract_fptr_typedef_info(type_spec, &declarator.derived) {
@@ -145,7 +145,7 @@ impl Lowerer {
             }
 
             // Extern declarations reference a global symbol, not a local variable
-            if decl.is_extern {
+            if decl.is_extern() {
                 if self.lower_extern_decl(decl, declarator) {
                     continue;
                 }
@@ -181,7 +181,7 @@ impl Lowerer {
                 None
             };
 
-            if decl.is_static {
+            if decl.is_static() {
                 // For local static arrays-of-pointers, clear struct_layout so
                 // lower_global_init uses the pointer-array path (Compound with
                 // relocations) instead of the struct byte-serialization path.
@@ -255,10 +255,10 @@ impl Lowerer {
                     if da.is_array || da.is_struct || is_complex { IrType::Ptr } else { da.var_ty },
                     da.actual_alloc_size,
                     explicit_align,
-                    decl.is_volatile,
+                    decl.is_volatile(),
                 );
             }
-            let mut local_info = LocalInfo::from_analysis(&da, alloca, decl.is_const);
+            let mut local_info = LocalInfo::from_analysis(&da, alloca, decl.is_const());
             local_info.var.address_space = decl.address_space;
             // Store explicit alignment so _Alignof(var) returns the correct
             // alignment per C11 6.2.8p3.
@@ -300,7 +300,7 @@ impl Lowerer {
                 match init {
                     Initializer::Expr(expr) => {
                         // Track const values before lowering (needed for VLA sizes)
-                        if decl.is_const && !da.is_pointer && !da.is_array && !da.is_struct && !is_complex {
+                        if decl.is_const() && !da.is_pointer && !da.is_array && !da.is_struct && !is_complex {
                             if let Some(const_val) = self.eval_const_expr(expr) {
                                 if let Some(ival) = self.const_to_i64(&const_val) {
                                     self.insert_const_local_scoped(declarator.name.clone(), ival);
@@ -396,7 +396,7 @@ impl Lowerer {
         let global_ty = da.resolve_global_ty(&init);
 
         // For pointer variables, decl.is_const refers to the pointee type, not the variable.
-        let var_is_const = decl.is_const && !da.is_pointer
+        let var_is_const = decl.is_const() && !da.is_pointer
             && !da.is_array_of_pointers && !da.is_array_of_func_ptrs;
 
         self.emitted_global_names.insert(static_name.clone());
@@ -415,7 +415,7 @@ impl Lowerer {
             has_explicit_align,
             is_const: var_is_const,
             is_used: false,
-            is_thread_local: decl.is_thread_local,
+            is_thread_local: decl.is_thread_local(),
         });
 
         // Update the pre-registered global info with explicit alignment if present
@@ -427,7 +427,7 @@ impl Lowerer {
 
         // Store type info in locals (with static_global_name set so each use site
         // emits a fresh GlobalAddr in its own basic block, avoiding unreachable-block issues).
-        let mut local_info = LocalInfo::for_static(da, static_name, decl.is_const);
+        let mut local_info = LocalInfo::for_static(da, static_name, decl.is_const());
         if let Some(ea) = explicit_align {
             local_info.var.explicit_alignment = Some(ea);
         }

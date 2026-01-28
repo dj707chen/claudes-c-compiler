@@ -399,7 +399,7 @@ impl Lowerer {
         // so that register_function_meta can exclude them from param_struct_sizes.
         for decl in &tu.decls {
             if let ExternalDecl::Declaration(decl) = decl {
-                if decl.is_transparent_union {
+                if decl.is_transparent_union() {
                     self.mark_transparent_union(decl);
                 }
             }
@@ -411,7 +411,7 @@ impl Lowerer {
         // so that function return types using vector typedefs are correctly resolved.
         for decl in &tu.decls {
             if let ExternalDecl::Declaration(decl) = decl {
-                if decl.is_typedef {
+                if decl.is_typedef() {
                     if let Some(vs) = decl.vector_size {
                         for declarator in &decl.declarators {
                             if !declarator.name.is_empty() {
@@ -472,7 +472,7 @@ impl Lowerer {
                     if let Some((params, variadic)) = func_info {
                         self.register_function_meta(
                             &declarator.name, &decl.type_spec, ptr_count,
-                            &params, variadic, decl.is_static, false,
+                            &params, variadic, decl.is_static(), false,
                         );
                     } else if declarator.derived.is_empty() {
                         // Check if the base type is a function typedef
@@ -545,7 +545,7 @@ impl Lowerer {
                         // .weak/.hidden directives. This matters when #pragma GCC visibility
                         // push(hidden) is active (e.g., kernel EFI stub) because it would
                         // otherwise emit .hidden for thousands of typedef names.
-                        if !decl.is_typedef
+                        if !decl.is_typedef()
                             && declarator.attrs.alias_target.is_none()
                             && !declarator.name.is_empty()
                             && (declarator.attrs.is_weak() || declarator.attrs.visibility.is_some())

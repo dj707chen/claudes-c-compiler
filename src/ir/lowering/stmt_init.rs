@@ -425,7 +425,7 @@ impl Lowerer {
     fn lower_scalar_init_expr(&mut self, expr: &Expr, alloca: Value, da: &DeclAnalysis, decl: &Declaration) {
         // Track const-qualified integer variable values for compile-time
         // array size evaluation (e.g., const int len = 5000; int arr[len];)
-        if decl.is_const && !da.is_pointer && !da.is_array && !da.is_struct {
+        if decl.is_const() && !da.is_pointer && !da.is_array && !da.is_struct {
             if let Some(const_val) = self.eval_const_expr(expr) {
                 if let Some(_ival) = self.const_to_i64(&const_val) {
                     // Use declarator name from the declaration context

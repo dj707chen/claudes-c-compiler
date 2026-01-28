@@ -85,24 +85,21 @@ impl Parser {
         // Bare type with no declarator (e.g., struct definition)
         if self.at_eof() || matches!(self.peek(), TokenKind::Semicolon) {
             self.consume_if(&TokenKind::Semicolon);
-            return Some(ExternalDecl::Declaration(Declaration {
+            let mut d = Declaration::new(
                 type_spec,
-                declarators: Vec::new(),
-                is_static: self.attrs.parsing_static,
-                is_extern: self.attrs.parsing_extern,
-                is_typedef: self.attrs.parsing_typedef,
-                is_const: self.attrs.parsing_const,
-                is_volatile: self.attrs.parsing_volatile,
-                is_common: false,
-                is_thread_local: self.attrs.parsing_thread_local,
-                is_transparent_union: false,
-                alignment: None,
-                alignas_type: None,
-                alignment_sizeof_type: None,
-                address_space: self.attrs.parsing_address_space,
-                vector_size: self.attrs.parsing_vector_size.take(),
-                span: start,
-            }));
+                Vec::new(),
+                None, None, None,
+                self.attrs.parsing_address_space,
+                self.attrs.parsing_vector_size.take(),
+                start,
+            );
+            d.set_static(self.attrs.parsing_static);
+            d.set_extern(self.attrs.parsing_extern);
+            d.set_typedef(self.attrs.parsing_typedef);
+            d.set_const(self.attrs.parsing_const);
+            d.set_volatile(self.attrs.parsing_volatile);
+            d.set_thread_local(self.attrs.parsing_thread_local);
+            return Some(ExternalDecl::Declaration(d));
         }
 
         // Handle post-type storage class specifiers (C allows "struct S typedef name;")
@@ -557,24 +554,23 @@ impl Parser {
         self.register_typedefs(&declarators);
 
         self.expect(&TokenKind::Semicolon);
-        Some(ExternalDecl::Declaration(Declaration {
+        let mut d = Declaration::new(
             type_spec,
             declarators,
-            is_static: self.attrs.parsing_static,
-            is_extern: self.attrs.parsing_extern,
-            is_typedef,
-            is_const: self.attrs.parsing_const,
-            is_volatile: self.attrs.parsing_volatile,
-            is_common,
-            is_thread_local: self.attrs.parsing_thread_local,
-            is_transparent_union,
-            alignment,
-            alignas_type,
-            alignment_sizeof_type,
-            address_space: self.attrs.parsing_address_space,
-            vector_size: self.attrs.parsing_vector_size.take(),
-            span: start,
-        }))
+            alignment, alignas_type, alignment_sizeof_type,
+            self.attrs.parsing_address_space,
+            self.attrs.parsing_vector_size.take(),
+            start,
+        );
+        d.set_static(self.attrs.parsing_static);
+        d.set_extern(self.attrs.parsing_extern);
+        d.set_typedef(is_typedef);
+        d.set_const(self.attrs.parsing_const);
+        d.set_volatile(self.attrs.parsing_volatile);
+        d.set_common(is_common);
+        d.set_thread_local(self.attrs.parsing_thread_local);
+        d.set_transparent_union(is_transparent_union);
+        Some(ExternalDecl::Declaration(d))
     }
 
     pub(super) fn parse_local_declaration(&mut self) -> Option<Declaration> {
@@ -604,7 +600,21 @@ impl Parser {
         // Handle bare type with semicolon (struct/enum/union definition)
         if matches!(self.peek(), TokenKind::Semicolon) {
             self.advance();
-            return Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef: self.attrs.parsing_typedef, is_const: self.attrs.parsing_const, is_volatile: self.attrs.parsing_volatile, is_common: false, is_thread_local: self.attrs.parsing_thread_local, is_transparent_union: false, alignment: None, alignas_type: None, alignment_sizeof_type: None, address_space: self.attrs.parsing_address_space, vector_size: self.attrs.parsing_vector_size.take(), span: start });
+            let mut d = Declaration::new(
+                type_spec,
+                declarators,
+                None, None, None,
+                self.attrs.parsing_address_space,
+                self.attrs.parsing_vector_size.take(),
+                start,
+            );
+            d.set_static(is_static);
+            d.set_extern(is_extern);
+            d.set_typedef(self.attrs.parsing_typedef);
+            d.set_const(self.attrs.parsing_const);
+            d.set_volatile(self.attrs.parsing_volatile);
+            d.set_thread_local(self.attrs.parsing_thread_local);
+            return Some(d);
         }
 
         let mut mode_kind: Option<ModeKind> = None;
@@ -681,7 +691,22 @@ impl Parser {
         let alignment_sizeof_type = self.attrs.parsed_alignment_sizeof_type.take();
         let is_transparent_union = self.attrs.parsing_transparent_union;
         self.attrs.parsing_transparent_union = false;
-        Some(Declaration { type_spec, declarators, is_static, is_extern, is_typedef, is_const: self.attrs.parsing_const, is_volatile: self.attrs.parsing_volatile, is_common: false, is_thread_local: self.attrs.parsing_thread_local, is_transparent_union, alignment, alignas_type, alignment_sizeof_type, address_space: self.attrs.parsing_address_space, vector_size: self.attrs.parsing_vector_size.take(), span: start })
+        let mut d = Declaration::new(
+            type_spec,
+            declarators,
+            alignment, alignas_type, alignment_sizeof_type,
+            self.attrs.parsing_address_space,
+            self.attrs.parsing_vector_size.take(),
+            start,
+        );
+        d.set_static(is_static);
+        d.set_extern(is_extern);
+        d.set_typedef(is_typedef);
+        d.set_const(self.attrs.parsing_const);
+        d.set_volatile(self.attrs.parsing_volatile);
+        d.set_thread_local(self.attrs.parsing_thread_local);
+        d.set_transparent_union(is_transparent_union);
+        Some(d)
     }
 
     /// Parse an initializer: either a braced initializer list or a single expression.
