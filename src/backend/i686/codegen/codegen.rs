@@ -1932,13 +1932,12 @@ impl ArchCodegen for I686Codegen {
     // --- Global address ---
 
     fn emit_global_addr(&mut self, dest: &Value, name: &str) {
-        if self.state.pic_mode {
-            // PIC: use GOT-relative addressing
-            // TODO: proper PIC support for i686
-            emit!(self.state, "    leal {}@GOTOFF(%ebx), %eax", name);
-        } else {
-            emit!(self.state, "    movl ${}, %eax", name);
-        }
+        // Always use absolute addressing on i686.
+        // Proper i686 PIC requires setting up %ebx as the GOT base register
+        // via __x86.get_pc_thunk, which is not yet implemented. Since we link
+        // with -no-pie, absolute addressing works correctly — the linker resolves
+        // all relocations at link time.
+        emit!(self.state, "    movl ${}, %eax", name);
         self.state.reg_cache.invalidate_acc();
         self.store_eax_to(dest);
     }

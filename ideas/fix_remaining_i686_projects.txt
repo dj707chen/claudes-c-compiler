@@ -1,14 +1,22 @@
 Fix remaining i686 project failures
 =====================================
-Date: 2026-01-28 (updated after Copy I64 const wide marking fix)
+Date: 2026-01-28 (updated after Redis i686 fix + Copy I64 const wide marking fix)
 
 Current status:
-- Unit tests: ~99.7% pass (10% sample: 2728/2737)
+- Unit tests: ~99.8% pass (10% sample: 2731/2737)
 - Projects passing: 7/12 (zlib, lua, libpng, jq, libjpeg, libuv, tcc*)
   * tcc build succeeds; test suite fails due to missing i686 CRT/headers (same as GCC)
 - Projects failing: libsodium, mquickjs, mbedtls, libffi, musl
 
-Fixed in latest round (Copy I64 const wide marking fix):
+Fixed in latest round (Redis i686 fix):
+- PIC global address: emit_global_addr used GOT-relative %ebx addressing without
+  setting up %ebx; switched to absolute addressing since we link with -no-pie
+- mem2reg constant narrowing: I64 constants stored into 32-bit allocas caused
+  phi-elimination to use 64-bit copies, leaving upper 32 bits uninitialized
+- Added IrConst::narrowed_to() to narrow constants to match alloca type in mem2reg
+- Redis: now fully passes on i686 (build + SET/GET + cli)
+
+Previously fixed (Copy I64 const wide marking fix):
 - tcc BUILD now succeeds (was failing in alloca86_64.S assembly)
   - Root cause: IrConst::I64 is the universal container for ALL integer constants,
     but codegen was marking Copy from ANY IrConst::I64 as "wide" (64-bit) on i686.

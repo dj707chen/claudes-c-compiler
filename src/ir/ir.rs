@@ -1084,6 +1084,38 @@ impl IrConst {
         }
     }
 
+    /// Narrow a constant to match a target IR type.
+    /// If the constant is wider than needed (e.g., I64 for an I32 slot),
+    /// truncate it to the correct width. This preserves the numeric value
+    /// for values that fit, and truncates for values that don't.
+    pub fn narrowed_to(self, ty: IrType) -> IrConst {
+        match (&self, ty) {
+            // Already the right type or narrower — return as-is
+            (IrConst::I8(_), IrType::I8 | IrType::U8) => self,
+            (IrConst::I16(_), IrType::I16 | IrType::U16) => self,
+            (IrConst::I32(_), IrType::I32) => self,
+            (IrConst::F32(_), IrType::F32) => self,
+            (IrConst::F64(_), IrType::F64) => self,
+            // Wide integer constant being stored to a narrower slot
+            (IrConst::I64(v), IrType::I8 | IrType::U8) => IrConst::I8(*v as i8),
+            (IrConst::I64(v), IrType::I16 | IrType::U16) => IrConst::I16(*v as i16),
+            (IrConst::I64(v), IrType::I32) => IrConst::I32(*v as i32),
+            (IrConst::I64(v), IrType::U32) => IrConst::I32(*v as i32),
+            (IrConst::I32(v), IrType::I8 | IrType::U8) => IrConst::I8(*v as i8),
+            (IrConst::I32(v), IrType::I16 | IrType::U16) => IrConst::I16(*v as i16),
+            // Pointer types on 32-bit: I64 -> I32
+            (IrConst::I64(v), IrType::Ptr) => {
+                if crate::common::types::target_is_32bit() {
+                    IrConst::I32(*v as i32)
+                } else {
+                    self
+                }
+            }
+            // Everything else: keep as-is (F64, I64, I128, etc.)
+            _ => self,
+        }
+    }
+
     /// Get the one constant for a given IR type.
     pub fn one(ty: IrType) -> IrConst {
         match ty {

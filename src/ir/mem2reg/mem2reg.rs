@@ -492,8 +492,19 @@ fn rename_block(
             }
             Instruction::Store { val, ptr, ty, seg_override } => {
                 if let Some(&alloca_idx) = alloca_to_idx.get(&ptr.0) {
-                    // Push the stored value onto the def stack
-                    def_stacks[alloca_idx].push(val.clone());
+                    // Push the stored value onto the def stack.
+                    // Narrow constants to match the alloca type: the IR lowering
+                    // always produces I64 constants for integer literals, but on
+                    // 32-bit targets this causes phi copies to use 64-bit
+                    // operations for 32-bit values, leaving high bits
+                    // uninitialized in some paths.
+                    let narrowed_val = match val {
+                        Operand::Const(c) => {
+                            Operand::Const(c.narrowed_to(alloca_infos[alloca_idx].ty))
+                        }
+                        other => other,
+                    };
+                    def_stacks[alloca_idx].push(narrowed_val);
                     // Remove the store (it's now represented by the SSA def)
                     // (span is dropped along with the instruction)
                 } else {
