@@ -1,0 +1,22 @@
+Fix i686 bitfield storage unit alignment
+=========================================
+Status: in_progress (2026-01-28)
+
+Problem:
+On i686, unsigned long long has sizeof=8 but alignment=4.
+The bitfield storage unit offset computation in StructLayout::for_struct_with_packing
+uses sizeof(type) to compute the storage unit alignment mask:
+    field_storage_offset = ((placed_abs_bit / 8) as usize) & !(field_size - 1)
+
+This rounds to 8-byte boundaries, but on i686 long long is only 4-byte aligned.
+So a long long bitfield at byte offset 4 gets storage_offset=0 instead of 4,
+causing the struct end to be computed as 0+8=8 instead of 4+8=12.
+
+This affects ~25 unit tests in the compiler_suite_0013_* series (struct padding tests
+with zero-width bitfields followed by long long bitfields).
+
+Fix:
+Change the storage unit alignment mask to use field_align (ABI alignment) instead of
+field_size (sizeof). On x86-64 where sizeof == align for long long (both 8), this
+makes no difference. On i686 where sizeof=8 but align=4, it correctly uses 4-byte
+alignment for the storage unit.
