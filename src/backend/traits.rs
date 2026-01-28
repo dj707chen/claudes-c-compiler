@@ -18,6 +18,19 @@ use super::state::{CodegenState, SlotAddr, StackSlot};
 use super::cast::{FloatOp, classify_float_binop};
 use super::generation::is_i128_type;
 
+/// Minimum number of switch cases required to consider a jump table.
+/// Fewer cases are better served by a linear compare-and-branch chain.
+const MIN_JUMP_TABLE_CASES: usize = 4;
+
+/// Maximum number of entries in a generated jump table.
+/// Tables larger than this waste too much memory for sparse switches.
+const MAX_JUMP_TABLE_RANGE: usize = 4096;
+
+/// Minimum density percentage (cases * 100 / range) for jump table eligibility.
+/// Below this threshold, the table would be mostly empty and a linear chain
+/// of compare-and-branch instructions is more efficient.
+const MIN_JUMP_TABLE_DENSITY_PERCENT: usize = 40;
+
 /// Trait that each architecture implements to provide its specific code generation.
 ///
 /// The shared framework calls these methods during instruction dispatch.
@@ -966,12 +979,11 @@ pub trait ArchCodegen {
         // Check density for jump table eligibility (disabled by -fno-jump-tables)
         let use_jump_table = if self.state_ref().no_jump_tables {
             false
-        } else if cases.len() >= 4 {
+        } else if cases.len() >= MIN_JUMP_TABLE_CASES {
             let min_val = cases.iter().map(|&(v, _)| v).min().unwrap();
             let max_val = cases.iter().map(|&(v, _)| v).max().unwrap();
             let range = (max_val - min_val + 1) as usize;
-            // Dense enough? (density > 40% and table size reasonable)
-            range <= 4096 && cases.len() * 100 / range >= 40
+            range <= MAX_JUMP_TABLE_RANGE && cases.len() * 100 / range >= MIN_JUMP_TABLE_DENSITY_PERCENT
         } else {
             false
         };

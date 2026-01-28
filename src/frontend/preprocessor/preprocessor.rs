@@ -14,6 +14,11 @@ use super::builtin_macros::define_builtin_macros;
 use super::utils::{is_ident_start, is_ident_cont};
 use super::text_processing::{strip_line_comment, split_first_word};
 
+/// Maximum number of newlines to accumulate while joining lines for unbalanced
+/// parentheses in macro arguments. Prevents runaway accumulation when a source
+/// file has a genuinely unbalanced parenthesis.
+const MAX_PENDING_NEWLINES: usize = 200;
+
 pub struct Preprocessor {
     pub(super) macros: MacroTable,
     conditionals: ConditionalStack,
@@ -299,7 +304,7 @@ impl Preprocessor {
 
             if needs_more {
                 // Was accumulating for unbalanced parens
-                if !Self::has_unbalanced_parens(pending_line) || *pending_newlines > 200 {
+                if !Self::has_unbalanced_parens(pending_line) || *pending_newlines > MAX_PENDING_NEWLINES {
                     let expanded = self.macros.expand_line(pending_line);
                     output.push_str(&expanded);
                     output.push('\n');
@@ -312,7 +317,7 @@ impl Preprocessor {
             } else {
                 // Was accumulating for trailing function-like macro name.
                 // Now we have the next line joined. Check if parens are balanced.
-                if Self::has_unbalanced_parens(pending_line) && *pending_newlines <= 200 {
+                if Self::has_unbalanced_parens(pending_line) && *pending_newlines <= MAX_PENDING_NEWLINES {
                     // The joined text has unbalanced parens (macro args span more lines)
                     // Keep accumulating.
                 } else {

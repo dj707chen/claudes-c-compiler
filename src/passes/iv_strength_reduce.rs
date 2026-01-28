@@ -26,6 +26,16 @@ use crate::ir::analysis;
 use crate::ir::ir::*;
 use super::loop_analysis::{self, NaturalLoop};
 
+/// Maximum stride (in bytes) for an induction variable to be eligible for
+/// strength reduction. Covers common element sizes up to 1 KB; larger strides
+/// are unlikely to benefit and may indicate non-array access patterns.
+const MAX_IV_STRIDE: i64 = 1024;
+
+/// Maximum number of Cast/Copy instructions to follow when looking through
+/// cast chains to find the root value. Guards against infinite loops on
+/// malformed IR with cycles.
+const MAX_CAST_CHAIN_LENGTH: usize = 10;
+
 /// Run IVSR on the entire module.
 /// Returns the number of strength reductions applied.
 pub fn run(module: &mut IrModule) -> usize {
@@ -538,7 +548,7 @@ fn find_derived_exprs(
             };
 
             // Only worthwhile for strides that are common element sizes
-            if stride <= 0 || stride > 1024 {
+            if stride <= 0 || stride > MAX_IV_STRIDE {
                 continue;
             }
 
@@ -582,8 +592,7 @@ fn find_derived_exprs(
 /// Used to match `Cast(Add(Cast(phi_dest), step))` patterns.
 fn look_through_casts(val_id: u32, loop_defs: &FxHashMap<u32, &Instruction>) -> u32 {
     let mut current = val_id;
-    // Limit iterations to prevent infinite loops on malformed IR with cycles.
-    for _ in 0..10 {
+    for _ in 0..MAX_CAST_CHAIN_LENGTH {
         if let Some(inst) = loop_defs.get(&current) {
             match inst {
                 Instruction::Cast { src: Operand::Value(v), .. }

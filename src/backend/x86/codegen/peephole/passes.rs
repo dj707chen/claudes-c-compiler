@@ -7,19 +7,40 @@
 
 use super::types::*;
 
+// ── Constants ────────────────────────────────────────────────────────────────
+
+/// Maximum iterations for Phase 1 (local peephole passes).
+/// Local patterns rarely chain deeper than 3-4 levels, so 8 provides ample headroom.
+const MAX_LOCAL_PASS_ITERATIONS: usize = 8;
+
+/// Maximum iterations for Phase 3 (local cleanup after global passes).
+/// Post-global cleanup is shallow (mostly dead store + adjacent pairs), so 4 suffices.
+const MAX_POST_GLOBAL_ITERATIONS: usize = 4;
+
+/// Maximum number of store/load offsets tracked during compare-and-branch fusion.
+/// In practice, at most 2 stores appear between setCC and testq (the Cmp result
+/// store + possibly a sign-extension store). 4 provides a comfortable margin;
+/// if exceeded, fusion conservatively bails out.
+const MAX_TRACKED_STORE_LOAD_OFFSETS: usize = 4;
+
+/// Size of the instruction lookahead window for compare-and-branch fusion.
+/// Collects up to this many non-NOP instructions (including the cmp itself)
+/// to search for the setCC → store/load → test → branch pattern.
+const CMP_FUSION_LOOKAHEAD: usize = 8;
+
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 /// Run peephole optimization on x86-64 assembly text.
 /// Returns the optimized assembly string.
 ///
 /// Pass structure for speed:
-/// 1. Run cheap local passes iteratively until convergence (max 8 iterations).
+/// 1. Run cheap local passes iteratively until convergence (max `MAX_LOCAL_PASS_ITERATIONS`).
 ///    These are O(n) single-scan passes that only look at adjacent/nearby lines.
 /// 2. Run expensive global passes once. `global_store_forwarding` is O(n) but with
 ///    higher constant factor due to tracking slot→register mappings. It subsumes
 ///    the functionality of local store-load forwarding across wider windows.
 /// 3. Run local passes one more time to clean up opportunities exposed by the
-///    global passes (e.g., dead stores from forwarded loads).
+///    global passes (max `MAX_POST_GLOBAL_ITERATIONS` iterations).
 pub fn peephole_optimize(asm: String) -> String {
     let mut store = LineStore::new(asm);
     let line_count = store.len();
@@ -29,10 +50,9 @@ pub fn peephole_optimize(asm: String) -> String {
     // Run combined_local_pass first; if it makes changes, also run push/pop passes.
     // The push/pop passes are only useful when the combined pass has removed or
     // modified instructions, exposing new push/pop pair opportunities.
-    // 8 iterations max: local patterns rarely chain deeper than 3-4 levels.
     let mut changed = true;
     let mut pass_count = 0;
-    while changed && pass_count < 8 {
+    while changed && pass_count < MAX_LOCAL_PASS_ITERATIONS {
         changed = false;
         let local_changed = combined_local_pass(&store, &mut infos);
         changed |= local_changed;
@@ -58,11 +78,10 @@ pub fn peephole_optimize(asm: String) -> String {
     let global_changed = global_changed | fuse_compare_and_branch(&mut store, &mut infos);
 
     // Phase 3: One more local cleanup if global passes made changes.
-    // 4 iterations: cleanup after globals is shallow (mostly dead store + adjacent pairs).
     if global_changed {
         let mut changed2 = true;
         let mut pass_count2 = 0;
-        while changed2 && pass_count2 < 4 {
+        while changed2 && pass_count2 < MAX_POST_GLOBAL_ITERATIONS {
             changed2 = false;
             changed2 |= combined_local_pass(&store, &mut infos);
             changed2 |= fuse_movq_ext_truncation(&mut store, &mut infos);
@@ -670,11 +689,11 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
             continue;
         }
 
-        // Collect next non-NOP lines (up to 8): cmp itself + 7 following
-        let mut seq_indices = [0usize; 8];
+        // Collect next non-NOP lines: cmp itself + (CMP_FUSION_LOOKAHEAD-1) following
+        let mut seq_indices = [0usize; CMP_FUSION_LOOKAHEAD];
         seq_indices[0] = i;
-        let mut rest = [0usize; 7];
-        let rest_count = collect_non_nop_indices::<7>(infos, i, len, &mut rest);
+        let mut rest = [0usize; CMP_FUSION_LOOKAHEAD - 1];
+        let rest_count = collect_non_nop_indices::<{ CMP_FUSION_LOOKAHEAD - 1 }>(infos, i, len, &mut rest);
         for k in 0..rest_count { seq_indices[k + 1] = rest[k]; }
         let seq_count = 1 + rest_count;
 
@@ -698,10 +717,7 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
         // Track StoreRbp offsets so we can bail out if any store's slot is
         // potentially read by another basic block (no matching load nearby).
         let mut test_idx = None;
-        // At most 2 stores can appear between setCC and testq in practice
-        // (the Cmp result store + possibly a sign-extension store).  Use 4
-        // as a comfortable limit; if exceeded, conservatively bail out.
-        let mut store_offsets: [i32; 4] = [0; 4];
+        let mut store_offsets: [i32; MAX_TRACKED_STORE_LOAD_OFFSETS] = [0; MAX_TRACKED_STORE_LOAD_OFFSETS];
         let mut store_count = 0usize;
         let mut scan = 2;
         while scan < seq_count {
@@ -716,7 +732,7 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
             // Skip store/load to rbp (pre-parsed fast check).
             // Track store offsets to detect unmatched cross-block stores.
             if let LineKind::StoreRbp { offset, .. } = infos[si].kind {
-                if store_count < 4 {
+                if store_count < MAX_TRACKED_STORE_LOAD_OFFSETS {
                     store_offsets[store_count] = offset;
                     store_count += 1;
                 } else {
@@ -763,7 +779,7 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
         if store_count > 0 {
             let range_start = seq_indices[1];
             let range_end = seq_indices[test_scan];
-            let mut load_offsets: [i32; 4] = [0; 4];
+            let mut load_offsets: [i32; MAX_TRACKED_STORE_LOAD_OFFSETS] = [0; MAX_TRACKED_STORE_LOAD_OFFSETS];
             let mut load_count = 0usize;
             for ri in range_start..=range_end {
                 let off = match infos[ri].kind {
@@ -779,7 +795,7 @@ fn fuse_compare_and_branch(store: &mut LineStore, infos: &mut [LineInfo]) -> boo
                     _ => None,
                 };
                 if let Some(o) = off {
-                    if load_count < 4 { load_offsets[load_count] = o; load_count += 1; }
+                    if load_count < MAX_TRACKED_STORE_LOAD_OFFSETS { load_offsets[load_count] = o; load_count += 1; }
                 }
             }
             let has_unmatched_store = (0..store_count).any(|si| {

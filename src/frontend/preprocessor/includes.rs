@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use super::macro_defs::{MacroDef, parse_define};
 use super::preprocessor::Preprocessor;
 
+/// Maximum recursive inclusion depth, matching GCC's default of 200.
+/// Prevents infinite inclusion loops in files without `#pragma once`.
+const MAX_INCLUDE_DEPTH: usize = 200;
+
 /// Normalize a computed include path by collapsing anti-paste spaces around '/'.
 ///
 /// During macro expansion, the preprocessor inserts a space between adjacent '/'
@@ -70,13 +74,13 @@ impl Preprocessor {
                 return Some(String::new());
             }
 
-            // Check for excessive recursive inclusion (depth limit like GCC's default of 200).
+            // Check for excessive recursive inclusion.
             // Files WITHOUT #pragma once are allowed to be re-included with different
             // macro definitions active (e.g., TCC's x86_64-gen.c includes itself via
             // tcc.h with TARGET_DEFS_ONLY defined). Only block when nesting is excessive.
             {
                 let depth = self.include_stack.iter().filter(|p| *p == &resolved_path).count();
-                if depth >= 200 {
+                if depth >= MAX_INCLUDE_DEPTH {
                     return Some(String::new());
                 }
             }
@@ -183,10 +187,10 @@ impl Preprocessor {
                 return Some(String::new());
             }
 
-            // Check for excessive recursive inclusion (depth limit)
+            // Check for excessive recursive inclusion
             {
                 let depth = self.include_stack.iter().filter(|p| *p == &resolved_path).count();
-                if depth >= 200 {
+                if depth >= MAX_INCLUDE_DEPTH {
                     return Some(String::new());
                 }
             }

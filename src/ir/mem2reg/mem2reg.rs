@@ -15,6 +15,12 @@ use crate::ir::ir::*;
 use crate::ir::analysis;
 use crate::common::types::IrType;
 
+/// Maximum byte size for an alloca to be considered promotable to an SSA register.
+/// This corresponds to the width of a general-purpose register (8 bytes on 64-bit,
+/// 4 bytes on 32-bit). Allocas larger than this are aggregates (arrays, structs)
+/// that cannot live in a single register.
+const MAX_PROMOTABLE_ALLOCA_SIZE: usize = 8;
+
 /// Promote allocas to SSA form with phi insertion.
 /// Only promotes scalar allocas that are exclusively loaded/stored
 /// (not address-taken by GEP, memcpy, va_start, etc.).
@@ -186,14 +192,14 @@ fn find_promotable_allocas(func: &IrFunction, promote_params: bool) -> Vec<Alloc
                 if *volatile {
                     return None;
                 }
-                // Only promote scalar allocas (size <= 8 bytes)
+                // Only promote scalar allocas that fit in a register.
                 // Larger allocas are for arrays/structs passed by value.
                 // Note: the alloca size may be larger than the IR type size
                 // (e.g., int has type I32 = 4 bytes but alloc size 8 for alignment).
-                // We allow promotion as long as the alloca is at most 8 bytes and
-                // the type itself is scalar (at most 8 bytes).
+                // We allow promotion as long as the alloca is at most register-width
+                // and the type itself is scalar (at most register-width).
                 let type_size = ir_type_size(*ty);
-                if *size <= 8 && type_size <= 8 {
+                if *size <= MAX_PROMOTABLE_ALLOCA_SIZE && type_size <= MAX_PROMOTABLE_ALLOCA_SIZE {
                     Some((*dest, *ty, *size))
                 } else {
                     None
@@ -216,7 +222,7 @@ fn find_promotable_allocas(func: &IrFunction, promote_params: bool) -> Vec<Alloc
                     continue;
                 }
                 let type_size = ir_type_size(*ty);
-                if *size <= 8 && type_size <= 8 {
+                if *size <= MAX_PROMOTABLE_ALLOCA_SIZE && type_size <= MAX_PROMOTABLE_ALLOCA_SIZE {
                     all_allocas.push((*dest, *ty, *size));
                 }
             }

@@ -763,6 +763,9 @@ pub fn calculate_stack_space_common(
         }
         // Build alias map with transitive resolution: follow chains to find root.
         // E.g., if A copies B and B copies C, both A and B alias to C.
+        // Safety limit on chain depth to guard against pathological cycles in the alias graph.
+        // In well-formed IR, chains are short (typically < 5); 100 is a generous upper bound.
+        const MAX_ALIAS_CHAIN_DEPTH: usize = 100;
         for (dest_id, src_id) in raw_aliases {
             // Find root of src.
             let mut root = src_id;
@@ -770,7 +773,7 @@ pub fn calculate_stack_space_common(
             while let Some(&parent) = copy_alias.get(&root) {
                 root = parent;
                 depth += 1;
-                if depth > 100 { break; } // safety limit
+                if depth > MAX_ALIAS_CHAIN_DEPTH { break; }
             }
             // Don't alias to self.
             if root != dest_id {
