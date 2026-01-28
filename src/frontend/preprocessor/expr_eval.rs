@@ -239,73 +239,21 @@ impl Preprocessor {
     }
 
     /// Check if a builtin function name is supported by this compiler.
+    /// Delegates to the sema builtin registry (BUILTIN_MAP + atomic builtins)
+    /// and adds a few names handled as special syntax rather than function calls.
     pub(super) fn is_supported_builtin(name: &str) -> bool {
+        // Check the canonical builtin registry (covers BUILTIN_MAP, __builtin_choose_expr,
+        // __builtin_unreachable, __builtin_trap, and all __atomic_*/__sync_* builtins)
+        if crate::frontend::sema::is_builtin(name) {
+            return true;
+        }
+        // These are handled as special syntax (dedicated AST nodes or parser keywords)
+        // rather than through the normal builtin function call path, so they are not
+        // in the sema builtin registry but are still supported.
         matches!(name,
-            // Byte swap builtins
-            "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64" |
-            // Bit manipulation
-            "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll" |
-            "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll" |
-            "__builtin_clrsb" | "__builtin_clrsbl" | "__builtin_clrsbll" |
-            "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll" |
-            "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll" |
-            "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll" |
-            // Compiler hints
-            "__builtin_expect" | "__builtin_expect_with_probability" |
-            "__builtin_unreachable" | "__builtin_trap" |
-            "__builtin_assume_aligned" |
-            "__builtin_constant_p" |
-            "__builtin_types_compatible_p" |
-            // Memory operations
-            "__builtin_memcpy" | "__builtin_memmove" | "__builtin_memset" |
-            "__builtin_memcmp" | "__builtin_strlen" | "__builtin_strcmp" |
-            "__builtin_strcpy" | "__builtin_strncpy" | "__builtin_strncmp" |
-            "__builtin_strcat" | "__builtin_strchr" | "__builtin_strrchr" |
-            "__builtin_strstr" |
-            // Math
-            "__builtin_abs" | "__builtin_labs" | "__builtin_llabs" |
-            "__builtin_fabs" | "__builtin_fabsf" | "__builtin_fabsl" |
-            "__builtin_sqrt" | "__builtin_sqrtf" |
-            "__builtin_inf" | "__builtin_inff" | "__builtin_infl" |
-            "__builtin_huge_val" | "__builtin_huge_valf" | "__builtin_huge_vall" |
-            "__builtin_nan" | "__builtin_nanf" | "__builtin_nanl" |
-            "__builtin_isnan" | "__builtin_isinf" | "__builtin_isfinite" |
-            "__builtin_isnormal" | "__builtin_signbit" | "__builtin_signbitf" |
-            "__builtin_fpclassify" |
-            "__builtin_isgreater" | "__builtin_isgreaterequal" |
-            "__builtin_isless" | "__builtin_islessequal" |
-            "__builtin_islessgreater" | "__builtin_isunordered" |
-            // I/O
-            "__builtin_printf" | "__builtin_fprintf" |
-            "__builtin_sprintf" | "__builtin_snprintf" |
-            "__builtin_puts" | "__builtin_putchar" |
-            // Allocation
-            "__builtin_malloc" | "__builtin_calloc" | "__builtin_realloc" |
-            "__builtin_free" | "__builtin_alloca" |
-            // Other
-            "__builtin_abort" | "__builtin_exit" |
-            "__builtin_return_address" | "__builtin_frame_address" |
-            "__builtin_offsetof" |
-            // Complex
-            "__builtin_creal" | "__builtin_crealf" | "__builtin_creall" |
-            "__builtin_cimag" | "__builtin_cimagf" | "__builtin_cimagl" |
-            // Atomics
-            "__sync_synchronize" |
-            "__atomic_load_n" | "__atomic_store_n" |
-            "__atomic_exchange_n" | "__atomic_compare_exchange_n" |
-            "__atomic_fetch_add" | "__atomic_fetch_sub" |
-            "__atomic_fetch_and" | "__atomic_fetch_or" | "__atomic_fetch_xor" |
-            "__atomic_add_fetch" | "__atomic_sub_fetch" |
-            "__atomic_and_fetch" | "__atomic_or_fetch" | "__atomic_xor_fetch" |
-            "__sync_fetch_and_add" | "__sync_fetch_and_sub" |
-            "__sync_fetch_and_and" | "__sync_fetch_and_or" | "__sync_fetch_and_xor" |
-            "__sync_add_and_fetch" | "__sync_sub_and_fetch" |
-            "__sync_and_and_fetch" | "__sync_or_and_fetch" | "__sync_xor_and_fetch" |
-            "__sync_val_compare_and_swap" | "__sync_bool_compare_and_swap" |
-            "__sync_lock_test_and_set" | "__sync_lock_release" |
-            // Va args
-            "__builtin_va_start" | "__builtin_va_end" |
-            "__builtin_va_arg" | "__builtin_va_copy"
+            "__builtin_va_arg" |              // Special token (BuiltinVaArg)
+            "__builtin_types_compatible_p" |  // Special AST node (BuiltinTypesCompatibleP)
+            "__builtin_offsetof"              // Predefined macro
         )
     }
 

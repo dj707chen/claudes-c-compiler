@@ -396,6 +396,10 @@ impl Lowerer {
         ) || inferred_from_ctype.as_ref().map_or(false, |(_, _, _, variadic)| *variadic);
 
         let mut arg_types = Vec::with_capacity(args.len());
+        // Track argument indices where a complex expression was converted to a
+        // scalar type (e.g., complex-to-bool). These should NOT get a
+        // struct_arg_size based on the original expression's CType.
+        let mut complex_converted_to_scalar: Vec<bool> = vec![false; args.len()];
         let arg_vals: Vec<Operand> = args.iter().enumerate().map(|(i, a)| {
             let mut val = self.lower_expr(a);
             let arg_ty = self.get_expr_type(a);
@@ -421,6 +425,7 @@ impl Lowerer {
                         if is_param_bool {
                             let cast_val = self.lower_complex_to_bool(ptr, &arg_ct);
                             arg_types.push(IrType::I8);
+                            complex_converted_to_scalar[i] = true;
                             return cast_val;
                         }
                         let real_part = self.load_complex_real(ptr, &arg_ct);
@@ -430,6 +435,7 @@ impl Lowerer {
                             .unwrap_or(comp_ir_ty);
                         let cast_val = self.emit_implicit_cast(real_part, comp_ir_ty, param_ty);
                         arg_types.push(param_ty);
+                        complex_converted_to_scalar[i] = true;
                         return cast_val;
                     }
                 }
@@ -500,6 +506,12 @@ impl Lowerer {
             // registration may not have resolved vector typedefs yet.
             let decomposes_cld = self.decomposes_complex_long_double();
             args.iter().enumerate().map(|(i, a)| {
+                // If Stage A already converted this complex argument to a scalar
+                // (e.g., complex-to-bool or complex-to-real), the value is no
+                // longer a struct-like type and must not get a struct_arg_size.
+                if complex_converted_to_scalar.get(i).copied().unwrap_or(false) {
+                    return None;
+                }
                 let registered = if i < sizes.len() { sizes[i] } else { None };
                 if registered.is_some() {
                     return registered;
@@ -515,7 +527,13 @@ impl Lowerer {
         } else {
             // Infer from argument expressions
             let decomposes_cld = self.decomposes_complex_long_double();
-            args.iter().map(|a| {
+            args.iter().enumerate().map(|(i, a)| {
+                // If Stage A already converted this complex argument to a scalar
+                // (e.g., complex-to-bool or complex-to-real), the value is no
+                // longer a struct-like type and must not get a struct_arg_size.
+                if complex_converted_to_scalar.get(i).copied().unwrap_or(false) {
+                    return None;
+                }
                 let ctype = self.get_expr_ctype(a);
                 match ctype {
                     Some(CType::Struct(_)) | Some(CType::Union(_)) => {
