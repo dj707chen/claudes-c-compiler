@@ -1,6 +1,0 @@
-Fix two i686 bugs:
-1. Multi-dimensional long double array initialization used hardcoded /16 divisor
-   instead of elem_size, causing truncated static data on i686 (sizeof(long double)=12).
-2. _Alignas(16) local variables not properly 16-byte aligned on i686 because
-   the stack slot assignment didn't account for %ebp's alignment bias
-   (%ebp mod 16 == 8 on i686 ABI).
