@@ -782,10 +782,10 @@ impl<'a> ExprTypeChecker<'a> {
             | "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll"
             | "__builtin_ffs" | "__builtin_ffsl" | "__builtin_ffsll"
             | "__builtin_types_compatible_p" | "__builtin_classify_type"
-            | "__builtin_constant_p" | "__builtin_object_size"
-            | "__builtin_bswap16" | "__builtin_bswap32" => Some(CType::Int),
+            | "__builtin_constant_p" | "__builtin_object_size" => Some(CType::Int),
 
-            // bswap64 returns unsigned long long (uint64_t)
+            // Byte-swap builtins return unsigned types (GCC behavior)
+            "__builtin_bswap16" | "__builtin_bswap32" => Some(CType::UInt),
             "__builtin_bswap64" => Some(CType::ULongLong),
 
             // __builtin_expect returns long (evaluates both args, returns first)

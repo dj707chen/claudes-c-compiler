@@ -1,0 +1,27 @@
+Fix __builtin_bswap16/__builtin_bswap32 return type: signed -> unsigned
+
+Problem:
+__builtin_bswap16 and __builtin_bswap32 were typed as returning signed int
+(CType::Int / IrType::I32). GCC returns unsigned types (uint16_t / uint32_t).
+The signed return type caused right-shift operations on bswap results to use
+arithmetic shift (sarl) instead of logical shift (shrl), corrupting values
+when bit 31 is set.
+
+This broke the ARIA cipher in mbedtls on i686, where ARIA_P1(x) =
+rotate16(bswap32(x)) uses >> 16 on a bswap32 result. With signed typing,
+values like bswap32(0xDEADBEEF) = 0xEFBEADDE would produce 0xFFFFEFBE
+instead of 0x0000EFBE when right-shifted by 16.
+
+Fix:
+1. type_checker.rs: Changed __builtin_bswap16/__builtin_bswap32 from
+   CType::Int to CType::UInt
+2. expr_types.rs: Removed shadowing match that incorrectly mapped
+   bswap16/bswap32 to IrType::I32, allowing the existing correct
+   matches (bswap16 => U16, bswap32 => U32) to be reached
+
+Results:
+- mbedtls i686: ARIA-ECB-128 now passes (7/7 tests pass)
+- i686 unit tests: 529/531 (99.6%) - same as before, no regressions
+- x86-64 unit tests: 618/620 (99.7%) - same as before, no regressions
+
+Status: in_progress
