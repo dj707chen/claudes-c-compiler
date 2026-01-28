@@ -1,0 +1,13 @@
+Fix i686 Copy from IrConst::I64 spurious wide marking
+
+On i686, the codegen was incorrectly marking Copy instruction destinations
+as "wide" (64-bit) when the source was IrConst::I64, which is the universal
+container for ALL integer constants regardless of semantic type. This caused
+32-bit int variables to be treated as 64-bit values, leading to:
+- Uninitialized upper 32 bits being checked in zero tests
+- `if (0)` evaluating as true when upper bits contained garbage
+
+This fix changes the Copy wide-marking logic to only treat IrConst::I64
+constants as wide when the value doesn't fit in a 32-bit integer.
+
+Status: in_progress
