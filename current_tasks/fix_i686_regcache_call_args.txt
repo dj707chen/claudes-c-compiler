@@ -1,0 +1,18 @@
+Fix i686 stale register cache in emit_call_stack_args
+
+Problem:
+In the i686 backend's emit_call_stack_args(), when copying multi-word values
+(F64, I64/U64, I128, F128, structs) to the call stack, raw emit!() calls use
+%eax as a scratch register but do not invalidate the RegCache. This causes
+subsequent operand_to_eax() calls to incorrectly skip the load (false cache hit),
+resulting in the wrong value being placed on the stack for the next argument.
+
+This manifests as corrupted arguments in function calls where a double/long long
+argument is followed by an int argument - the int gets the upper dword of the
+double instead of its actual value.
+
+Fix:
+Add self.state.reg_cache.invalidate_acc() after every raw emit!() block that
+uses %eax as a scratch register in emit_call_stack_args().
+
+Status: in_progress
