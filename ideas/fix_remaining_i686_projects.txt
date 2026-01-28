@@ -1,14 +1,27 @@
 Fix remaining i686 project failures
 =====================================
-Date: 2026-01-28 (updated after Redis i686 fix + Copy I64 const wide marking fix)
+Date: 2026-01-28 (updated after LogicalNot 64-bit fix + Redis i686 fix)
 
 Current status:
-- Unit tests: ~99.8% pass (10% sample: 2731/2737)
-- Projects passing: 7/12 (zlib, lua, libpng, jq, libjpeg, libuv, tcc*)
+- Unit tests: 99.7% pass (27152/27361) - up from 99.2%
+- Projects passing: 8/15 (zlib, lua, libpng, jq, libjpeg, libuv, redis, tcc*)
   * tcc build succeeds; test suite fails due to missing i686 CRT/headers (same as GCC)
-- Projects failing: libsodium, mquickjs, mbedtls, libffi, musl
+- Projects failing: libsodium, mquickjs, sqlite, mbedtls, libffi, musl, postgres
 
-Fixed in latest round (Redis i686 fix):
+Fixed in latest round (LogicalNot 64-bit fix):
+- LogicalNot (!) on 64-bit values was truncating to 32 bits on i686
+  - Root cause: UnaryOp::LogicalNot in src/ir/lowering/expr_ops.rs used
+    target_int_ir_type() (I32 on i686) as the comparison type for ALL values,
+    including I64/U64. Values like 0x100000000ULL were incorrectly treated as zero.
+  - Fix: Use inner expression's type for comparison when it is a wide integer
+    (I64/U64) wider than target int. Float types excluded since
+    mask_float_sign_for_truthiness already reduces them to I32 booleans.
+  - Fixes comk3114 test (64-bit shift loop with `!i` condition)
+  - libjpeg now 2/2 (was 1/2 before)
+  - i686 unit test pass rate improved from ~99.2% to 99.7%
+  - No regressions on x86-64 (99.9%), ARM (99.6%), RISC-V (99.9%)
+
+Fixed (Redis i686 fix):
 - PIC global address: emit_global_addr used GOT-relative %ebx addressing without
   setting up %ebx; switched to absolute addressing since we link with -no-pie
 - mem2reg constant narrowing: I64 constants stored into 32-bit allocas caused
@@ -18,68 +31,68 @@ Fixed in latest round (Redis i686 fix):
 
 Previously fixed (Copy I64 const wide marking fix):
 - tcc BUILD now succeeds (was failing in alloca86_64.S assembly)
-  - Root cause: IrConst::I64 is the universal container for ALL integer constants,
-    but codegen was marking Copy from ANY IrConst::I64 as "wide" (64-bit) on i686.
-    This caused 32-bit int variables to be treated as 64-bit, with uninitialized
-    upper 32 bits making `if (0)` evaluate as true.
-  - Fix: only mark IrConst::I64 as wide when value doesn't fit in 32 bits
-- libjpeg now fully passes on i686 (was "Bogus virtual array access")
-  - Same root cause: miscompiled array index checks due to wide marking bug
+- libjpeg fully passes (was "Bogus virtual array access")
 
 Previously fixed (inline asm typed register load fix):
 - libsodium now BUILDS (was failing with "operand size mismatch for `movzw'")
-- The issue was movzwl/movsbl/movswl used 16/8-bit dest registers in inline asm
-- Runtime tests still fail (segfaults and timeouts in crypto operations)
 
 Known remaining issues:
 
-1. mquickjs: SIGSEGV in js_string_compare during JS parsing
-   - Crashes in get_string_ptr -> JS_VALUE_TO_PTR returning garbage pointer
-   - JSValue is uint32_t on i686, pointer tagged with low bits
-   - val=0x236 -> ptr = val-1 = 0x235, which is not a heap pointer
-   - Root cause: likely corruption during JSValueArray access or value passing
-   - Needs deep debugging to find where the corruption occurs
+1. sqlite: 2/622 tests pass (was 0/622) -- READONLY_DBMOVED bug
+   - Root cause FOUND: After inlining fileHasMoved() into unixFileControl(),
+     the codegen reads buf.st_ino from the WRONG stack offset.
+   - stat buffer allocated at -120(%ebp), st_ino at offset 12 -> should be -108(%ebp)
+   - But codegen reads from -32(%ebp) = buf + 88 = past end of buffer
+   - This reads stale/uninitialized data, causing fileHasMoved() to return true,
+     which makes sqlite think the database file was moved/renamed (SQLITE_READONLY_DBMOVED)
+   - Workaround: journal_mode=OFF or :memory: databases work correctly
+   - The struct layout is correct (verified offset 12 for st_ino on both CCC and GCC)
+   - The standalone function generates correct code (-92(%ebp) for buf at -104)
+   - The bug is specific to the INLINED version in the large unixFileControl() function
+   - This is likely a codegen bug in stack slot assignment or value remapping after inlining
+   - Investigation needed in: src/passes/inline.rs (value remapping) or
+     src/backend/i686/codegen/ (stack frame layout for large functions)
 
-2. sqlite: SIGSEGV in columnTypeImpl (0/622 tests pass)
-   - Crashes dereferencing NULL struct pointer + offset 0x1c
-   - Pattern: pTab=NULL, then pTab->field crashes
-   - May share root cause with mquickjs (struct/pointer codegen issue)
+2. mquickjs: SIGSEGV in all 5 tests
+   - Crashes in js_string_compare during JS parsing
+   - Root cause unknown; may be related to same inlining/codegen issue as sqlite
 
 3. musl: 3/6 tests pass (hello, string_ops, math pass)
    - malloc test: malloc returns NULL despite brk() succeeding
-   - io test: tmpfile() fails (likely related to mmap)
+   - io test: tmpfile() fails
    - environ test: setenv/getenv broken (returns "fail")
-   - Built musl has __udivdi3/__umoddi3 deps (satisfied by -lgcc)
 
 4. libsodium: Build succeeds, 0/7 tests pass
-   - sodium_init() hangs/segfaults in some tests
-   - Random test crashes immediately (SIGSEGV)
+   - Mix of timeouts (infinite loops) and SIGSEGV crashes
+   - init/hash_sha256/secretbox timeout; random/sign/box SIGSEGV
+   - Heavy use of 64-bit crypto operations may expose additional codegen bugs
 
-5. libjpeg: FIXED (both tests now pass after Copy I64 const wide fix)
-
-6. mbedtls: Build fails (__builtin_ia32_pshufd not implemented)
+5. mbedtls: Build fails (__builtin_ia32_pshufd not implemented)
    - Needs SSE2 intrinsic: _mm_shuffle_epi32 -> __builtin_ia32_pshufd
    - Used in AES-NI key schedule (aesni_set_rk_128/192/256)
 
-7. libffi: Build succeeds, 0/6 tests pass (all SIGSEGV)
-   - All FFI call tests crash
+6. libffi: Build succeeds, 0/6 tests pass (all SIGSEGV)
+   - All FFI call tests crash (call_int, call_double, call_pointer, etc.)
    - Likely i686 ABI/calling convention issue in libffi's closure/trampoline code
 
-8. tcc: FIXED (build succeeds after Copy I64 const wide fix)
-   - TCC build succeeds but test suite fails due to missing i686 CRT/headers
-   - This is a system configuration issue (same with GCC), not a compiler bug
+7. postgres: Build fails - linker error (R_386_GOTOFF relocation / shared lib issue)
+   - dict_snowball.so link fails
+   - May be related to PIC/shared library handling on i686
 
-Unit test failure categories:
-- Complex number tests (SIGSEGV) - fix_complex_comparison_i64_type being worked on
-- Stack alignment >8 bytes: _Alignas(16+) not working for stack vars on i686
-- Integer constant overflow: large UL constants not promoted to ULL on ILP32
+8. tcc: Build succeeds, 1/78 tests pass
+   - Tests fail because CCC-compiled TCC can't find crt1.o
+   - System configuration issue (same with GCC), not a compiler bug
 
 Priority investigation targets:
-- mquickjs/sqlite crashes likely share a common codegen root cause
-- Stack _Alignas(>=16) support for i686
-- musl malloc failure (mmap-related?)
+- sqlite inlining bug: This is the highest-value fix (622 tests).
+  The root cause is identified; need to fix codegen or inline pass.
+- mquickjs crashes: May share root cause with sqlite inlining bug.
+- libsodium timeouts: May be related to remaining 64-bit operation bugs.
+- musl malloc: Investigate brk/mmap handling on i686.
+- mbedtls __builtin_ia32_pshufd: SSE2 intrinsic implementation.
 
 Techniques:
 - Compare i686 assembly output against i686-linux-gnu-gcc for suspect functions
 - Use GDB to trace execution and find divergence points
 - strace to check syscall behavior for musl failures
+- Hybrid builds (CCC sqlite3.c + GCC harness, or vice versa) to isolate bugs
