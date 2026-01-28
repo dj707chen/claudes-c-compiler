@@ -615,6 +615,9 @@ impl Lowerer {
     }
 
     /// Lower vector assignment (a = b): memcpy the whole vector.
+    /// When the RHS is a function call returning a small vector (<=8 bytes),
+    /// the return value is packed into a register (I64), not a pointer.
+    /// We detect this case and spill the packed value to an alloca first.
     fn lower_vector_assign(&mut self, lhs: &Expr, rhs: &Expr, lhs_ct: &CType) -> Operand {
         let (_, total_size) = match lhs_ct {
             CType::Vector(_, total_size) => ((), *total_size),
@@ -622,10 +625,57 @@ impl Lowerer {
         };
         let lhs_ptr = self.lower_expr(lhs);
         let lhs_ptr_val = self.operand_to_value(lhs_ptr);
-        let rhs_ptr = self.lower_expr(rhs);
-        let rhs_ptr_val = self.operand_to_value(rhs_ptr);
+
+        // Check if the RHS is a function call returning a small vector in a register.
+        // Small vectors (<=8 bytes) are returned as packed I64 values, not pointers.
+        let rhs_is_small_vec_call = self.rhs_is_small_vector_call(rhs, total_size);
+
+        let rhs_val = self.lower_expr(rhs);
+        let rhs_ptr_val = if rhs_is_small_vec_call {
+            // The return value is packed vector data in a register.
+            // Spill it to an alloca so we can memcpy from it.
+            let alloca = self.fresh_value();
+            let store_ty = Self::packed_store_type(total_size);
+            self.emit(Instruction::Alloca { dest: alloca, size: total_size, ty: store_ty, align: 0, volatile: false });
+            self.emit(Instruction::Store { val: rhs_val, ptr: alloca, ty: store_ty, seg_override: AddressSpace::Default });
+            alloca
+        } else {
+            self.operand_to_value(rhs_val)
+        };
         self.emit(Instruction::Memcpy { dest: lhs_ptr_val, src: rhs_ptr_val, size: total_size });
         Operand::Value(lhs_ptr_val)
+    }
+
+    /// Check if an expression is a function call that returns a small vector in a register.
+    pub(super) fn rhs_is_small_vector_call(&self, rhs: &Expr, vec_size: usize) -> bool {
+        if vec_size > 8 {
+            return false; // Large vectors use sret, returned as pointer
+        }
+        match rhs {
+            Expr::FunctionCall(func_expr, _, _) => {
+                // Check if it's a direct call to a known function with vector return
+                let stripped = {
+                    let mut e = func_expr.as_ref();
+                    while let Expr::Deref(inner, _) = e { e = inner; }
+                    e
+                };
+                if let Expr::Identifier(name, _) = stripped {
+                    if self.is_func_ptr_variable(name) {
+                        // Indirect call: small vectors returned in register
+                        return true;
+                    }
+                    if let Some(sig) = self.func_meta.sigs.get(name.as_str()) {
+                        // Direct call: check if sret/two_reg are None (small struct/vector return)
+                        return sig.sret_size.is_none() && sig.two_reg_ret_size.is_none();
+                    }
+                    // Unknown function: assume small vector returned in register
+                    return true;
+                }
+                // Indirect call through complex expression
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Lower vector compound assignment (a += b, a -= b, etc.): element-wise operation.

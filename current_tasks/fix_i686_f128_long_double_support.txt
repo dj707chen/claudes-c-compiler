@@ -1,0 +1,25 @@
+Task: Fix i686 F128 (long double) support
+Status: in_progress
+Started: 2026-01-28
+
+Description:
+The i686 backend's F128 (long double / x87 80-bit extended precision) handling has
+several critical bugs:
+
+1. emit_float_binop for F128: The default trait method loads operands into eax/ecx
+   (32-bit registers), then calls emit_float_binop_impl which does faddp without
+   anything on the x87 stack. Also always uses faddp regardless of the actual op.
+   Fix: Override emit_float_binop to intercept F128 and use x87 FPU directly
+   (like the x86-64 backend does).
+
+2. emit_return_f128_to_reg: Uses flds (F32 load) instead of fldt to put
+   the F128 value onto st(0) for return. Fix: Use slot access with fldt.
+
+3. F128 cast stubs: All F128<->int and F128<->float conversions are empty stubs.
+   Fix: Implement via x87 FPU (fild/fisttp for int conversions, fld/fstp for
+   float conversions).
+
+4. F128 negation: Uses xorl on eax which only flips 32-bit sign bit.
+   Fix: Use x87 fchs.
+
+Does NOT touch F64 or I64 handling (separate locked tasks).

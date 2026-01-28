@@ -94,20 +94,32 @@ impl Lowerer {
         }
     }
 
-    /// Check if an expression refers to a struct/union value (not pointer-to-struct).
-    /// Returns the struct/union size if the expression produces a struct/union value,
-    /// or None if it's not a struct/union. Unifies the old expr_is_struct_value (check)
-    /// and get_struct_size_for_expr (size) into a single dispatch.
+    /// Check if an expression refers to a struct/union/vector value (not pointer-to-struct).
+    /// Returns the struct/union/vector size if the expression produces such a value,
+    /// or None if it's not one. Vector types are included because they use the same
+    /// by-value ABI convention as structs (small vectors packed into registers,
+    /// large vectors via sret).
     pub(super) fn struct_value_size(&self, expr: &Expr) -> Option<usize> {
         match expr {
             Expr::Identifier(name, _) => {
                 if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(name)) {
                     if info.is_struct { return Some(info.alloc_size); }
-                    return None; // local found but not struct; don't fall through to globals
+                    // Check if the local is a vector type
+                    if let Some(ref ct) = info.c_type {
+                        if ct.is_vector() {
+                            return Some(info.alloc_size);
+                        }
+                    }
+                    return None; // local found but not struct/vector; don't fall through to globals
                 }
                 if let Some(ginfo) = self.globals.get(name) {
                     if ginfo.is_struct {
                         return Some(ginfo.struct_layout.as_ref().map_or(8, |l| l.size));
+                    }
+                    if let Some(ref ct) = ginfo.c_type {
+                        if ct.is_vector() {
+                            return Some(self.ctype_size(ct));
+                        }
                     }
                 }
                 None
@@ -115,7 +127,7 @@ impl Lowerer {
             Expr::MemberAccess(base_expr, field_name, _) | Expr::PointerMemberAccess(base_expr, field_name, _) => {
                 let is_ptr = matches!(expr, Expr::PointerMemberAccess(..));
                 let ctype = self.resolve_field_ctype(base_expr, field_name, is_ptr)?;
-                if ctype.is_struct_or_union() {
+                if ctype.is_struct_or_union() || ctype.is_vector() {
                     Some(self.ctype_size(&ctype))
                 } else { None }
             }
@@ -125,13 +137,13 @@ impl Lowerer {
             | Expr::Assign(_, _, _) | Expr::CompoundAssign(_, _, _, _)
             | Expr::Comma(_, _, _) | Expr::Cast(_, _, _) => {
                 let ctype = self.get_expr_ctype(expr)?;
-                if ctype.is_struct_or_union() {
+                if ctype.is_struct_or_union() || ctype.is_vector() {
                     Some(self.ctype_size(&ctype))
                 } else { None }
             }
             Expr::CompoundLiteral(type_spec, _, _) => {
                 let ctype = self.type_spec_to_ctype(type_spec);
-                if ctype.is_struct_or_union() {
+                if ctype.is_struct_or_union() || ctype.is_vector() {
                     Some(self.sizeof_type(type_spec))
                 } else {
                     None
@@ -155,7 +167,7 @@ impl Lowerer {
                                     for declarator in &decl.declarators {
                                         if declarator.name == *name {
                                             let ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
-                                            if ctype.is_struct_or_union() {
+                                            if ctype.is_struct_or_union() || ctype.is_vector() {
                                                 return Some(self.ctype_size(&ctype));
                                             }
                                         }
@@ -189,8 +201,9 @@ impl Lowerer {
         }
     }
 
-    /// For indirect calls (function pointer calls), determine if the return type is a struct
-    /// and return its size. Returns None if not a struct return or if the type cannot be determined.
+    /// For indirect calls (function pointer calls), determine if the return type is a struct,
+    /// union, or vector and return its size. Returns None if not an aggregate return or if
+    /// the type cannot be determined.
     pub(super) fn get_call_return_struct_size(&self, func: &Expr) -> Option<usize> {
         // For indirect calls, extract the return type from the function pointer's CType.
         // Strip Deref layers since dereferencing function pointers is a no-op in C.
@@ -221,6 +234,9 @@ impl Lowerer {
                     // Use resolve_ctype_size to look up struct layouts properly;
                     // CType::size() returns 0 for Struct/Union since they only
                     // store a key, not the actual layout.
+                    return Some(self.resolve_ctype_size(&ret_ct));
+                }
+                if ret_ct.is_vector() {
                     return Some(self.resolve_ctype_size(&ret_ct));
                 }
             }

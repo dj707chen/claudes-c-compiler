@@ -161,7 +161,7 @@ impl Lowerer {
             }
         }
 
-        // Detect struct/complex returns that need special ABI handling
+        // Detect struct/complex/vector returns that need special ABI handling
         let mut sret_size = None;
         let mut two_reg_ret_size = None;
         if ptr_count == 0 {
@@ -171,6 +171,17 @@ impl Lowerer {
                 let (s, t) = Self::classify_struct_return(size);
                 sret_size = s;
                 two_reg_ret_size = t;
+            }
+            // Vector types use the same by-value return convention as structs
+            if ret_ct.is_vector() {
+                let size = self.sizeof_type(ret_type_spec);
+                let (s, t) = Self::classify_struct_return(size);
+                sret_size = s;
+                two_reg_ret_size = t;
+                // Small vector returns (<=8 bytes, no sret/two_reg) need I64 return type
+                if s.is_none() && t.is_none() {
+                    ret_ty = IrType::I64;
+                }
             }
             if matches!(ret_ct, CType::ComplexLongDouble) {
                 let size = self.sizeof_type(ret_type_spec);
@@ -279,11 +290,24 @@ impl Lowerer {
             self.lower_complex_var_init(expr, alloca, da, decl);
         } else if let Some(ref ct) = da.c_type {
             if ct.is_vector() {
-                // Vector init from expression: memcpy from source to destination
+                // Vector init from expression: memcpy from source to destination.
+                // When the source is a function call returning a small vector (<=8 bytes),
+                // the return value is packed data in a register (I64), not a pointer.
+                // We must spill it to an alloca before memcpy.
+                let total_size = ct.size();
+                let is_small_vec_call = self.rhs_is_small_vector_call(expr, total_size);
                 let src = self.lower_expr(expr);
                 let src_val = self.operand_to_value(src);
-                let total_size = ct.size();
-                self.emit(Instruction::Memcpy { dest: alloca, src: src_val, size: total_size });
+                if is_small_vec_call {
+                    // Packed register value: store to alloca, then memcpy from alloca
+                    let tmp_alloca = self.fresh_value();
+                    let store_ty = Self::packed_store_type(total_size);
+                    self.emit(Instruction::Alloca { dest: tmp_alloca, size: total_size, ty: store_ty, align: 0, volatile: false });
+                    self.emit(Instruction::Store { val: Operand::Value(src_val), ptr: tmp_alloca, ty: store_ty, seg_override: AddressSpace::Default });
+                    self.emit(Instruction::Memcpy { dest: alloca, src: tmp_alloca, size: total_size });
+                } else {
+                    self.emit(Instruction::Memcpy { dest: alloca, src: src_val, size: total_size });
+                }
             } else {
                 self.lower_scalar_init_expr(expr, alloca, da, decl);
             }

@@ -353,6 +353,26 @@ impl Lowerer {
             }
         }
 
+        // Pre-pass: update typedefs that have __attribute__((vector_size(N))).
+        // Sema doesn't handle vector_size, so the typedef map has the unwrapped base type.
+        // We need to apply vector_size wrapping before registering function metadata,
+        // so that function return types using vector typedefs are correctly resolved.
+        for decl in &tu.decls {
+            if let ExternalDecl::Declaration(decl) = decl {
+                if decl.is_typedef {
+                    if let Some(vs) = decl.vector_size {
+                        for declarator in &decl.declarators {
+                            if !declarator.name.is_empty() {
+                                let base_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                                let vec_ctype = CType::Vector(Box::new(base_ctype), vs);
+                                self.types.typedefs.insert(declarator.name.clone(), vec_ctype);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // First pass: collect all function signatures (return types, param types,
         // variadic status, sret) so we can distinguish functions from globals and
         // insert proper casts/ABI handling during lowering.
@@ -566,7 +586,20 @@ impl Lowerer {
         // Only the AST fallback path needs ptr_count wrapping, since type_spec_to_ctype
         // only resolves the base type specifier without pointer derivators.
         let full_ret_ctype = if let Some(func_info) = self.sema_functions.get(name) {
-            func_info.return_type.clone()
+            let sema_ct = func_info.return_type.clone();
+            // Sema doesn't resolve vector_size attributes, so if the lowerer's
+            // type_spec_to_ctype produces a Vector but sema doesn't, prefer the
+            // lowerer's result which correctly includes vector information.
+            if !sema_ct.is_vector() && ptr_count == 0 {
+                let lowerer_ct = self.type_spec_to_ctype(ret_type_spec);
+                if lowerer_ct.is_vector() {
+                    lowerer_ct
+                } else {
+                    sema_ct
+                }
+            } else {
+                sema_ct
+            }
         } else {
             let mut ct = self.type_spec_to_ctype(ret_type_spec);
             for _ in 0..ptr_count {
@@ -613,7 +646,7 @@ impl Lowerer {
             self.types.func_return_ctypes.insert(name.to_string(), full_ret_ctype.clone());
         }
 
-        // Detect struct/complex returns that need special ABI handling.
+        // Detect struct/complex/vector returns that need special ABI handling.
         let mut sret_size = None;
         let mut two_reg_ret_size = None;
         if ptr_count == 0 {
@@ -622,6 +655,19 @@ impl Lowerer {
                 let (s, t) = Self::classify_struct_return(size);
                 sret_size = s;
                 two_reg_ret_size = t;
+            }
+            // Vector types use the same by-value return convention as structs:
+            // small vectors (<=8 bytes) are packed into a register, larger ones use sret.
+            if full_ret_ctype.is_vector() {
+                let size = self.sizeof_type(ret_type_spec);
+                let (s, t) = Self::classify_struct_return(size);
+                sret_size = s;
+                two_reg_ret_size = t;
+                // Small vector returns (<=8 bytes, no sret/two_reg) need I64 return type
+                // so the packed vector data is returned in a register, not as a pointer.
+                if s.is_none() && t.is_none() {
+                    ret_ty = IrType::I64;
+                }
             }
             if matches!(full_ret_ctype, CType::ComplexLongDouble) {
                 // On x86-64, _Complex long double is returned via x87 st(0)/st(1),

@@ -242,6 +242,10 @@ impl Lowerer {
                         // The alloca is the struct base address
                         return info.alloca;
                     }
+                    // Vector types also store data inline at their alloca address
+                    if info.c_type.as_ref().map_or(false, |ct| ct.is_vector()) {
+                        return info.alloca;
+                    }
                     // It's a pointer to struct: load the pointer
                     let loaded = self.fresh_value();
                     self.emit(Instruction::Load { dest: loaded, ptr: info.alloca, ty: IrType::Ptr , seg_override: AddressSpace::Default });
