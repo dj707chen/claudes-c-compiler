@@ -1368,6 +1368,13 @@ pub fn emit_cast_default(cg: &mut (impl ArchCodegen + ?Sized), dest: &Value, src
 /// to arch-specific primitives.
 /// Backends that override `emit_unaryop` should call this for types they don't handle specially.
 pub fn emit_unaryop_default(cg: &mut (impl ArchCodegen + ?Sized), dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
+    // IsConstant should have been resolved by constant folding.
+    // If it survived to codegen, the operand was not constant, so emit 0.
+    if op == IrUnaryOp::IsConstant {
+        cg.emit_load_operand(&Operand::Const(IrConst::I32(0)));
+        cg.emit_store_result(dest);
+        return;
+    }
     if is_i128_type(ty) {
         cg.emit_load_acc_pair(src);
         match op {
@@ -1397,6 +1404,7 @@ pub fn emit_unaryop_default(cg: &mut (impl ArchCodegen + ?Sized), dest: &Value, 
             IrUnaryOp::Ctz => cg.emit_int_ctz(ty),
             IrUnaryOp::Bswap => cg.emit_int_bswap(ty),
             IrUnaryOp::Popcount => cg.emit_int_popcount(ty),
+            IrUnaryOp::IsConstant => unreachable!("IsConstant handled above"),
         }
     }
     cg.emit_store_result(dest);

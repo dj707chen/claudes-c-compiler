@@ -161,6 +161,22 @@ fn try_fold_with_map(inst: &Instruction, const_map: &[Option<ConstMapEntry>]) ->
             })
         }
         Instruction::UnaryOp { dest, op, src, ty } => {
+            // IsConstant (__builtin_constant_p): resolve based on whether operand is constant.
+            // After inlining and constant propagation, the operand may have become a constant.
+            if *op == IrUnaryOp::IsConstant {
+                // If the operand is already a constant (literal or known via const_map),
+                // resolve to 1. Otherwise, leave unresolved so that later passes
+                // (copy_prop, simplify) can simplify the operand, and a subsequent
+                // constant_fold run can try again.
+                if resolve_const(src, const_map).is_some() {
+                    return Some(Instruction::Copy {
+                        dest: *dest,
+                        src: Operand::Const(IrConst::I32(1)),
+                    });
+                }
+                // Not yet known to be constant - don't fold yet
+                return None;
+            }
             // For 128-bit types, fold Neg and Not using native i128
             if ty.is_128bit() {
                 let sc = resolve_const(src, const_map)?;
@@ -754,6 +770,10 @@ fn fold_unaryop(op: IrUnaryOp, src: i64, ty: IrType) -> Option<i64> {
             } else {
                 (src as u64).count_ones() as i64
             }
+        }
+        IrUnaryOp::IsConstant => {
+            // If we got here, the operand was already constant
+            1
         }
     })
 }

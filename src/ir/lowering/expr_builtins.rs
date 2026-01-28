@@ -377,14 +377,31 @@ impl Lowerer {
             BuiltinIntrinsic::VaStart | BuiltinIntrinsic::VaEnd | BuiltinIntrinsic::VaCopy => {
                 unreachable!("va builtins handled earlier by name match")
             }
-            // __builtin_constant_p(expr) -> 1 if expr is a compile-time constant, 0 otherwise
+            // __builtin_constant_p(expr) -> 1 if expr is a compile-time constant, 0 otherwise.
+            // We emit an IsConstant unary op so that after inlining and constant propagation,
+            // the constant_fold pass can resolve it to 1 if the operand became constant.
+            // This is critical for the Linux kernel's cpucap_is_possible() pattern where
+            // __builtin_constant_p is used inside always_inline functions.
             BuiltinIntrinsic::ConstantP => {
-                let result = if let Some(arg) = args.first() {
-                    if self.eval_const_expr(arg).is_some() { 1i64 } else { 0i64 }
+                if let Some(arg) = args.first() {
+                    // If already a compile-time constant at lowering time, resolve immediately
+                    if self.eval_const_expr(arg).is_some() {
+                        return Some(Operand::Const(IrConst::I32(1)));
+                    }
+                    // Otherwise emit an IsConstant instruction to be resolved after optimization
+                    let src = self.lower_expr(arg);
+                    let src_ty = self.get_expr_type(arg);
+                    let dest = self.fresh_value();
+                    self.emit(Instruction::UnaryOp {
+                        dest,
+                        op: IrUnaryOp::IsConstant,
+                        src,
+                        ty: src_ty,
+                    });
+                    Some(Operand::Value(dest))
                 } else {
-                    0i64
-                };
-                Some(Operand::Const(IrConst::I64(result)))
+                    Some(Operand::Const(IrConst::I32(0)))
+                }
             }
             // __builtin_object_size(ptr, type) -> compile-time object size, or unknown
             // For types 0 and 1: return (size_t)-1 when size is unknown

@@ -106,7 +106,14 @@ fn fold_constant_cond_branches_with_map(func: &mut IrFunction, label_to_idx: &Fx
         if let Terminator::CondBranch { cond, true_label, false_label } = &block.terminator {
             let const_val = match cond {
                 Operand::Const(c) => Some(is_const_nonzero(c)),
-                _ => None,
+                Operand::Value(v) => {
+                    // Look through Copy/Phi instructions in this block to resolve
+                    // the Value to a constant. This handles the case where
+                    // simplify_trivial_phis created a Copy { dest: V, src: Const(c) }
+                    // in a previous fixpoint iteration, but copy_prop hasn't run yet.
+                    resolve_value_to_const_in_block(block, *v)
+                        .map(|c| is_const_nonzero(&c))
+                }
             };
             if let Some(is_true) = const_val {
                 let taken = if is_true { *true_label } else { *false_label };
@@ -172,7 +179,11 @@ fn fold_constant_switches_with_map(func: &mut IrFunction, label_to_idx: &FxHashM
 
     for (idx, block) in func.blocks.iter().enumerate() {
         if let Terminator::Switch { val, cases, default } = &block.terminator {
-            if let Operand::Const(c) = val {
+            let resolved_const = match val {
+                Operand::Const(c) => Some(*c),
+                Operand::Value(v) => resolve_value_to_const_in_block(block, *v),
+            };
+            if let Some(c) = resolved_const {
                 if let Some(switch_int) = c.to_i64() {
                     // Find the matching case, or fall through to default
                     let taken = cases.iter()
@@ -228,6 +239,47 @@ fn fold_constant_switches_with_map(func: &mut IrFunction, label_to_idx: &FxHashM
 }
 
 /// Check if a constant value is nonzero (truthy).
+/// Look through Copy and Phi instructions in a block to resolve a Value to
+/// a constant. This allows fold_constant_cond_branches and fold_constant_switches
+/// to see through Copy instructions created by simplify_trivial_phis within
+/// the same cfg_simplify fixpoint loop, without waiting for a separate copy_prop pass.
+fn resolve_value_to_const_in_block(block: &BasicBlock, v: Value) -> Option<IrConst> {
+    for inst in &block.instructions {
+        match inst {
+            Instruction::Copy { dest, src: Operand::Const(c) } if *dest == v => {
+                return Some(*c);
+            }
+            Instruction::Phi { dest, incoming, .. } if *dest == v => {
+                // Check if all incoming values are the same constant (by integer value)
+                let mut common_val: Option<i64> = None;
+                let mut first_const: Option<IrConst> = None;
+                for (op, _) in incoming {
+                    match op {
+                        Operand::Const(c) => {
+                            if let Some(ci) = c.to_i64() {
+                                if let Some(prev) = common_val {
+                                    if prev != ci {
+                                        return None; // Different constants
+                                    }
+                                } else {
+                                    common_val = Some(ci);
+                                    first_const = Some(*c);
+                                }
+                            } else {
+                                return None; // Can't convert to i64
+                            }
+                        }
+                        _ => return None, // Non-constant incoming value
+                    }
+                }
+                return first_const;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn is_const_nonzero(c: &IrConst) -> bool {
     match c {
         IrConst::I8(v) => *v != 0,

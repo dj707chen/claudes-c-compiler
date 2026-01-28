@@ -347,6 +347,14 @@ impl Lowerer {
             GlobalInit::Zero
         };
 
+        // Compute natural alignment from the type specifier. This picks up
+        // struct/union __attribute__((aligned(N))) that is part of the type
+        // definition rather than the variable declaration. Without this,
+        // `static struct fxregs_state fxregs` would get da.var_ty.align() == 1
+        // (IrType::I8) instead of the struct's required 16-byte alignment.
+        let c_align = self.alignof_type(type_spec);
+        let natural = if c_align > 0 { c_align.max(da.var_ty.align()) } else { da.var_ty.align() };
+
         // Respect explicit __attribute__((aligned(N))) / _Alignas(N) on static locals.
         // Resolve _Alignas(type) via the lowerer for accurate typedef resolution.
         let mut explicit_align = if let Some(ref alignas_ts) = decl.alignas_type {
@@ -365,9 +373,9 @@ impl Lowerer {
         }
         let has_explicit_align = explicit_align.is_some();
         let align = if let Some(explicit) = explicit_align {
-            da.var_ty.align().max(explicit)
+            natural.max(explicit)
         } else {
-            da.var_ty.align()
+            natural
         };
 
         // For struct initializers emitted as byte arrays, set element type to I8

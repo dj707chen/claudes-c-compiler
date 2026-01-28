@@ -1,22 +1,19 @@
-Task: Fix __builtin_constant_p evaluation after inlining
+Task: Fix ARM kernel link failures from dead code not eliminated (COMPLETED)
 
-Problem:
-__builtin_constant_p(expr) is currently evaluated at IR lowering time,
-before inlining. When the expression is a function parameter that becomes
-constant after inlining, it incorrectly returns 0 instead of 1.
+Two fixes applied:
 
-This causes ARM kernel link failures because the Linux kernel uses
-__builtin_constant_p in cpucap_is_possible() to gate dead code behind
-extern declarations (as link-error traps). When __builtin_constant_p
-always returns 0, the dead code isn't eliminated and undefined symbols
-(preserve_sve_context, preserve_tpidr2_context, etc.) leak to the linker.
+Fix 1: __builtin_constant_p deferred evaluation
+- Added IsConstant variant to IrUnaryOp
+- Lower __builtin_constant_p to UnaryOp { op: IsConstant } instead of
+  immediately resolving to constant 0
+- constant_fold resolves IsConstant to 1 if operand is constant
+- Codegen emits 0 for any remaining unresolved IsConstant
 
-Fix:
-1. Add IsConstant variant to IrUnaryOp
-2. Lower __builtin_constant_p to UnaryOp { op: IsConstant } instead of
-   immediately resolving to constant 0
-3. In constant_fold pass, resolve IsConstant to 1 if operand is constant,
-   leave as-is otherwise
-4. In codegen, emit 0 for any remaining unresolved IsConstant
-5. After inlining + constant prop + constant fold, the dead code is properly
-   eliminated
+Fix 2: cfg_simplify resolves CondBranch/Switch through Copy/Phi instructions
+- fold_constant_cond_branches and fold_constant_switches now look through
+  Copy and Phi instructions in the same block to resolve Value operands
+  to constants, without waiting for a separate copy_prop pass
+- This fixes the kernel pattern where simplify_trivial_phis creates
+  Copy { dest: V, src: Const(0) } but the CondBranch { cond: V } was not
+  folded until copy_prop ran in a later pipeline phase
+- Critical for kernel's system_supports_sve()/system_supports_sme() guards

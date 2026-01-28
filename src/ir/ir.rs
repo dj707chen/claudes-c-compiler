@@ -1134,6 +1134,9 @@ pub enum IrUnaryOp {
     Ctz,
     Bswap,
     Popcount,
+    /// __builtin_constant_p: returns 1 if operand is a compile-time constant, 0 otherwise.
+    /// Lowered as an IR instruction so it can be resolved after inlining and constant propagation.
+    IsConstant,
 }
 
 /// Comparison operations.
