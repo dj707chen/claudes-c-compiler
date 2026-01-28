@@ -1019,13 +1019,13 @@ fn parse_hex_float_to_f128(negative: bool, text: &str) -> [u8; 16] {
         }
     }
 
-    // Build the mantissa from hex digits
+    // Build the mantissa from hex digits (at most 32 hex digits = 128 bits)
     let mut mantissa: u128 = 0;
-    let mut bits_used: u32 = 0;
+    let mut bits_read: u32 = 0;
     for &d in &hex_digits {
-        if bits_used + 4 <= 128 {
+        if bits_read + 4 <= 128 {
             mantissa = (mantissa << 4) | (d as u128);
-            bits_used += 4;
+            bits_read += 4;
         }
     }
 
@@ -1041,21 +1041,24 @@ fn parse_hex_float_to_f128(negative: bool, text: &str) -> [u8; 16] {
     };
     let binary_exp = exp2 - frac_hex_digits * 4;
 
-    // Normalize mantissa to have bit 112 set (for 113-bit mantissa)
+    // Normalize mantissa to have bit 112 set (for 113-bit mantissa).
+    // The unbiased IEEE exponent is: binary_exp + (bl - 1), where bl is the
+    // actual bit length of the mantissa. This accounts for the position of the
+    // most significant bit relative to the binary point.
+    // Note: we use bl (actual bit length) not bits_used (total hex digit bits),
+    // since leading zero hex digits don't affect the exponent.
     let bl = 128 - mantissa.leading_zeros();
+    let adj_exp = binary_exp + (bl as i32 - 1);
     if bl > 113 {
-        // Too many bits, shift right
+        // Too many bits, shift right (loses precision)
         let excess = bl - 113;
         mantissa >>= excess;
-        let adj_exp = binary_exp + (bits_used as i32 - 1) + excess as i32;
         encode_f128(negative, adj_exp, mantissa)
     } else if bl < 113 && bl > 0 {
         let deficit = 113 - bl;
         mantissa <<= deficit;
-        let adj_exp = binary_exp + (bits_used as i32 - 1) - deficit as i32;
         encode_f128(negative, adj_exp, mantissa)
     } else {
-        let adj_exp = binary_exp + (bits_used as i32 - 1);
         encode_f128(negative, adj_exp, mantissa)
     }
 }
