@@ -1,0 +1,26 @@
+Task: Fix i686 compound initializer for array elements wider than pointer size
+Status: in_progress
+
+Problem:
+On i686 (32-bit), when a uint64_t[] array has static initializers containing
+address expressions (e.g., JS_VALUE_FROM_PTR(&table[N]) which casts a pointer
+to uint32_t/uintptr_t and stores it in uint64_t), the compound initializer
+emits each element using only pointer-sized (.long = 4 bytes) directives
+instead of the full 8-byte element width.
+
+This causes all relocations to be packed into half the space, corrupting
+the array data. The mquickjs project on i686 crashes because its
+js_stdlib_table (uint64_t[]) contains tagged pointer values that get
+misaligned.
+
+Root cause:
+In global_init.rs, compound elements for address expressions (GlobalAddr,
+GlobalAddrOffset, Zero) are emitted in common.rs using ptr_dir (.long on i686),
+which is 4 bytes. But the array element type is uint64_t (8 bytes). The
+compound creation creates N elements for N array entries, but each element
+only emits 4 bytes, so total output is N*4 instead of N*8.
+
+Fix approach:
+When base_type_size > target_ptr_size(), pad each compound element to the
+full base_type_size by adding explicit zero padding bytes or using the
+bytes+ptrs serialization approach.
