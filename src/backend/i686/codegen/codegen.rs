@@ -2000,6 +2000,7 @@ impl ArchCodegen for I686Codegen {
                                 emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + j as i64);
                                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + j);
                             }
+                            self.state.reg_cache.invalidate_acc();
                         } else {
                             // Register-allocated: store low 32 bits, zero the rest
                             self.operand_to_eax(&args[i]);
@@ -2026,6 +2027,7 @@ impl ArchCodegen for I686Codegen {
                                     emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + j as i64);
                                     emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + j);
                                 }
+                                self.state.reg_cache.invalidate_acc();
                             } else {
                                 self.operand_to_eax(&args[i]);
                                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
@@ -2087,6 +2089,7 @@ impl ArchCodegen for I686Codegen {
                                     emit!(self.state, "    movb %al, {}(%esp)", stack_offset + copied);
                                     copied += 1;
                                 }
+                                self.state.reg_cache.invalidate_acc();
                             }
                         } else {
                             // Non-alloca: value is a pointer to struct data.
@@ -2104,6 +2107,7 @@ impl ArchCodegen for I686Codegen {
                                 emit!(self.state, "    movb %al, {}(%esp)", stack_offset + copied);
                                 copied += 1;
                             }
+                            self.state.reg_cache.invalidate_acc();
                         }
                     }
                     stack_offset += (sz + 3) & !3;
@@ -2120,6 +2124,7 @@ impl ArchCodegen for I686Codegen {
                                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
                                 emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + 4);
                                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + 4);
+                                self.state.reg_cache.invalidate_acc();
                             } else {
                                 // Register-allocated F64: on i686, only the low 32 bits
                                 // are in the register. Store low word; high word is zero.
@@ -2149,6 +2154,7 @@ impl ArchCodegen for I686Codegen {
                                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
                                 emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + 4);
                                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + 4);
+                                self.state.reg_cache.invalidate_acc();
                             } else {
                                 // Register-allocated I64/U64: on i686, the register holds
                                 // only the low 32 bits; high 32 bits are zero.
