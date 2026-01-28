@@ -713,7 +713,7 @@ impl Lowerer {
             };
 
             let base_elem_size = if has_func_ptr {
-                8
+                crate::common::types::target_ptr_size()
             } else if !type_dims.is_empty() {
                 // Use CType for innermost element size (works for both direct and typedef'd arrays)
                 Self::ctype_innermost_elem_size(&resolved_ctype, &self.types.struct_layouts)
@@ -750,8 +750,10 @@ impl Lowerer {
         }
 
         // Regular scalar - use sizeof_type for the allocation size
-        // (8 bytes for most scalars, 16 for long double)
-        let scalar_size = resolved_ctype.size_ctx(&self.types.struct_layouts).max(8);
+        // Minimum 8 bytes on LP64 (to ensure stack alignment for loads/stores).
+        // On ILP32, minimum 4 bytes (pointer-width).
+        let min_alloc = if crate::common::types::target_is_32bit() { 4 } else { 8 };
+        let scalar_size = resolved_ctype.size_ctx(&self.types.struct_layouts).max(min_alloc);
         (scalar_size, 0, false, false, vec![])
     }
 

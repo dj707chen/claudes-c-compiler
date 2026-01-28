@@ -83,8 +83,8 @@ and PostgreSQL.
 - **Complex numbers**: `_Complex` arithmetic has some edge-case failures.
 - **GNU extensions**: Partial `__attribute__` support. ARM NEON intrinsics are partially
   implemented (core 128-bit operations work; some SSE-equivalent stubs remain).
-- **i686**: The 32-bit x86 backend is new and still has known issues with hardcoded
-  64-bit pointer sizes in some lowering paths.
+- **i686**: The 32-bit x86 backend is new. Most hardcoded 64-bit pointer size
+  assumptions in IR lowering have been fixed (~98.3% unit test pass rate).
 
 ## Architecture
 

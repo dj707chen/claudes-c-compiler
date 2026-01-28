@@ -753,7 +753,7 @@ impl Lowerer {
                     let et = self.get_expr_type(e);
                     (self.lower_expr(e), et)
                 } else {
-                    (Operand::Const(IrConst::I64(0)), IrType::I64)
+                    (Operand::Const(IrConst::ptr_int(0)), crate::common::types::target_int_ir_type())
                 }
             }
         };

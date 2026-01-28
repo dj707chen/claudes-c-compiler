@@ -7,7 +7,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{AddressSpace, IrType, CType};
+use crate::common::types::{AddressSpace, IrType, CType, target_int_ir_type, target_is_32bit};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -128,7 +128,7 @@ impl Lowerer {
             let ty = if name.ends_with("ll_overflow") {
                 IrType::I64
             } else if name.ends_with("l_overflow") {
-                IrType::I64  // long = i64 on 64-bit
+                target_int_ir_type() // long: I64 on LP64, I32 on ILP32
             } else {
                 IrType::I32
             };
@@ -140,7 +140,7 @@ impl Lowerer {
             let ty = if name.ends_with("ll_overflow") {
                 IrType::U64
             } else if name.ends_with("l_overflow") {
-                IrType::U64
+                if target_is_32bit() { IrType::U32 } else { IrType::U64 } // unsigned long
             } else {
                 IrType::U32
             };
@@ -164,8 +164,8 @@ impl Lowerer {
             return (ir_ty, is_signed);
         }
 
-        // Default to signed long (i64) if we can't determine
-        (IrType::I64, true)
+        // Default to signed long if we can't determine
+        (target_int_ir_type(), true)
     }
 
     /// Compute signed overflow flag for add/sub/mul.

@@ -908,7 +908,7 @@ impl<'a> SemaConstEval<'a> {
                 if let Some(ctype) = self.types.typedefs.get(name) {
                     ctype.align_ctx(&self.types.struct_layouts)
                 } else {
-                    8
+                    crate::common::types::target_ptr_size()
                 }
             }
             TypeSpecifier::TypeofType(inner) => self.alignof_type_spec(inner),
@@ -916,10 +916,10 @@ impl<'a> SemaConstEval<'a> {
                 if let Some(ctype) = self.infer_expr_ctype(expr) {
                     ctype.align_ctx(&self.types.struct_layouts)
                 } else {
-                    8 // fallback
+                    crate::common::types::target_ptr_size() // fallback
                 }
             }
-            _ => 8,
+            _ => crate::common::types::target_ptr_size(),
         }
     }
 

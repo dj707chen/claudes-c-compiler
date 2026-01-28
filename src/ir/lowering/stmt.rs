@@ -1,6 +1,6 @@
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{AddressSpace, IrType, CType, StructLayout};
+use crate::common::types::{AddressSpace, IrType, CType, StructLayout, target_int_ir_type};
 use super::lowering::Lowerer;
 use super::definitions::{LocalInfo, GlobalInfo, DeclAnalysis, FuncSig};
 use crate::frontend::sema::type_context::extract_fptr_typedef_info;
@@ -1081,13 +1081,14 @@ impl Lowerer {
                     let dim_val = self.lower_expr(expr);
                     let dim_value = self.operand_to_value(dim_val);
 
+                    let ptr_int_ty = target_int_ir_type();
                     result = if let Some(prev) = result {
-                        let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(prev), Operand::Value(dim_value), IrType::I64);
+                        let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(prev), Operand::Value(dim_value), ptr_int_ty);
                         Some(mul)
                     } else {
                         // First runtime dim: multiply by accumulated constants
                         if const_product > 1 {
-                            let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_value), Operand::Const(IrConst::I64(const_product as i64)), IrType::I64);
+                            let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_value), Operand::Const(IrConst::ptr_int(const_product as i64)), ptr_int_ty);
                             const_product = 1;
                             Some(mul)
                         } else {
@@ -1101,7 +1102,8 @@ impl Lowerer {
         // If we have remaining constant factors, multiply them in
         if let Some(prev) = result {
             if const_product > 1 {
-                let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(prev), Operand::Const(IrConst::I64(const_product as i64)), IrType::I64);
+                let ptr_int_ty = target_int_ir_type();
+                let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(prev), Operand::Const(IrConst::ptr_int(const_product as i64)), ptr_int_ty);
                 return Some(mul);
             }
             return Some(prev);
@@ -1185,11 +1187,12 @@ impl Lowerer {
                     current_const_stride *= const_val as usize;
                     if current_stride.is_some() {
                         // Previous stride was runtime, multiply by constant
+                        let ptr_int_ty = target_int_ir_type();
                         let stride_val = self.emit_binop_val(
                             IrBinOp::Mul,
                             Operand::Value(current_stride.unwrap()),
-                            Operand::Const(IrConst::I64(const_val as i64)),
-                            IrType::I64,
+                            Operand::Const(IrConst::ptr_int(const_val as i64)),
+                            ptr_int_ty,
                         );
                         current_stride = Some(stride_val);
                         vla_strides[i] = Some(stride_val);
@@ -1201,11 +1204,12 @@ impl Lowerer {
                     let dim_value = self.operand_to_value(dim_val);
 
                     let stride_val = if let Some(prev) = current_stride {
+                        let ptr_int_ty = target_int_ir_type();
                         self.emit_binop_val(
                             IrBinOp::Mul,
                             Operand::Value(dim_value),
                             Operand::Value(prev),
-                            IrType::I64,
+                            ptr_int_ty,
                         )
                     } else {
                         // First runtime dimension: multiply by accumulated const

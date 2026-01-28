@@ -5,7 +5,7 @@
 //! IR types (for correct loads/stores through pointer dereference and subscript).
 
 use crate::frontend::parser::ast::*;
-use crate::common::types::{AddressSpace, IrType, RcLayout, CType};
+use crate::common::types::{AddressSpace, IrType, RcLayout, CType, target_ptr_size};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -299,13 +299,13 @@ impl Lowerer {
                         return vi.elem_size;
                     }
                 }
-                8
+                target_ptr_size()
             }
             Expr::PostfixOp(_, inner, _) => self.get_pointer_elem_size_from_expr(inner),
             Expr::UnaryOp(op, inner, _) => {
                 match op {
                     UnaryOp::PreInc | UnaryOp::PreDec => self.get_pointer_elem_size_from_expr(inner),
-                    _ => 8,
+                    _ => target_ptr_size(),
                 }
             }
             Expr::BinaryOp(op, lhs, rhs, _) => {
@@ -317,17 +317,17 @@ impl Lowerer {
                         } else if self.expr_is_pointer(rhs) {
                             self.get_pointer_elem_size_from_expr(rhs)
                         } else {
-                            8
+                            target_ptr_size()
                         }
                     }
                     BinOp::Sub => {
                         if self.expr_is_pointer(lhs) {
                             self.get_pointer_elem_size_from_expr(lhs)
                         } else {
-                            8
+                            target_ptr_size()
                         }
                     }
-                    _ => 8,
+                    _ => target_ptr_size(),
                 }
             }
             Expr::Conditional(_, then_expr, _, _) => self.get_pointer_elem_size_from_expr(then_expr),
@@ -339,7 +339,7 @@ impl Lowerer {
                         return self.resolve_ctype_size(pointee).max(1);
                     }
                 }
-                8
+                target_ptr_size()
             }
             Expr::AddressOf(inner, _) => {
                 // &x: pointer to typeof(x) -- use sizeof_expr which correctly
@@ -357,7 +357,7 @@ impl Lowerer {
                     if let CType::Pointer(ref pointee, _) = ctype {
                         self.resolve_ctype_size(pointee).max(1)
                     } else {
-                        8
+                        target_ptr_size()
                     }
                 }
             }
@@ -370,14 +370,14 @@ impl Lowerer {
                         _ => {}
                     }
                 }
-                8
+                target_ptr_size()
             }
             _ => {
                 // Try using get_pointee_type_of_expr as a fallback
                 if let Some(pt) = self.get_pointee_type_of_expr(expr) {
                     return pt.size();
                 }
-                8
+                target_ptr_size()
             }
         }
     }

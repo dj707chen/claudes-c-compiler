@@ -7,7 +7,7 @@
 use crate::common::fx_hash::FxHashMap;
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{AddressSpace, CType, IrType};
+use crate::common::types::{AddressSpace, CType, IrType, target_int_ir_type};
 use super::lowering::Lowerer;
 
 /// Promote small integer types to I32, matching C integer promotion rules.
@@ -197,7 +197,7 @@ impl Lowerer {
                 other => IrType::from_ctype(other),
             },
             CType::Function(ft) => IrType::from_ctype(&ft.return_type),
-            _ => IrType::I64,
+            _ => target_int_ir_type(),
         }
     }
 
@@ -427,7 +427,7 @@ impl Lowerer {
         if let Some(pt) = self.get_pointee_type_of_expr(index) {
             return pt;
         }
-        IrType::I64
+        target_int_ir_type()
     }
 
     /// Helper to get array root name from subscript base/index without needing the full
@@ -483,7 +483,7 @@ impl Lowerer {
         if let Some(ctype) = self.get_expr_ctype(func) {
             return Self::extract_func_ptr_return_type(&ctype);
         }
-        IrType::I64
+        target_int_ir_type()
     }
 
     /// Resolve the CType of a _Generic selection expression.
@@ -584,7 +584,7 @@ impl Lowerer {
         if let Some(def) = default_expr {
             return self.get_expr_type(def);
         }
-        IrType::I64
+        target_int_ir_type()
     }
 
     // expr_is_const_qualified is defined in expr.rs as pub(super)
@@ -727,7 +727,7 @@ impl Lowerer {
                     }
                     return vi.ty;
                 }
-                IrType::I64
+                target_int_ir_type()
             }
             Expr::ArraySubscript(base, index, _) => {
                 self.get_subscript_type(base, index)
@@ -743,7 +743,7 @@ impl Lowerer {
                 if let Some(pt) = self.get_pointee_type_of_expr(inner) {
                     return pt;
                 }
-                IrType::I64
+                target_int_ir_type()
             }
             Expr::MemberAccess(base_expr, field_name, _) => {
                 let (_, field_ty, bf_info) = self.resolve_member_access_full(base_expr, field_name);
@@ -766,12 +766,12 @@ impl Lowerer {
                         return self.get_expr_type(expr);
                     }
                 }
-                IrType::I64
+                target_int_ir_type()
             }
             Expr::CompoundLiteral(type_name, _, _) => {
                 self.type_spec_to_ir(type_name)
             }
-            _ => IrType::I64,
+            _ => target_int_ir_type(),
         }
     }
 

@@ -590,7 +590,8 @@ impl Lowerer {
                 } else {
                     let const_dim = dim_info.const_size.unwrap_or(1) as usize;
                     if let Some(prev) = current_stride {
-                        let result = self.emit_binop_val(IrBinOp::Mul, Operand::Value(prev), Operand::Const(IrConst::I64(const_dim as i64)), IrType::I64);
+                        let ptr_int_ty = crate::common::types::target_int_ir_type();
+                        let result = self.emit_binop_val(IrBinOp::Mul, Operand::Value(prev), Operand::Const(IrConst::ptr_int(const_dim as i64)), ptr_int_ty);
                         vla_strides[i] = Some(result);
                         current_stride = Some(result);
                     } else {
@@ -617,7 +618,7 @@ impl Lowerer {
             let val = self.fresh_value();
             self.emit(Instruction::Copy {
                 dest: val,
-                src: Operand::Const(IrConst::I64(1)),
+                src: Operand::Const(IrConst::ptr_int(1)),
             });
             val
         }

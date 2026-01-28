@@ -799,7 +799,7 @@ impl Lowerer {
                 let ct = self.expr_ctype(expr);
                 let elem_size = self.resolve_ctype_size(&ct);
                 let scaled = self.scale_index(idx_val, elem_size);
-                let dest = self.emit_binop_val(IrBinOp::Add, base_val, scaled, IrType::I64);
+                let dest = self.emit_binop_val(IrBinOp::Add, base_val, scaled, crate::common::types::target_int_ir_type());
                 dest
             }
             Expr::MemberAccess(base, field, _) => {

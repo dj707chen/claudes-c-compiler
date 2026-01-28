@@ -404,7 +404,8 @@ impl Lowerer {
                 let dim_value = self.operand_to_value(dim_val);
                 if let Some(elem_sz) = elem_size_opt {
                     // Both element and dimension are runtime
-                    let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_value), Operand::Value(elem_sz), IrType::I64);
+                    let ptr_int_ty = crate::common::types::target_int_ir_type();
+                    let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(dim_value), Operand::Value(elem_sz), ptr_int_ty);
                     return Some(mul);
                 } else {
                     // Element is constant, dimension is runtime
@@ -423,7 +424,8 @@ impl Lowerer {
             if let Some(elem_sz) = elem_size_opt {
                 let const_dim = self.expr_as_array_size(size_expr).unwrap_or(1);
                 if const_dim > 1 {
-                    let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(elem_sz), Operand::Const(IrConst::I64(const_dim)), IrType::I64);
+                    let ptr_int_ty = crate::common::types::target_int_ir_type();
+                    let mul = self.emit_binop_val(IrBinOp::Mul, Operand::Value(elem_sz), Operand::Const(IrConst::ptr_int(const_dim)), ptr_int_ty);
                     return Some(mul);
                 } else {
                     return Some(elem_sz);
@@ -766,7 +768,7 @@ impl Lowerer {
         let addr_space = self.get_addr_space_of_ptr_expr(inner);
         let ptr = self.lower_expr(inner);
         let dest = self.fresh_value();
-        let deref_ty = self.get_pointee_type_of_expr(inner).unwrap_or(IrType::I64);
+        let deref_ty = self.get_pointee_type_of_expr(inner).unwrap_or(crate::common::types::target_int_ir_type());
         let ptr_val = self.operand_to_value(ptr);
         self.emit(Instruction::Load { dest, ptr: ptr_val, ty: deref_ty, seg_override: addr_space });
         Operand::Value(dest)

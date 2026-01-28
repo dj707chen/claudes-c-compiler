@@ -9,7 +9,7 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::{AddressSpace, IrType, CType};
+use crate::common::types::{AddressSpace, IrType, CType, target_int_ir_type};
 use super::lowering::Lowerer;
 
 impl Lowerer {
@@ -663,7 +663,7 @@ impl Lowerer {
                         .cloned()
                         .unwrap_or_else(|| name.clone());
                     let sig = self.func_meta.sigs.get(name.as_str());
-                    let mut ret_ty = sig.map(|s| s.return_type).unwrap_or(IrType::I64);
+                    let mut ret_ty = sig.map(|s| s.return_type).unwrap_or(target_int_ir_type());
                     if sig.and_then(|s| s.two_reg_ret_size).is_some() {
                         ret_ty = IrType::I128;
                     }
@@ -819,7 +819,7 @@ impl Lowerer {
                 return self.extract_return_type_from_ctype(&ctype);
             }
         }
-        IrType::I64
+        target_int_ir_type()
     }
 
     pub(super) fn extract_return_type_from_ctype(&self, ctype: &CType) -> IrType {
@@ -832,16 +832,16 @@ impl Lowerer {
                         match ret.as_ref() {
                             CType::Float => IrType::F32,
                             CType::Double => IrType::F64,
-                            _ => IrType::I64,
+                            _ => target_int_ir_type(),
                         }
                     }
                     CType::Float => IrType::F32,
                     CType::Double => IrType::F64,
-                    _ => IrType::I64,
+                    _ => target_int_ir_type(),
                 }
             }
             CType::Function(ft) => Self::func_return_ir_type(&ft.return_type, returns_cld_in_regs),
-            _ => IrType::I64,
+            _ => target_int_ir_type(),
         }
     }
 

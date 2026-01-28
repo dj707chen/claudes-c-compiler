@@ -6,13 +6,22 @@
 
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
-use crate::common::types::IrType;
+use crate::common::types::{IrType, target_int_ir_type};
 use super::lowering::Lowerer;
 
 impl Lowerer {
     /// Determine the operand width for a suffix-encoded intrinsic (clz, ctz, popcount, etc.).
+    /// `ll` suffix = long long = always I64.
+    /// `l` suffix = long = I64 on LP64, I32 on ILP32.
+    /// No suffix = int = I32.
     pub(super) fn intrinsic_type_from_suffix(name: &str) -> IrType {
-        if name.ends_with("ll") || name.ends_with('l') { IrType::I64 } else { IrType::I32 }
+        if name.ends_with("ll") {
+            IrType::I64
+        } else if name.ends_with('l') {
+            target_int_ir_type() // long: I64 on LP64, I32 on ILP32
+        } else {
+            IrType::I32
+        }
     }
 
     /// Lower a simple unary intrinsic (CLZ, CTZ, Popcount) that takes one integer arg.

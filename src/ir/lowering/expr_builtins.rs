@@ -176,7 +176,7 @@ impl Lowerer {
                 } else { arg_vals.len() };
                 let return_type = Self::builtin_return_type(name)
                     .or_else(|| libc_sig.map(|s| s.return_type))
-                    .unwrap_or(IrType::I64);
+                    .unwrap_or(crate::common::types::target_int_ir_type());
                 let struct_arg_sizes = vec![None; arg_vals.len()];
                 self.emit(Instruction::Call {
                     dest: Some(dest), func: libc_name.clone(),
