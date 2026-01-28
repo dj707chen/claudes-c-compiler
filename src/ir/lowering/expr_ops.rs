@@ -365,6 +365,8 @@ impl Lowerer {
                 self.maybe_narrow(dest, promoted_ty)
             }
             UnaryOp::LogicalNot => {
+                let int_ty = crate::common::types::target_int_ir_type();
+                let zero = if int_ty == IrType::I32 { IrConst::I32(0) } else { IrConst::I64(0) };
                 let inner_ct = self.expr_ctype(inner);
                 if inner_ct.is_complex() {
                     // !complex_val => (real == 0) && (imag == 0)
@@ -372,13 +374,13 @@ impl Lowerer {
                     let ptr = self.operand_to_value(val);
                     let bool_val = self.lower_complex_to_bool(ptr, &inner_ct);
                     // Negate: bool_val is 1 if nonzero, so !complex is (bool_val == 0)
-                    let dest = self.emit_cmp_val(IrCmpOp::Eq, bool_val, Operand::Const(IrConst::I64(0)), IrType::I64);
+                    let dest = self.emit_cmp_val(IrCmpOp::Eq, bool_val, Operand::Const(zero), int_ty);
                     Operand::Value(dest)
                 } else {
                     let inner_ty = self.infer_expr_type(inner);
                     let val = self.lower_expr(inner);
                     let cmp_val = self.mask_float_sign_for_truthiness(val, inner_ty);
-                    let dest = self.emit_cmp_val(IrCmpOp::Eq, cmp_val, Operand::Const(IrConst::I64(0)), IrType::I64);
+                    let dest = self.emit_cmp_val(IrCmpOp::Eq, cmp_val, Operand::Const(zero), int_ty);
                     Operand::Value(dest)
                 }
             }
@@ -403,14 +405,14 @@ impl Lowerer {
         if let Some(const_val) = self.eval_const_expr(cond) {
             let is_true = const_val.is_nonzero();
             if is_true {
-                let then_ty = if self.expr_is_pointer(then_expr) { IrType::I64 } else { self.get_expr_type(then_expr) };
-                let else_ty = if self.expr_is_pointer(else_expr) { IrType::I64 } else { self.get_expr_type(else_expr) };
+                let then_ty = if self.expr_is_pointer(then_expr) { IrType::Ptr } else { self.get_expr_type(then_expr) };
+                let else_ty = if self.expr_is_pointer(else_expr) { IrType::Ptr } else { self.get_expr_type(else_expr) };
                 let common_ty = Self::common_type(then_ty, else_ty);
                 let then_val = self.lower_expr(then_expr);
                 return self.emit_implicit_cast(then_val, then_ty, common_ty);
             } else {
-                let then_ty = if self.expr_is_pointer(then_expr) { IrType::I64 } else { self.get_expr_type(then_expr) };
-                let else_ty = if self.expr_is_pointer(else_expr) { IrType::I64 } else { self.get_expr_type(else_expr) };
+                let then_ty = if self.expr_is_pointer(then_expr) { IrType::Ptr } else { self.get_expr_type(then_expr) };
+                let else_ty = if self.expr_is_pointer(else_expr) { IrType::Ptr } else { self.get_expr_type(else_expr) };
                 let common_ty = Self::common_type(then_ty, else_ty);
                 let else_val = self.lower_expr(else_expr);
                 return self.emit_implicit_cast(else_val, else_ty, common_ty);
@@ -421,8 +423,8 @@ impl Lowerer {
 
         let mut then_ty = self.get_expr_type(then_expr);
         let mut else_ty = self.get_expr_type(else_expr);
-        if self.expr_is_pointer(then_expr) { then_ty = IrType::I64; }
-        if self.expr_is_pointer(else_expr) { else_ty = IrType::I64; }
+        if self.expr_is_pointer(then_expr) { then_ty = IrType::Ptr; }
+        if self.expr_is_pointer(else_expr) { else_ty = IrType::Ptr; }
         let common_ty = Self::common_type(then_ty, else_ty);
 
         self.emit_ternary_branch(
@@ -448,11 +450,12 @@ impl Lowerer {
         let common_ty = Self::common_type(cond_ty, else_ty);
 
         // Convert condition to boolean for branching
-        let zero = Operand::Const(IrConst::I64(0));
+        let int_ty = crate::common::types::target_int_ir_type();
+        let zero = if int_ty == IrType::I32 { IrConst::I32(0) } else { IrConst::I64(0) };
         let cond_bool = self.fresh_value();
         self.emit(Instruction::Cmp {
             dest: cond_bool, op: IrCmpOp::Ne,
-            lhs: cond_val.clone(), rhs: zero, ty: IrType::I64,
+            lhs: cond_val.clone(), rhs: Operand::Const(zero), ty: int_ty,
         });
 
         self.emit_ternary_branch(
@@ -484,8 +487,10 @@ impl Lowerer {
         //
         // Use the actual result type for the alloca size so that wider types like
         // long double (F128, 16 bytes) and __int128 are stored correctly.
-        let alloca_size = result_ty.size().max(8);
-        let alloca_ty = if result_ty.size() > 8 { result_ty } else { IrType::I64 };
+        let int_ty = crate::common::types::target_int_ir_type();
+        let min_alloca_size = int_ty.size();
+        let alloca_size = result_ty.size().max(min_alloca_size);
+        let alloca_ty = if result_ty.size() > min_alloca_size { result_ty } else { int_ty };
         let result_alloca = self.emit_entry_alloca(alloca_ty, alloca_size, 0, false);
 
         let then_label = self.fresh_label();
@@ -519,6 +524,13 @@ impl Lowerer {
     // -----------------------------------------------------------------------
 
     fn lower_short_circuit(&mut self, lhs: &Expr, rhs: &Expr, is_and: bool) -> Operand {
+        // Use target-appropriate int type: I32 on ILP32 (i686), I64 on LP64
+        let int_ty = crate::common::types::target_int_ir_type();
+        let int_size = if int_ty == IrType::I32 { 4 } else { 8 };
+        let make_int_const = |v: i64| -> IrConst {
+            if int_ty == IrType::I32 { IrConst::I32(v as i32) } else { IrConst::I64(v) }
+        };
+
         // Constant-fold the LHS to eliminate dead code at lowering time.
         // This is critical for constructs like IS_ENABLED(CONFIG_X) && func()
         // where CONFIG_X is not set: without this, the compiler would emit a
@@ -528,20 +540,20 @@ impl Lowerer {
             if is_and {
                 if !lhs_is_true {
                     // 0 && rhs => always 0, skip RHS entirely
-                    return Operand::Const(IrConst::I64(0));
+                    return Operand::Const(make_int_const(0));
                 }
                 // nonzero && rhs => result is bool(rhs)
                 let rhs_val = self.lower_condition_expr(rhs);
-                let rhs_bool = self.emit_cmp_val(IrCmpOp::Ne, rhs_val, Operand::Const(IrConst::I64(0)), IrType::I64);
+                let rhs_bool = self.emit_cmp_val(IrCmpOp::Ne, rhs_val, Operand::Const(make_int_const(0)), int_ty);
                 return Operand::Value(rhs_bool);
             } else {
                 if lhs_is_true {
                     // nonzero || rhs => always 1, skip RHS entirely
-                    return Operand::Const(IrConst::I64(1));
+                    return Operand::Const(make_int_const(1));
                 }
                 // 0 || rhs => result is bool(rhs)
                 let rhs_val = self.lower_condition_expr(rhs);
-                let rhs_bool = self.emit_cmp_val(IrCmpOp::Ne, rhs_val, Operand::Const(IrConst::I64(0)), IrType::I64);
+                let rhs_bool = self.emit_cmp_val(IrCmpOp::Ne, rhs_val, Operand::Const(make_int_const(0)), int_ty);
                 return Operand::Value(rhs_bool);
             }
         }
@@ -555,11 +567,11 @@ impl Lowerer {
             if is_and && !rhs_is_true {
                 // LHS && false => always false. Evaluate LHS for side effects, return 0.
                 let _lhs_val = self.lower_condition_expr(lhs);
-                return Operand::Const(IrConst::I64(0));
+                return Operand::Const(make_int_const(0));
             } else if !is_and && rhs_is_true {
                 // LHS || true => always true. Evaluate LHS for side effects, return 1.
                 let _lhs_val = self.lower_condition_expr(lhs);
-                return Operand::Const(IrConst::I64(1));
+                return Operand::Const(make_int_const(1));
             }
             // For "LHS && true" or "LHS || false", fall through to normal lowering
             // since the result depends on LHS.
@@ -570,7 +582,7 @@ impl Lowerer {
         // which placed the alloca in the current block — if the expression was inside
         // nested control flow (e.g., inside a loop or if body), the alloca would
         // be in a non-entry block and mem2reg would refuse to promote it.
-        let result_alloca = self.emit_entry_alloca(IrType::I64, 8, 0, false);
+        let result_alloca = self.emit_entry_alloca(int_ty, int_size, 0, false);
 
         let rhs_label = self.fresh_label();
         let end_label = self.fresh_label();
@@ -578,7 +590,7 @@ impl Lowerer {
         let lhs_val = self.lower_condition_expr(lhs);
 
         let default_val = if is_and { 0 } else { 1 };
-        self.emit(Instruction::Store { val: Operand::Const(IrConst::I64(default_val)), ptr: result_alloca, ty: IrType::I64,
+        self.emit(Instruction::Store { val: Operand::Const(make_int_const(default_val)), ptr: result_alloca, ty: int_ty,
          seg_override: AddressSpace::Default });
 
         let (true_label, false_label) = if is_and {
@@ -590,13 +602,13 @@ impl Lowerer {
 
         self.start_block(rhs_label);
         let rhs_val = self.lower_condition_expr(rhs);
-        let rhs_bool = self.emit_cmp_val(IrCmpOp::Ne, rhs_val, Operand::Const(IrConst::I64(0)), IrType::I64);
-        self.emit(Instruction::Store { val: Operand::Value(rhs_bool), ptr: result_alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
+        let rhs_bool = self.emit_cmp_val(IrCmpOp::Ne, rhs_val, Operand::Const(make_int_const(0)), int_ty);
+        self.emit(Instruction::Store { val: Operand::Value(rhs_bool), ptr: result_alloca, ty: int_ty, seg_override: AddressSpace::Default });
         self.terminate(Terminator::Branch(end_label));
 
         self.start_block(end_label);
         let result = self.fresh_value();
-        self.emit(Instruction::Load { dest: result, ptr: result_alloca, ty: IrType::I64 , seg_override: AddressSpace::Default });
+        self.emit(Instruction::Load { dest: result, ptr: result_alloca, ty: int_ty, seg_override: AddressSpace::Default });
         Operand::Value(result)
     }
 

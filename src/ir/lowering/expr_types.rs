@@ -281,7 +281,7 @@ impl Lowerer {
     fn get_binop_type(&self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> IrType {
         match op {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
-            | BinOp::LogicalAnd | BinOp::LogicalOr => IrType::I64,
+            | BinOp::LogicalAnd | BinOp::LogicalOr => crate::common::types::target_int_ir_type(),
             BinOp::Shl | BinOp::Shr => {
                 let lty = self.get_expr_type(lhs);
                 promote_integer(lty)
@@ -627,6 +627,10 @@ impl Lowerer {
             }
             Expr::UnaryOp(UnaryOp::PreInc, inner, _) | Expr::UnaryOp(UnaryOp::PreDec, inner, _) => {
                 self.get_expr_type(inner)
+            }
+            Expr::UnaryOp(UnaryOp::LogicalNot, _, _) => {
+                // Logical NOT produces C int (I32 on ILP32, I64 on LP64)
+                crate::common::types::target_int_ir_type()
             }
             Expr::BinaryOp(op, lhs, rhs, _) => {
                 self.get_binop_type(op, lhs, rhs)

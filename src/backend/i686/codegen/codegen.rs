@@ -1415,6 +1415,13 @@ impl ArchCodegen for I686Codegen {
                                 emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + j as i64);
                                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + j);
                             }
+                        } else {
+                            // Register-allocated: store low 32 bits, zero the rest
+                            self.operand_to_eax(&args[i]);
+                            emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
+                            for j in (4..16).step_by(4) {
+                                emit!(self.state, "    movl $0, {}(%esp)", stack_offset + j);
+                            }
                         }
                     }
                     stack_offset += 16;
@@ -1426,6 +1433,13 @@ impl ArchCodegen for I686Codegen {
                             for j in (0..12).step_by(4) {
                                 emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + j as i64);
                                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + j);
+                            }
+                        } else {
+                            // Register-allocated: store low 32 bits, zero the rest
+                            self.operand_to_eax(&args[i]);
+                            emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
+                            for j in (4..12).step_by(4) {
+                                emit!(self.state, "    movl $0, {}(%esp)", stack_offset + j);
                             }
                         }
                     }
@@ -1486,6 +1500,12 @@ impl ArchCodegen for I686Codegen {
                                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
                                 emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + 4);
                                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + 4);
+                            } else {
+                                // Register-allocated F64: on i686, only the low 32 bits
+                                // are in the register. Store low word; high word is zero.
+                                self.operand_to_eax(&args[i]);
+                                emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
+                                emit!(self.state, "    movl $0, {}(%esp)", stack_offset + 4);
                             }
                         } else if let Operand::Const(IrConst::F64(f)) = &args[i] {
                             // F64 constant: store both 32-bit halves
@@ -1509,6 +1529,14 @@ impl ArchCodegen for I686Codegen {
                                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
                                 emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + 4);
                                 emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + 4);
+                            } else {
+                                // Register-allocated I64/U64: on i686, the register holds
+                                // only the low 32 bits; high 32 bits are zero.
+                                // This commonly happens for comparison/logical results
+                                // which the IR types as I64 but are really boolean values.
+                                self.operand_to_eax(&args[i]);
+                                emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
+                                emit!(self.state, "    movl $0, {}(%esp)", stack_offset + 4);
                             }
                         } else {
                             self.operand_to_eax(&args[i]);

@@ -30,6 +30,16 @@ pub fn target_is_32bit() -> bool {
     target_ptr_size() == 4
 }
 
+/// Return the IR type used for pointer-width integers (I64 on LP64, I32 on ILP32).
+/// This is the natural "word" type for the target: the size of `long`, `size_t`,
+/// and pointer arithmetic results. On 64-bit targets this is I64; on 32-bit (i686)
+/// it is I32. Use this instead of hardcoding `IrType::I64` for comparison results,
+/// logical operation results, and other values that represent C `int`-class results.
+pub fn target_int_ir_type() -> IrType {
+    if target_is_32bit() { IrType::I32 } else { IrType::I64 }
+}
+
+
 /// Reference-counted string used for struct/union layout keys in CType.
 /// Cloning is a cheap reference count increment instead of a heap allocation.
 pub type RcStr = Rc<str>;
