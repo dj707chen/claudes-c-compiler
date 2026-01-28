@@ -1,0 +1,24 @@
+Task: Fix ARM inline asm "i" constraint emitting register name instead of immediate value
+
+Status: in_progress
+
+Problem:
+When an inline asm has a pure immediate-only constraint ("i", "n") but the operand is
+still an Operand::Value (not a Const) — as happens in standalone bodies of static inline
+functions — the ARM backend emits a register name (e.g., "x9") instead of an immediate
+value. This causes linker errors like:
+  undefined reference to `x9' in .altinstructions section
+
+This breaks kernel compilation of arch/arm64/kvm/hyp/vhe/switch.c because the
+alternative_has_cap_unlikely() static inline function's standalone body has
+cpucap as a parameter, which can't be resolved to a compile-time constant.
+
+Root cause:
+- ARM's classify_constraint("i") returns GpReg (not Immediate)
+- The promotion from GpReg to Immediate only happens for Operand::Const values
+- For Operand::Value with "i" constraint, the operand stays as GpReg
+- The existing fallback (imm_value = Some(0)) only applies to already-Immediate operands
+
+Fix:
+Add a check after the const-promotion: if constraint is immediate-only and operand is
+still GpReg with a Value operand, promote to Immediate with imm_value=0 placeholder.
