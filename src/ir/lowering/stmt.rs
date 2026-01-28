@@ -275,6 +275,7 @@ impl Lowerer {
                 }
             }
             local_info.asm_register = declarator.attrs.asm_register.clone();
+            local_info.asm_register_has_init = declarator.attrs.asm_register.is_some() && declarator.init.is_some();
             local_info.cleanup_fn = declarator.attrs.cleanup_fn.clone();
             // Register cleanup variable in the current scope frame for scope-exit cleanup
             if let Some(ref cleanup_fn_name) = declarator.attrs.cleanup_fn {

@@ -79,6 +79,11 @@ pub(super) struct LocalInfo {
     /// For register variables with __asm__("regname"): the specific register name.
     /// Used to rewrite inline asm "r" constraints to specific register constraints.
     pub asm_register: Option<String>,
+    /// Whether this register variable was initialized (e.g., `register long x8 __asm__("x8") = n;`).
+    /// Initialized register variables read from the alloca (like normal vars).
+    /// Uninitialized register variables (e.g., `register unsigned long tp __asm__("tp");`)
+    /// read the hardware register directly.
+    pub asm_register_has_init: bool,
     /// __attribute__((cleanup(func))): cleanup function to call with &var when scope exits.
     /// The function is called as func(&var) with a pointer to the variable.
     pub cleanup_fn: Option<String>,
@@ -388,6 +393,7 @@ impl LocalInfo {
             vla_strides: vec![],
             vla_size: None,
             asm_register: None,
+            asm_register_has_init: false,
             cleanup_fn: None,
             is_const,
         }
@@ -404,6 +410,7 @@ impl LocalInfo {
             vla_strides: vec![],
             vla_size: None,
             asm_register: None,
+            asm_register_has_init: false,
             cleanup_fn: None,
             is_const,
         }

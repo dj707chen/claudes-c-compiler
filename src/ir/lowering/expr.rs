@@ -258,13 +258,22 @@ impl Lowerer {
             let is_vector = info.c_type.as_ref().map_or(false, |ct| ct.is_vector());
             let static_global_name = info.static_global_name.clone();
             let asm_register = info.asm_register.clone();
+            let asm_register_has_init = info.asm_register_has_init;
 
-            // Local register variable: read the hardware register directly via inline asm,
-            // just like global register variables. E.g.:
+            // Local register variable WITHOUT initializer: read the hardware register
+            // directly via inline asm. E.g.:
             //   register unsigned long tp __asm__("tp");
             //   return tp;  // must read the actual tp hardware register
+            //
+            // Local register variables WITH initializer (e.g.,
+            //   register long x8 __asm__("x8") = n;
+            // ) are used to bind a value to a specific register for inline asm constraints.
+            // They should read from the alloca like normal variables; the register binding
+            // only affects inline asm constraint resolution.
             if let Some(ref reg_name) = asm_register {
-                return self.read_global_register(reg_name, ty);
+                if !asm_register_has_init {
+                    return self.read_global_register(reg_name, ty);
+                }
             }
 
             if let Some(global_name) = static_global_name {

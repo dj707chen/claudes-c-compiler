@@ -16,10 +16,12 @@ impl Lowerer {
                 if let Some(info) = self.func_state.as_ref().and_then(|fs| fs.locals.get(name)) {
                     let alloca = info.alloca;
                     let static_global_name = info.static_global_name.clone();
-                    let asm_register = info.asm_register.is_some();
-                    // Local register variables have no addressable storage,
-                    // just like global register variables.
-                    if asm_register {
+                    let asm_register_no_init = info.asm_register.is_some() && !info.asm_register_has_init;
+                    // Uninitialized local register variables (e.g., `register unsigned long tp __asm__("tp");`)
+                    // have no addressable storage, just like global register variables.
+                    // Initialized register variables (e.g., `register long x8 __asm__("x8") = n;`)
+                    // use their alloca normally; the register binding only affects inline asm constraints.
+                    if asm_register_no_init {
                         return None;
                     }
                     // Static locals: emit fresh GlobalAddr at point of use
