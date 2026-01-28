@@ -1323,11 +1323,31 @@ impl IrType {
         }
     }
 
-    /// Alignment in bytes (matches size for all current IR types except Void which is 1).
+    /// Alignment in bytes. On i686, some types have alignment smaller than size
+    /// (e.g. F128/long double is 12 bytes but aligned to 4, I64/U64 aligned to 4).
     pub fn align(&self) -> usize {
-        match self {
-            IrType::Void => 1,
-            other => other.size().max(1),
+        if target_is_32bit() {
+            match self {
+                IrType::Void => 1,
+                IrType::I8 | IrType::U8 => 1,
+                IrType::I16 | IrType::U16 => 2,
+                IrType::I32 | IrType::U32 => 4,
+                // i686 System V ABI: long long aligned to 4
+                IrType::I64 | IrType::U64 => 4,
+                IrType::Ptr => 4,
+                // i686: i128 aligned to 4
+                IrType::I128 | IrType::U128 => 4,
+                IrType::F32 => 4,
+                // i686: double aligned to 4
+                IrType::F64 => 4,
+                // i686: long double (80-bit x87, 12 bytes) aligned to 4
+                IrType::F128 => 4,
+            }
+        } else {
+            match self {
+                IrType::Void => 1,
+                other => other.size().max(1),
+            }
         }
     }
 

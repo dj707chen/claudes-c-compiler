@@ -1835,6 +1835,11 @@ impl ArchCodegen for I686Codegen {
                 self.state.emit("    movl %edx, %eax");
                 emit!(self.state, "    xchg{} {}, (%ecx)", suffix, reg);
             }
+            AtomicRmwOp::TestAndSet => {
+                // test_and_set sets byte to 1, returns old value
+                self.state.emit("    movb $1, %al");
+                self.state.emit("    xchgb %al, (%ecx)");
+            }
             AtomicRmwOp::Add => {
                 let suffix = self.type_suffix(ty);
                 let reg = match ty {
@@ -1846,26 +1851,52 @@ impl ArchCodegen for I686Codegen {
                 self.state.emit("    movl %edx, %eax");
             }
             _ => {
-                // For other ops, use cmpxchg loop
-                // Load current value
+                // For other ops (Sub, And, Or, Xor, Nand), use a cmpxchg loop.
+                // Register usage:
+                //   ecx = pointer to atomic variable
+                //   eax = old/expected value (cmpxchg reads/writes this)
+                //   edx = new/desired value (cmpxchg stores this on success)
+                //   (%esp) = saved operand value (preserved across loop iterations)
                 let suffix = self.type_suffix(ty);
+                let edx_reg = match ty {
+                    IrType::I8 | IrType::U8 => "%dl",
+                    IrType::I16 | IrType::U16 => "%dx",
+                    _ => "%edx",
+                };
+                // Save the operand value on the stack so it survives the loop
+                self.state.emit("    pushl %edx");
+                // Load current value from the atomic variable
                 let load_instr = self.mov_load_for_type(ty);
                 emit!(self.state, "    {} (%ecx), %eax", load_instr);
                 let loop_label = format!(".Latomic_{}", self.state.next_label_id());
                 emit!(self.state, "{}:", loop_label);
-                // Compute new value
+                // edx = old value (copy eax), then apply operation: edx = op(old, val)
+                self.state.emit("    movl %eax, %edx");
                 match op {
                     AtomicRmwOp::Sub => {
-                        self.state.emit("    movl %eax, %edx");
-                        self.state.emit("    subl (%esp), %edx"); // TODO: fix
+                        emit!(self.state, "    sub{} (%esp), {}", suffix, edx_reg);
                     }
-                    AtomicRmwOp::And => emit!(self.state, "    andl %edx, %eax"),
-                    AtomicRmwOp::Or => emit!(self.state, "    orl %edx, %eax"),
-                    AtomicRmwOp::Xor => emit!(self.state, "    xorl %edx, %eax"),
+                    AtomicRmwOp::And => {
+                        emit!(self.state, "    and{} (%esp), {}", suffix, edx_reg);
+                    }
+                    AtomicRmwOp::Or => {
+                        emit!(self.state, "    or{} (%esp), {}", suffix, edx_reg);
+                    }
+                    AtomicRmwOp::Xor => {
+                        emit!(self.state, "    xor{} (%esp), {}", suffix, edx_reg);
+                    }
+                    AtomicRmwOp::Nand => {
+                        emit!(self.state, "    and{} (%esp), {}", suffix, edx_reg);
+                        emit!(self.state, "    not{} {}", suffix, edx_reg);
+                    }
                     _ => {}
                 }
-                emit!(self.state, "    lock cmpxchg{} %edx, (%ecx)", suffix);
+                // cmpxchg: if [ecx] == eax (old), store edx (new) to [ecx]
+                // otherwise, load [ecx] into eax and retry
+                emit!(self.state, "    lock cmpxchg{} {}, (%ecx)", suffix, edx_reg);
                 emit!(self.state, "    jne {}", loop_label);
+                // Restore stack (pop the saved operand)
+                self.state.emit("    addl $4, %esp");
             }
         }
         self.state.reg_cache.invalidate_acc();
