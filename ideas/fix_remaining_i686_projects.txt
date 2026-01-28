@@ -4,10 +4,20 @@ Date: 2026-01-28 (updated after bitfield I32 ops fix)
 
 Current status:
 - Unit tests: 99.9% pass - up from 99.7%
-- Projects passing: 9/15 (zlib, lua, libpng, jq, libjpeg, libuv, redis, musl, tcc*)
+- Projects passing: 10/15 (zlib, lua, libpng, jq, libjpeg, libuv, redis, musl, tcc*, libsodium)
   * tcc build succeeds; test suite fails due to missing i686 CRT/headers (same as GCC)
-- Projects failing: libsodium, mquickjs, sqlite, mbedtls, postgres
-- Projects fixed this round: libffi (was crashing due to __CET__ mismatch)
+- Projects failing: mquickjs, sqlite, mbedtls, postgres
+- Projects fixed this round: libffi (was crashing due to __CET__ mismatch),
+  libsodium (mode(TI) rejection)
+
+Fixed (mode(TI) and __int128 rejection on i686):
+- CCC-i686 silently accepted mode(TI) and __int128 on 32-bit targets
+  - GCC i686 correctly rejects these ("unable to emulate 'TI'")
+  - libsodium configure detected 128-bit support and used fe_51 (64-bit field elements)
+    instead of fe_25_5 (32-bit field elements), generating broken code
+  - Fix: reject mode(TI) and __int128/__uint128_t on 32-bit targets
+  - Also fixed mode(word)/mode(pointer) to map to SI (32-bit) on i686 instead of DI (64-bit)
+  - libsodium: 7/7 tests now pass (was 5/7)
 
 Fixed in latest round (bitfield I32 ops fix):
 - Bitfield extract/store operations used hardcoded IrType::I64 for all shift/mask ops
@@ -90,10 +100,9 @@ Known remaining issues:
         This is a BUILD SYSTEM issue in /verify/verify_mquickjs.py (read-only).
         NOT a compiler bug — mquickjs needs cross-compilation-aware host tool build.
 
-3. libsodium: Build succeeds, 0/7 tests pass
-   - Mix of timeouts (infinite loops) and SIGSEGV crashes
-   - init/hash_sha256/secretbox timeout; random/sign/box SIGSEGV
-   - Heavy use of 64-bit crypto operations may expose additional codegen bugs
+3. libsodium: FIXED - 7/7 tests pass
+   - Root cause: mode(TI) accepted on i686, causing 128-bit fe_51 code path
+   - Fix: reject mode(TI) and __int128 on 32-bit targets (matches GCC behavior)
 
 4. mbedtls: Build fails (__builtin_ia32_pshufd not implemented)
    - Needs SSE2 intrinsic: _mm_shuffle_epi32 -> __builtin_ia32_pshufd
@@ -118,7 +127,6 @@ Priority investigation targets:
 - sqlite inlining bug: This is the highest-value fix (622 tests).
   The root cause is identified; need to fix codegen or inline pass.
 - mquickjs crashes: May share root cause with sqlite inlining bug.
-- libsodium timeouts: May be related to remaining 64-bit operation bugs.
 - mbedtls __builtin_ia32_pshufd: SSE2 intrinsic implementation.
 
 Techniques:

@@ -20,16 +20,16 @@ use super::generation::is_i128_type;
 
 /// Minimum number of switch cases required to consider a jump table.
 /// Fewer cases are better served by a linear compare-and-branch chain.
-const MIN_JUMP_TABLE_CASES: usize = 4;
+pub const MIN_JUMP_TABLE_CASES: usize = 4;
 
 /// Maximum number of entries in a generated jump table.
 /// Tables larger than this waste too much memory for sparse switches.
-const MAX_JUMP_TABLE_RANGE: usize = 4096;
+pub const MAX_JUMP_TABLE_RANGE: usize = 4096;
 
 /// Minimum density percentage (cases * 100 / range) for jump table eligibility.
 /// Below this threshold, the table would be mostly empty and a linear chain
 /// of compare-and-branch instructions is more efficient.
-const MIN_JUMP_TABLE_DENSITY_PERCENT: usize = 40;
+pub const MIN_JUMP_TABLE_DENSITY_PERCENT: usize = 40;
 
 /// Trait that each architecture implements to provide its specific code generation.
 ///

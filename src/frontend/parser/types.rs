@@ -169,6 +169,12 @@ impl Parser {
                 // __int128 can combine with signed/unsigned
                 TokenKind::Int128 => {
                     self.advance(); any_base_specifier = true;
+                    // GCC rejects __int128 on 32-bit targets
+                    if crate::common::types::target_is_32bit() {
+                        self.error_count += 1;
+                        // Fall through with Int (to avoid cascading errors)
+                        return Some(TypeSpecifier::Int);
+                    }
                     // __int128 already implies signed unless unsigned is present
                     if has_unsigned {
                         return Some(TypeSpecifier::UnsignedInt128);
@@ -179,6 +185,11 @@ impl Parser {
                 // __uint128_t is always unsigned
                 TokenKind::UInt128 => {
                     self.advance(); any_base_specifier = true;
+                    // GCC rejects __int128 on 32-bit targets
+                    if crate::common::types::target_is_32bit() {
+                        self.error_count += 1;
+                        return Some(TypeSpecifier::UnsignedInt);
+                    }
                     return Some(TypeSpecifier::UnsignedInt128);
                 }
                 TokenKind::Struct => {

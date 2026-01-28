@@ -2297,6 +2297,81 @@ impl ArchCodegen for I686Codegen {
         self.state.emit("    jmp *%eax");
     }
 
+    /// Override emit_switch to handle 64-bit (I64/U64) switch values on i686.
+    /// The default trait implementation only loads/compares 32 bits, which is
+    /// incorrect for long long switches where case values may differ only in
+    /// the high 32 bits (e.g., 4294967295LL vs -1LL).
+    fn emit_switch(&mut self, val: &Operand, cases: &[(i64, BlockId)], default: &BlockId) {
+        // Check if the switch value is a 64-bit (wide) value
+        let is_wide = match val {
+            Operand::Value(v) => self.state.is_wide_value(v.0),
+            Operand::Const(IrConst::I64(_)) => true,
+            _ => false,
+        };
+
+        if !is_wide {
+            // 32-bit switch: use the default trait implementation path
+            use crate::backend::traits::{MIN_JUMP_TABLE_CASES, MAX_JUMP_TABLE_RANGE, MIN_JUMP_TABLE_DENSITY_PERCENT};
+            let use_jump_table = if self.state.no_jump_tables {
+                false
+            } else if cases.len() >= MIN_JUMP_TABLE_CASES {
+                let min_val = cases.iter().map(|&(v, _)| v).min().unwrap();
+                let max_val = cases.iter().map(|&(v, _)| v).max().unwrap();
+                let range = (max_val - min_val + 1) as usize;
+                range <= MAX_JUMP_TABLE_RANGE && cases.len() * 100 / range >= MIN_JUMP_TABLE_DENSITY_PERCENT
+            } else {
+                false
+            };
+            if use_jump_table {
+                self.emit_switch_jump_table(val, cases, default);
+            } else {
+                self.emit_load_operand(val);
+                for &(case_val, target) in cases {
+                    let label = target.as_label();
+                    self.emit_switch_case_branch(case_val, &label);
+                }
+                self.emit_branch_to_block(*default);
+            }
+            return;
+        }
+
+        // 64-bit switch: compare both 32-bit halves for each case.
+        // Load the 64-bit value into eax (low) and edx (high).
+        self.emit_load_acc_pair(val);
+
+        // For each case value, compare both halves:
+        //   1. Compare low word (eax) against case_low
+        //   2. If not equal, skip to next case
+        //   3. Compare high word (edx) against case_high
+        //   4. If equal, branch to case target
+        for &(case_val, target) in cases {
+            let case_low = case_val as i32;
+            let case_high = (case_val >> 32) as i32;
+            let label = target.as_label();
+            let skip_label = format!(".Lswskip_{}", self.state.next_label_id());
+
+            // Compare low 32 bits
+            if case_low == 0 {
+                self.state.emit("    testl %eax, %eax");
+            } else {
+                emit!(self.state, "    cmpl ${}, %eax", case_low);
+            }
+            emit!(self.state, "    jne {}", skip_label);
+
+            // Low matches; compare high 32 bits
+            if case_high == 0 {
+                self.state.emit("    testl %edx, %edx");
+            } else {
+                emit!(self.state, "    cmpl ${}, %edx", case_high);
+            }
+            emit!(self.state, "    je {}", label);
+
+            emit!(self.state, "{}:", skip_label);
+        }
+        self.emit_branch_to_block(*default);
+        self.state.reg_cache.invalidate_all();
+    }
+
     fn emit_switch_case_branch(&mut self, case_val: i64, label: &str) {
         let val = case_val as i32;
         if val == 0 {

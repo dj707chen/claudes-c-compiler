@@ -627,16 +627,26 @@ impl Parser {
                                             // Parse mode specifier: QI (8-bit), HI (16-bit),
                                             // SI (32-bit), DI (64-bit), TI (128-bit)
                                             if let TokenKind::Identifier(mode_name) = self.peek() {
+                                                let is_32bit = crate::common::types::target_is_32bit();
                                                 mode_kind = match mode_name.as_str() {
                                                     "QI" | "__QI__" | "byte" | "__byte__" => Some(ModeKind::QI),
                                                     "HI" | "__HI__" => Some(ModeKind::HI),
                                                     "SI" | "__SI__" => Some(ModeKind::SI),
                                                     "DI" | "__DI__" => Some(ModeKind::DI),
-                                                    "TI" | "__TI__" => Some(ModeKind::TI),
-                                                    // "word" = machine word size (64-bit on x86-64/aarch64/riscv64)
-                                                    "word" | "__word__" => Some(ModeKind::DI),
-                                                    // "pointer" = pointer-sized (same as word on 64-bit)
-                                                    "pointer" | "__pointer__" => Some(ModeKind::DI),
+                                                    "TI" | "__TI__" => {
+                                                        // GCC rejects mode(TI) on 32-bit targets:
+                                                        // "unable to emulate 'TI'"
+                                                        if is_32bit {
+                                                            self.error_count += 1;
+                                                            mode_kind // leave unchanged (error)
+                                                        } else {
+                                                            Some(ModeKind::TI)
+                                                        }
+                                                    }
+                                                    // "word" = machine word size
+                                                    "word" | "__word__" => if is_32bit { Some(ModeKind::SI) } else { Some(ModeKind::DI) },
+                                                    // "pointer" = pointer-sized
+                                                    "pointer" | "__pointer__" => if is_32bit { Some(ModeKind::SI) } else { Some(ModeKind::DI) },
                                                     _ => mode_kind, // unknown mode, leave unchanged
                                                 };
                                             }
