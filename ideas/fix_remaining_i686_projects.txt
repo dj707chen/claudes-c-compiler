@@ -1,13 +1,24 @@
 Fix remaining i686 project failures
 =====================================
-Date: 2026-01-28 (updated after inline asm typed register load fix)
+Date: 2026-01-28 (updated after Copy I64 const wide marking fix)
 
 Current status:
 - Unit tests: ~99.7% pass (10% sample: 2728/2737)
-- Projects passing: 5/12 (zlib, lua, libpng, jq, libuv)
-- Projects failing: libsodium, mquickjs, libjpeg, mbedtls, libffi, musl, tcc
+- Projects passing: 7/12 (zlib, lua, libpng, jq, libjpeg, libuv, tcc*)
+  * tcc build succeeds; test suite fails due to missing i686 CRT/headers (same as GCC)
+- Projects failing: libsodium, mquickjs, mbedtls, libffi, musl
 
-Fixed in latest round (inline asm typed register load fix):
+Fixed in latest round (Copy I64 const wide marking fix):
+- tcc BUILD now succeeds (was failing in alloca86_64.S assembly)
+  - Root cause: IrConst::I64 is the universal container for ALL integer constants,
+    but codegen was marking Copy from ANY IrConst::I64 as "wide" (64-bit) on i686.
+    This caused 32-bit int variables to be treated as 64-bit, with uninitialized
+    upper 32 bits making `if (0)` evaluate as true.
+  - Fix: only mark IrConst::I64 as wide when value doesn't fit in 32 bits
+- libjpeg now fully passes on i686 (was "Bogus virtual array access")
+  - Same root cause: miscompiled array index checks due to wide marking bug
+
+Previously fixed (inline asm typed register load fix):
 - libsodium now BUILDS (was failing with "operand size mismatch for `movzw'")
 - The issue was movzwl/movsbl/movswl used 16/8-bit dest registers in inline asm
 - Runtime tests still fail (segfaults and timeouts in crypto operations)
@@ -36,9 +47,7 @@ Known remaining issues:
    - sodium_init() hangs/segfaults in some tests
    - Random test crashes immediately (SIGSEGV)
 
-5. libjpeg: 1/2 tests pass (roundtrip passes, jpegtran fails)
-   - Error: "Bogus virtual array access" from libjpeg-turbo runtime
-   - Suggests incorrect array indexing or struct field access
+5. libjpeg: FIXED (both tests now pass after Copy I64 const wide fix)
 
 6. mbedtls: Build fails (__builtin_ia32_pshufd not implemented)
    - Needs SSE2 intrinsic: _mm_shuffle_epi32 -> __builtin_ia32_pshufd
@@ -48,9 +57,9 @@ Known remaining issues:
    - All FFI call tests crash
    - Likely i686 ABI/calling convention issue in libffi's closure/trampoline code
 
-8. tcc: Build fails in lib/alloca86_64.S
-   - TCC tries to build x86-64 runtime support even when built for i686
-   - Not a compiler bug - TCC Makefile configuration issue
+8. tcc: FIXED (build succeeds after Copy I64 const wide fix)
+   - TCC build succeeds but test suite fails due to missing i686 CRT/headers
+   - This is a system configuration issue (same with GCC), not a compiler bug
 
 Unit test failure categories:
 - Complex number tests (SIGSEGV) - fix_complex_comparison_i64_type being worked on

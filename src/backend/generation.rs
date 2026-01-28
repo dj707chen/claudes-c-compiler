@@ -914,10 +914,29 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
             } else {
                 // Propagate wide value status through Copy chains on 32-bit targets.
                 // If the source is a wide value (F64, I64, U64), the dest is too.
+                //
+                // Note: IrConst::I64 is the universal container for ALL integer
+                // constants, including 32-bit values. We must NOT automatically
+                // mark a Copy from IrConst::I64 as wide -- only mark it wide if
+                // the value doesn't fit in 32 bits (indicating a true 64-bit
+                // constant). For small constants that might be either 32 or 64-bit,
+                // wideness should propagate through value-to-value Copy chains
+                // from typed instructions (BinOp I64, Load I64, etc.) which are
+                // handled by the pre-codegen fixpoint propagation in stack_layout.
                 let is_wide = match src {
                     Operand::Value(v) => cg.state_ref().is_wide_value(v.0),
                     Operand::Const(IrConst::F64(_)) => crate::common::types::target_is_32bit(),
-                    Operand::Const(IrConst::I64(_)) => crate::common::types::target_is_32bit(),
+                    Operand::Const(IrConst::I64(val)) => {
+                        if crate::common::types::target_is_32bit() {
+                            // Only treat as wide if the value doesn't fit in a 32-bit
+                            // signed or unsigned integer. Small constants (including 0)
+                            // may represent either 32-bit or 64-bit values; their width
+                            // is determined by the phi/copy chain they belong to.
+                            *val < i32::MIN as i64 || *val > u32::MAX as i64
+                        } else {
+                            false
+                        }
+                    }
                     _ => false,
                 };
                 if is_wide {

@@ -10,6 +10,7 @@
 //!
 //! Also handles VLA parameter stride computation and dimension collection.
 
+use crate::common::fx_hash::FxHashMap;
 use crate::frontend::parser::ast::*;
 use crate::ir::ir::*;
 use crate::common::types::{AddressSpace, IrType, CType};
@@ -69,6 +70,12 @@ impl Lowerer {
 
         // Step 5: K&R float promotion
         self.handle_kr_float_promotion(func);
+
+        // Step 5.5: Pre-scan the function body for label definitions and their scope depths.
+        // This is needed so that `goto` can determine how many cleanup scopes to exit,
+        // even for forward references (goto before label definition).
+        let label_depths = Self::prescan_label_depths(&func.body);
+        self.func_mut().user_label_depths = label_depths;
 
         // Step 6: Lower body
         self.lower_compound_stmt(&func.body);
@@ -663,6 +670,79 @@ impl Lowerer {
         match expr {
             Expr::Identifier(name, _) => name.clone(),
             _ => String::new(),
+        }
+    }
+
+    /// Pre-scan a function body to find all label definitions and their scope depths.
+    ///
+    /// This walks the AST without generating IR, just tracking compound statement
+    /// nesting depth. The result maps each label name to its scope depth (number
+    /// of compound statements it's nested within, starting from 1 for the function
+    /// body itself, matching the scope_stack depth during lowering since push_scope
+    /// is called before lowering the function body).
+    ///
+    /// This information is used by `lower_goto_stmt` to determine which cleanup
+    /// scopes need to be exited: only scopes deeper than the target label's depth
+    /// should have their cleanup destructors called.
+    fn prescan_label_depths(body: &CompoundStmt) -> FxHashMap<String, usize> {
+        let mut result = FxHashMap::default();
+        // depth starts at 1 because lower_function calls push_scope() before
+        // lower_compound_stmt, and then lower_compound_stmt calls push_scope again
+        // for the function body's own compound statement.
+        Self::prescan_compound_stmt(body, 1, &mut result);
+        result
+    }
+
+    fn prescan_compound_stmt(compound: &CompoundStmt, depth: usize, result: &mut FxHashMap<String, usize>) {
+        // Match the lowering behavior: only push a scope (increment depth) when the
+        // compound statement contains declarations. Declaration-free compound statements
+        // don't push a scope in lower_compound_stmt, so we must not increment depth here.
+        let has_declarations = compound.items.iter().any(|item| matches!(item, BlockItem::Declaration(_)));
+        let inner_depth = if has_declarations { depth + 1 } else { depth };
+        for item in &compound.items {
+            match item {
+                BlockItem::Statement(stmt) => Self::prescan_stmt(stmt, inner_depth, result),
+                BlockItem::Declaration(_) => {}
+            }
+        }
+    }
+
+    fn prescan_stmt(stmt: &Stmt, depth: usize, result: &mut FxHashMap<String, usize>) {
+        match stmt {
+            Stmt::Label(name, inner_stmt, _) => {
+                // Record the label at the current scope depth.
+                result.insert(name.clone(), depth);
+                Self::prescan_stmt(inner_stmt, depth, result);
+            }
+            Stmt::Compound(compound) => {
+                Self::prescan_compound_stmt(compound, depth, result);
+            }
+            Stmt::If(_, then_stmt, else_stmt, _) => {
+                Self::prescan_stmt(then_stmt, depth, result);
+                if let Some(else_stmt) = else_stmt {
+                    Self::prescan_stmt(else_stmt, depth, result);
+                }
+            }
+            Stmt::While(_, body, _) | Stmt::DoWhile(body, _, _) => {
+                Self::prescan_stmt(body, depth, result);
+            }
+            Stmt::For(init, _, _, body, _) => {
+                // C99: for-init declarations have their own scope, matching
+                // the push_scope() in lower_for_stmt.
+                let has_decl_init = init.as_ref().map_or(false, |i| matches!(i.as_ref(), ForInit::Declaration(_)));
+                let for_depth = if has_decl_init { depth + 1 } else { depth };
+                Self::prescan_stmt(body, for_depth, result);
+            }
+            Stmt::Switch(_, body, _) => {
+                Self::prescan_stmt(body, depth, result);
+            }
+            Stmt::Case(_, inner, _) | Stmt::CaseRange(_, _, inner, _) | Stmt::Default(inner, _) => {
+                Self::prescan_stmt(inner, depth, result);
+            }
+            // Leaf statements: no labels inside
+            Stmt::Expr(_) | Stmt::Return(_, _) | Stmt::Break(_) | Stmt::Continue(_) |
+            Stmt::Goto(_, _) | Stmt::GotoIndirect(_, _) | Stmt::Declaration(_) |
+            Stmt::InlineAsm { .. } => {}
         }
     }
 }
