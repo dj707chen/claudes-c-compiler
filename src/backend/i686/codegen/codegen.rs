@@ -341,11 +341,11 @@ impl I686Codegen {
                 }
             }
             Operand::Const(IrConst::LongDouble(_, bytes)) => {
-                // Push raw bytes to stack, then fld from there
-                // Push in reverse order (high bytes first) for little-endian stack
-                let dword0 = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                let dword1 = i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-                let word2 = i16::from_le_bytes([bytes[8], bytes[9]]) as i32;
+                // Convert f128 (IEEE binary128) bytes to x87 80-bit format for fldt
+                let x87 = crate::common::long_double::f128_bytes_to_x87_bytes(bytes);
+                let dword0 = i32::from_le_bytes([x87[0], x87[1], x87[2], x87[3]]);
+                let dword1 = i32::from_le_bytes([x87[4], x87[5], x87[6], x87[7]]);
+                let word2 = i16::from_le_bytes([x87[8], x87[9]]) as i32;
                 self.state.emit("    subl $12, %esp");
                 emit!(self.state, "    movl ${}, (%esp)", dword0);
                 emit!(self.state, "    movl ${}, 4(%esp)", dword1);
@@ -646,9 +646,9 @@ impl ArchCodegen for I686Codegen {
             let class = param_classes[i];
 
             // Find the alloca for this parameter.
-            let (slot, ty) = if let Some((dest, ty)) = find_param_alloca(func, i) {
+            let (slot, ty, dest_id) = if let Some((dest, ty)) = find_param_alloca(func, i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
-                    (slot, ty)
+                    (slot, ty, dest.0)
                 } else {
                     continue;
                 }
@@ -705,6 +705,7 @@ impl ArchCodegen for I686Codegen {
                     let src = stack_base + offset;
                     emit!(self.state, "    fldt {}(%ebp)", src);
                     emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                    self.state.f128_direct_slots.insert(dest_id);
                 }
                 ParamClass::I128Stack { offset } => {
                     let src = stack_base + offset;
@@ -717,6 +718,7 @@ impl ArchCodegen for I686Codegen {
                     let src = stack_base + offset;
                     emit!(self.state, "    fldt {}(%ebp)", src);
                     emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                    self.state.f128_direct_slots.insert(dest_id);
                 }
                 _ => {
                     // IntReg/FloatReg classes don't apply to i686 cdecl
@@ -753,6 +755,13 @@ impl ArchCodegen for I686Codegen {
                     emit!(self.state, "    movl {}(%ebp), %eax", param_offset + i as i64);
                     emit!(self.state, "    movl %eax, {}(%ebp)", slot.0 + i as i64);
                 }
+            }
+        } else if ty == IrType::F128 {
+            // F128 (long double): load full 80-bit from stack via x87
+            if let Some(dest_slot) = self.state.get_slot(dest.0) {
+                emit!(self.state, "    fldt {}(%ebp)", param_offset);
+                emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                self.state.f128_direct_slots.insert(dest.0);
             }
         } else if ty == IrType::F64 || ty == IrType::I64 || ty == IrType::U64 {
             // 8-byte types: load both halves
@@ -911,6 +920,7 @@ impl ArchCodegen for I686Codegen {
             // Store F128 result to dest
             if let Some(slot) = self.state.get_slot(dest.0) {
                 emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                self.state.f128_direct_slots.insert(dest.0);
             }
             self.state.reg_cache.invalidate_acc();
             return;
@@ -955,6 +965,34 @@ impl ArchCodegen for I686Codegen {
 
     fn emit_acc_to_secondary(&mut self) {
         self.state.emit("    movl %eax, %ecx");
+    }
+
+    fn emit_copy_value(&mut self, dest: &Value, src: &Operand) {
+        // For F128 values with full x87 data in their slots, copy via fldt/fstpt
+        if let Operand::Value(v) = src {
+            if self.state.f128_direct_slots.contains(&v.0) {
+                if let (Some(src_slot), Some(dest_slot)) = (self.state.get_slot(v.0), self.state.get_slot(dest.0)) {
+                    emit!(self.state, "    fldt {}(%ebp)", src_slot.0);
+                    emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                    self.state.f128_direct_slots.insert(dest.0);
+                    return;
+                }
+            }
+            // Also check alloca_types for F128
+            if let Some(&alloca_ty) = self.state.alloca_types.get(&v.0) {
+                if alloca_ty == IrType::F128 {
+                    if let (Some(src_slot), Some(dest_slot)) = (self.state.get_slot(v.0), self.state.get_slot(dest.0)) {
+                        emit!(self.state, "    fldt {}(%ebp)", src_slot.0);
+                        emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                        self.state.f128_direct_slots.insert(dest.0);
+                        return;
+                    }
+                }
+            }
+        }
+        // Default path for non-F128 copies
+        self.emit_load_operand(src);
+        self.emit_store_result(dest);
     }
 
     /// Override emit_cast to handle F64 source/destination specially on i686.
@@ -1090,6 +1128,7 @@ impl ArchCodegen for I686Codegen {
                 }
                 if let Some(slot) = self.state.get_slot(dest.0) {
                     emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                    self.state.f128_direct_slots.insert(dest.0);
                 }
                 self.state.reg_cache.invalidate_acc();
             }
@@ -1123,6 +1162,7 @@ impl ArchCodegen for I686Codegen {
                 self.state.emit("    addl $4, %esp");
                 if let Some(slot) = self.state.get_slot(dest.0) {
                     emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                    self.state.f128_direct_slots.insert(dest.0);
                 }
                 self.state.reg_cache.invalidate_acc();
             }
@@ -1144,6 +1184,7 @@ impl ArchCodegen for I686Codegen {
                 self.state.out.emit_named_label(&done_label);
                 if let Some(slot) = self.state.get_slot(dest.0) {
                     emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                    self.state.f128_direct_slots.insert(dest.0);
                 }
                 self.state.reg_cache.invalidate_acc();
             }
@@ -1524,6 +1565,7 @@ impl ArchCodegen for I686Codegen {
         self.state.emit("    fchs");
         if let Some(slot) = self.state.get_slot(dest.0) {
             emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+            self.state.f128_direct_slots.insert(dest.0);
         }
         self.state.reg_cache.invalidate_acc();
     }
@@ -1654,15 +1696,50 @@ impl ArchCodegen for I686Codegen {
                     stack_offset += 16;
                 }
                 call_abi::CallArgClass::F128Stack => {
-                    // Long double: copy 12 bytes
-                    if let Operand::Value(v) = &args[i] {
-                        if let Some(slot) = self.state.get_slot(v.0) {
-                            for j in (0..12).step_by(4) {
-                                emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + j as i64);
-                                emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + j);
+                    // Long double: copy 12 bytes via x87 for full precision
+                    match &args[i] {
+                        Operand::Value(v) => {
+                            if self.state.f128_direct_slots.contains(&v.0) {
+                                // Full x87 data in slot: use fldt/fstpt for precision
+                                if let Some(slot) = self.state.get_slot(v.0) {
+                                    emit!(self.state, "    fldt {}(%ebp)", slot.0);
+                                    emit!(self.state, "    fstpt {}(%esp)", stack_offset);
+                                }
+                            } else if let Some(slot) = self.state.get_slot(v.0) {
+                                for j in (0..12).step_by(4) {
+                                    emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + j as i64);
+                                    emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + j);
+                                }
+                            } else {
+                                self.operand_to_eax(&args[i]);
+                                emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
+                                for j in (4..12).step_by(4) {
+                                    emit!(self.state, "    movl $0, {}(%esp)", stack_offset + j);
+                                }
                             }
-                        } else {
-                            // Register-allocated: store low 32 bits, zero the rest
+                        }
+                        Operand::Const(IrConst::LongDouble(_, bytes)) => {
+                            let x87 = crate::common::long_double::f128_bytes_to_x87_bytes(bytes);
+                            let dword0 = i32::from_le_bytes([x87[0], x87[1], x87[2], x87[3]]);
+                            let dword1 = i32::from_le_bytes([x87[4], x87[5], x87[6], x87[7]]);
+                            let word2 = i16::from_le_bytes([x87[8], x87[9]]) as i32;
+                            emit!(self.state, "    movl ${}, {}(%esp)", dword0, stack_offset);
+                            emit!(self.state, "    movl ${}, {}(%esp)", dword1, stack_offset + 4);
+                            emit!(self.state, "    movw ${}, {}(%esp)", word2, stack_offset + 8);
+                        }
+                        Operand::Const(IrConst::F64(fval)) => {
+                            // Push f64 as long double via x87
+                            let bits = fval.to_bits();
+                            let low = (bits & 0xFFFFFFFF) as i32;
+                            let high = ((bits >> 32) & 0xFFFFFFFF) as i32;
+                            self.state.emit("    subl $8, %esp");
+                            emit!(self.state, "    movl ${}, (%esp)", low);
+                            emit!(self.state, "    movl ${}, 4(%esp)", high);
+                            self.state.emit("    fldl (%esp)");
+                            self.state.emit("    addl $8, %esp");
+                            emit!(self.state, "    fstpt {}(%esp)", stack_offset);
+                        }
+                        _ => {
                             self.operand_to_eax(&args[i]);
                             emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
                             for j in (4..12).step_by(4) {
@@ -1859,6 +1936,7 @@ impl ArchCodegen for I686Codegen {
         // F128 returned in st(0) on x87
         if let Some(slot) = self.state.get_slot(dest.0) {
             emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+            self.state.f128_direct_slots.insert(dest.0);
         }
     }
 
@@ -1960,8 +2038,33 @@ impl ArchCodegen for I686Codegen {
 
     // --- Typed store/load ---
 
-    /// Override emit_load for I64/U64/F64: load 8 bytes via eax:edx pair, then store both halves.
+    /// Override emit_load for I64/U64/F64/F128.
     fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) {
+        if ty == IrType::F128 {
+            // F128 (long double): load 80-bit value via x87 fldt/fstpt
+            let addr = self.state.resolve_slot_addr(ptr.0);
+            if let Some(addr) = addr {
+                match addr {
+                    crate::backend::state::SlotAddr::OverAligned(slot, id) => {
+                        self.emit_alloca_aligned_addr(slot, id);
+                        self.state.emit("    fldt (%ecx)");
+                    }
+                    crate::backend::state::SlotAddr::Direct(slot) => {
+                        // Direct: alloca data at slot(%ebp), fldt directly
+                        emit!(self.state, "    fldt {}(%ebp)", slot.0);
+                    }
+                    crate::backend::state::SlotAddr::Indirect(slot) => {
+                        self.emit_load_ptr_from_slot(slot, ptr.0);
+                        self.state.emit("    fldt (%ecx)");
+                    }
+                }
+                if let Some(dest_slot) = self.state.get_slot(dest.0) {
+                    emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                    self.state.f128_direct_slots.insert(dest.0);
+                }
+            }
+            return;
+        }
         if ty == IrType::I64 || ty == IrType::U64 || ty == IrType::F64 {
             let addr = self.state.resolve_slot_addr(ptr.0);
             if let Some(addr) = addr {
@@ -1991,8 +2094,31 @@ impl ArchCodegen for I686Codegen {
         crate::backend::traits::emit_load_default(self, dest, ptr, ty);
     }
 
-    /// Override emit_store for I64/U64/F64: store 8 bytes via eax:edx pair.
+    /// Override emit_store for I64/U64/F64/F128.
     fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) {
+        if ty == IrType::F128 {
+            // F128 (long double): load onto x87, store via fstpt to target address
+            self.emit_f128_load_to_x87(val);
+            let addr = self.state.resolve_slot_addr(ptr.0);
+            if let Some(addr) = addr {
+                match addr {
+                    crate::backend::state::SlotAddr::OverAligned(slot, id) => {
+                        self.emit_alloca_aligned_addr(slot, id);
+                        self.state.emit("    fstpt (%ecx)");
+                    }
+                    crate::backend::state::SlotAddr::Direct(slot) => {
+                        // Direct: alloca data at slot(%ebp), fstpt directly
+                        emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+                    }
+                    crate::backend::state::SlotAddr::Indirect(slot) => {
+                        self.emit_load_ptr_from_slot(slot, ptr.0);
+                        self.state.emit("    fstpt (%ecx)");
+                    }
+                }
+            }
+            self.state.reg_cache.invalidate_acc();
+            return;
+        }
         if ty == IrType::I64 || ty == IrType::U64 || ty == IrType::F64 {
             let addr = self.state.resolve_slot_addr(ptr.0);
             // Load 8-byte value into eax:edx
@@ -2029,9 +2155,38 @@ impl ArchCodegen for I686Codegen {
         crate::backend::traits::emit_store_default(self, val, ptr, ty);
     }
 
-    /// Override load with GEP-folded constant offset for I64/U64/F64 on i686.
-    /// The default path uses emit_load_operand which only handles 32 bits.
+    /// Override load with GEP-folded constant offset for I64/U64/F64/F128.
     fn emit_load_with_const_offset(&mut self, dest: &Value, base: &Value, offset: i64, ty: IrType) {
+        if ty == IrType::F128 {
+            let addr = self.state.resolve_slot_addr(base.0);
+            if let Some(addr) = addr {
+                match addr {
+                    crate::backend::state::SlotAddr::OverAligned(slot, id) => {
+                        self.emit_alloca_aligned_addr(slot, id);
+                        if offset != 0 {
+                            self.emit_add_offset_to_addr_reg(offset);
+                        }
+                        self.state.emit("    fldt (%ecx)");
+                    }
+                    crate::backend::state::SlotAddr::Direct(slot) => {
+                        let folded = slot.0 + offset;
+                        emit!(self.state, "    fldt {}(%ebp)", folded);
+                    }
+                    crate::backend::state::SlotAddr::Indirect(slot) => {
+                        self.emit_load_ptr_from_slot(slot, base.0);
+                        if offset != 0 {
+                            self.emit_add_offset_to_addr_reg(offset);
+                        }
+                        self.state.emit("    fldt (%ecx)");
+                    }
+                }
+                if let Some(dest_slot) = self.state.get_slot(dest.0) {
+                    emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                    self.state.f128_direct_slots.insert(dest.0);
+                }
+            }
+            return;
+        }
         if ty == IrType::I64 || ty == IrType::U64 || ty == IrType::F64 {
             let addr = self.state.resolve_slot_addr(base.0);
             if let Some(addr) = addr {
@@ -2091,6 +2246,34 @@ impl ArchCodegen for I686Codegen {
     /// Override store with GEP-folded constant offset for I64/U64/F64 on i686.
     /// The default path uses emit_load_operand which only handles 32 bits.
     fn emit_store_with_const_offset(&mut self, val: &Operand, base: &Value, offset: i64, ty: IrType) {
+        if ty == IrType::F128 {
+            self.emit_f128_load_to_x87(val);
+            let addr = self.state.resolve_slot_addr(base.0);
+            if let Some(addr) = addr {
+                match addr {
+                    crate::backend::state::SlotAddr::OverAligned(slot, id) => {
+                        self.emit_alloca_aligned_addr(slot, id);
+                        if offset != 0 {
+                            self.emit_add_offset_to_addr_reg(offset);
+                        }
+                        self.state.emit("    fstpt (%ecx)");
+                    }
+                    crate::backend::state::SlotAddr::Direct(slot) => {
+                        let folded = slot.0 + offset;
+                        emit!(self.state, "    fstpt {}(%ebp)", folded);
+                    }
+                    crate::backend::state::SlotAddr::Indirect(slot) => {
+                        self.emit_load_ptr_from_slot(slot, base.0);
+                        if offset != 0 {
+                            self.emit_add_offset_to_addr_reg(offset);
+                        }
+                        self.state.emit("    fstpt (%ecx)");
+                    }
+                }
+            }
+            self.state.reg_cache.invalidate_acc();
+            return;
+        }
         if ty == IrType::I64 || ty == IrType::U64 || ty == IrType::F64 {
             self.emit_load_acc_pair(val);
             let addr = self.state.resolve_slot_addr(base.0);
@@ -2333,6 +2516,7 @@ impl ArchCodegen for I686Codegen {
                 if let Some(dest_slot) = self.state.get_slot(dest.0) {
                     emit!(self.state, "    fldt (%ecx)");
                     emit!(self.state, "    fstpt {}(%ebp)", dest_slot.0);
+                    self.state.f128_direct_slots.insert(dest.0);
                 }
                 emit!(self.state, "    addl $12, %ecx");
             } else if result_ty == IrType::F64 {
@@ -2971,6 +3155,7 @@ impl ArchCodegen for I686Codegen {
         // x87 st(0) has the second long double
         if let Some(slot) = self.state.get_slot(dest.0) {
             emit!(self.state, "    fstpt {}(%ebp)", slot.0);
+            self.state.f128_direct_slots.insert(dest.0);
         }
     }
 
