@@ -231,6 +231,14 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
     // Only safe for bitwise ops (And/Or/Xor) since unlike Phase 4 there is
     // no explicit narrowing Cast guaranteeing the consumer truncates the result.
     //
+    // IMPORTANT: Phase 5 is NOT safe on 32-bit targets (i686). On x86-64,
+    // 32-bit register operations implicitly zero-extend to 64-bit, so consumers
+    // of a narrowed I32 result see the correct 64-bit value. On i686, I64
+    // values occupy eax:edx register pairs, and a narrowed I32 result only
+    // populates eax, leaving edx with stale/zero data. This produces wrong
+    // results when the consumer expects a full 64-bit value (e.g., bitfield
+    // extraction followed by XOR with a long long).
+    //
     // Build load_type_map: Value -> type for Load instructions
     let mut load_type_map: Vec<Option<IrType>> = vec![None; max_id + 1];
     for block in &func.blocks {
@@ -244,6 +252,8 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
         }
     }
 
+    // Skip Phase 5 on 32-bit targets (see comment above).
+    if !crate::common::types::target_is_32bit() {
     // Find I64 BinOps where all operands are sub-64-bit (loads, constants, or
     // widen_map values) and the result has exactly one use (a Store to I32).
     // Check: result used only by stores to a sub-64-bit type.
@@ -317,6 +327,7 @@ pub(crate) fn narrow_function(func: &mut IrFunction) -> usize {
             }
         }
     }
+    } // end if !target_is_32bit()
 
     // Phase 6: Also narrow Cmp instructions where both operands are widened
     // from the same type. Cmp(Sge, widen(x), widen(y)) == Cmp(Sge, x, y)

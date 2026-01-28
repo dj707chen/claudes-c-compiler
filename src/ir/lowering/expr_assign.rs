@@ -197,7 +197,30 @@ impl Lowerer {
     /// Handles packed bitfields that span beyond the storage type (bit_offset + bit_width > storage_bits).
     pub(super) fn store_bitfield(&mut self, addr: Value, storage_ty: IrType, bit_offset: u32, bit_width: u32, val: Operand) {
         if bit_width >= 64 && bit_offset == 0 {
-            self.emit(Instruction::Store { val, ptr: addr, ty: storage_ty , seg_override: AddressSpace::Default });
+            // Ensure the value is widened to the storage type (e.g., I32 -> I64)
+            // so that on i686 the backend doesn't store a truncated 32-bit value
+            // into a 64-bit storage unit.
+            let widened = match &val {
+                Operand::Const(c) => {
+                    if let Some(v64) = c.to_i64() {
+                        Operand::Const(IrConst::I64(v64))
+                    } else {
+                        val
+                    }
+                }
+                _ => {
+                    // For non-constant values, emit a cast from the machine word
+                    // type (I32 on i686, I64 on x86-64) to storage_ty.
+                    let from_ty = crate::common::types::widened_op_type(IrType::I32);
+                    if from_ty == storage_ty {
+                        val
+                    } else {
+                        let cast_dest = self.emit_cast_val(val, from_ty, storage_ty);
+                        Operand::Value(cast_dest)
+                    }
+                }
+            };
+            self.emit(Instruction::Store { val: widened, ptr: addr, ty: storage_ty , seg_override: AddressSpace::Default });
             return;
         }
 
@@ -276,12 +299,25 @@ impl Lowerer {
             return Operand::Value(loaded);
         }
 
+        // Widen the loaded value to I64 before performing I64 shift/mask operations.
+        // On i686, smaller types (I8/I16/I32) only populate eax; without this cast,
+        // I64 operations would use an uninitialized edx register.
+        let widened = if storage_ty != IrType::I64 && storage_ty != IrType::U64 {
+            // Use zero-extension (cast to unsigned equivalent first) since
+            // the shift/mask operations handle sign-extension explicitly.
+            let unsigned_storage = storage_ty.to_unsigned();
+            let cast_val = self.emit_cast_val(Operand::Value(loaded), unsigned_storage, IrType::U64);
+            cast_val
+        } else {
+            loaded
+        };
+
         // If the loaded value doesn't cover all bits (split case), the caller
         // should use extract_bitfield_from_addr instead. But handle the non-split case.
         if storage_ty.is_signed() {
             let shl_amount = 64 - bit_offset - bit_width;
             let ashr_amount = 64 - bit_width;
-            let mut val = Operand::Value(loaded);
+            let mut val = Operand::Value(widened);
             if shl_amount > 0 && shl_amount < 64 {
                 let shifted = self.emit_binop_val(IrBinOp::Shl, val, Operand::Const(IrConst::I64(shl_amount as i64)), IrType::I64);
                 val = Operand::Value(shifted);
@@ -293,7 +329,7 @@ impl Lowerer {
                 val
             }
         } else {
-            let mut val = Operand::Value(loaded);
+            let mut val = Operand::Value(widened);
             if bit_offset > 0 {
                 let shifted = self.emit_binop_val(IrBinOp::LShr, val, Operand::Const(IrConst::I64(bit_offset as i64)), IrType::I64);
                 val = Operand::Value(shifted);

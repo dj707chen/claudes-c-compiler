@@ -3967,6 +3967,16 @@ impl ArchCodegen for I686Codegen {
                 self.state.emit("    xorl %eax, %eax");
                 self.state.emit("    xorl %edx, %edx");
             }
+            // Sign-extend smaller integer constants to 64-bit eax:edx pair.
+            // IrConst::I8/I16/I32 store signed values; `as i64` sign-extends.
+            Operand::Const(c) if matches!(c, IrConst::I8(_) | IrConst::I16(_) | IrConst::I32(_)) => {
+                if let Some(ext) = c.to_i64() {
+                    let low = (ext & 0xFFFFFFFF) as i32;
+                    let high = ((ext >> 32) & 0xFFFFFFFF) as i32;
+                    emit!(self.state, "    movl ${}, %eax", low);
+                    emit!(self.state, "    movl ${}, %edx", high);
+                }
+            }
             _ => {
                 self.operand_to_eax(op);
                 self.state.emit("    xorl %edx, %edx");
