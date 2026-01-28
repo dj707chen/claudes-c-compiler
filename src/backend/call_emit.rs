@@ -125,6 +125,10 @@ pub struct ParamClassification {
     /// Final GP register index after classifying all named params.
     /// Includes alignment bumps for I128/F128 pairs. Capped at max_int_regs.
     pub int_reg_idx: usize,
+    /// Total stack bytes consumed by all named parameters.
+    /// This is the final stack_offset after classification, accounting for
+    /// type-specific sizes (e.g., F64/I64 take 8 bytes on ILP32).
+    pub total_stack_bytes: usize,
 }
 
 /// Classify all parameters of a function for callee-side store emission.
@@ -315,6 +319,7 @@ pub fn classify_params_full(func: &IrFunction, config: &CallAbiConfig) -> ParamC
     ParamClassification {
         classes: result,
         int_reg_idx,
+        total_stack_bytes: stack_offset as usize,
     }
 }
 

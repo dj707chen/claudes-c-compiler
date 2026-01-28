@@ -33,6 +33,10 @@ pub struct I686Codegen {
     reg_assignments: FxHashMap<u32, PhysReg>,
     /// Which callee-saved registers are used and need save/restore
     used_callee_saved: Vec<PhysReg>,
+    /// Total stack bytes consumed by named parameters (for va_start computation).
+    /// On i686 cdecl, all parameters are stack-passed, so this equals the total
+    /// bytes of all named parameters including F64/I64 which take 8 bytes each.
+    va_named_stack_bytes: usize,
 }
 
 // Callee-saved physical register indices for i686
@@ -78,6 +82,7 @@ impl I686Codegen {
             is_variadic: false,
             reg_assignments: FxHashMap::default(),
             used_callee_saved: Vec::new(),
+            va_named_stack_bytes: 0,
         }
     }
 
@@ -471,6 +476,15 @@ impl ArchCodegen for I686Codegen {
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
         self.is_variadic = func.is_variadic;
         self.current_return_type = func.return_type;
+
+        // Compute named parameter stack bytes for va_start (variadic functions).
+        // On i686 cdecl, all parameters are stack-passed, so total_stack_bytes
+        // gives us exactly how many bytes the named params occupy.
+        if func.is_variadic {
+            let config = self.call_abi_config();
+            let classification = crate::backend::call_emit::classify_params_full(func, &config);
+            self.va_named_stack_bytes = classification.total_stack_bytes;
+        }
 
         // Run register allocator before stack space computation.
         // Filter out asm-clobbered callee-saved registers.
@@ -1807,15 +1821,13 @@ impl ArchCodegen for I686Codegen {
     }
 
     fn emit_va_start(&mut self, va_list_ptr: &Value) {
-        // i686 cdecl: va_list = pointer to first unnamed arg on the stack
-        // Set va_list to point just past the last named parameter
-        // The frame layout is: [ret addr][saved ebp][locals...][params...]
-        // Named params are at positive offsets from ebp.
-        // We need to skip past them to get to the first variadic arg.
-        // For now, set va_list to 8(%ebp) as a simple default.
-        // TODO: compute proper offset based on named parameter count
+        // i686 cdecl: va_list = pointer to first unnamed arg on the stack.
+        // Stack layout above ebp: [ret addr (4)] [params...]
+        // Named params start at 8(%ebp) and occupy va_named_stack_bytes bytes.
+        // Variadic args start immediately after: 8 + va_named_stack_bytes.
+        let vararg_offset = 8 + self.va_named_stack_bytes as i64;
         if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
-            self.state.emit("    leal 8(%ebp), %eax");
+            emit!(self.state, "    leal {}(%ebp), %eax", vararg_offset);
             emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
         }
     }
