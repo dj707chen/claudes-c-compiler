@@ -483,8 +483,21 @@ impl Lexer {
                 Token::new(TokenKind::LongLongLiteral(value as i64), span)
             }
         } else if is_long {
-            // Explicit L suffix: long
-            if is_hex_or_octal && value > i64::MAX as u64 {
+            // Explicit L suffix: C11 6.4.4.1 type promotion for hex/octal:
+            //   long -> unsigned long -> long long -> unsigned long long
+            // On ILP32, long is 32-bit so values > i32::MAX need promotion.
+            if is_hex_or_octal && crate::common::types::target_is_32bit() {
+                if value <= i32::MAX as u64 {
+                    Token::new(TokenKind::LongLiteral(value as i64), span)
+                } else if value <= u32::MAX as u64 {
+                    Token::new(TokenKind::ULongLiteral(value), span)
+                } else if value <= i64::MAX as u64 {
+                    Token::new(TokenKind::LongLongLiteral(value as i64), span)
+                } else {
+                    Token::new(TokenKind::ULongLongLiteral(value), span)
+                }
+            } else if is_hex_or_octal && value > i64::MAX as u64 {
+                // LP64: long is 64-bit, value exceeds signed range -> unsigned long
                 Token::new(TokenKind::ULongLiteral(value), span)
             } else {
                 Token::new(TokenKind::LongLiteral(value as i64), span)
