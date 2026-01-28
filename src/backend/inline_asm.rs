@@ -145,6 +145,17 @@ pub trait InlineAsmEmitter {
         false
     }
 
+    /// Set up a memory operand for a register-to-memory fallback (e.g., "g" constraint
+    /// on i686 when all GP registers are exhausted). Unlike `setup_operand_metadata` for
+    /// Memory kind (which expects the value to be an address/pointer for "m" constraints),
+    /// this sets up a direct memory reference to the value's stack slot. For non-alloca
+    /// values, the slot holds the value directly at `offset(frame_pointer)`.
+    /// Constants are promoted to immediates instead.
+    fn setup_memory_fallback(&self, _op: &mut AsmOperand, _val: &Operand) {
+        // Default: no-op. Only i686 needs this because it's the only backend that
+        // can exhaust all GP registers. x86-64/ARM/RISC-V have enough registers.
+    }
+
     /// Reset scratch register allocation state (called at start of each inline asm).
     fn reset_scratch_state(&mut self);
 
@@ -235,7 +246,8 @@ pub fn constraint_has_memory_alt(constraint: &str) -> bool {
     if stripped.starts_with('[') && stripped.ends_with(']') {
         return false;
     }
-    stripped.chars().any(|c| c == 'm' || c == 'Q')
+    // 'g' means "general operand" (register, memory, or immediate) — includes memory
+    stripped.chars().any(|c| c == 'm' || c == 'Q' || c == 'g')
 }
 
 /// Check whether a constraint is memory-only (has memory alternative but no register
@@ -543,7 +555,22 @@ pub fn emit_inline_asm_common_impl(
                     false
                 };
                 if !is_tied {
-                    operands[i].reg = emitter.assign_scratch_reg(kind, &specific_regs);
+                    let reg = emitter.assign_scratch_reg(kind, &specific_regs);
+                    if reg.is_empty() && constraint_has_memory_alt(&operands[i].constraint) {
+                        // All GP registers exhausted but constraint allows memory (e.g., "g").
+                        // Fall back to memory operand instead of conflicting with a
+                        // specific-register constraint. Use setup_memory_fallback to
+                        // set up a direct stack-slot reference for the value.
+                        operands[i].kind = AsmOperandKind::Memory;
+                        let val = if i >= outputs.len() {
+                            inputs[i - outputs.len()].1.clone()
+                        } else {
+                            Operand::Value(outputs[i].1)
+                        };
+                        emitter.setup_memory_fallback(&mut operands[i], &val);
+                    } else {
+                        operands[i].reg = reg;
+                    }
                 }
             }
         }

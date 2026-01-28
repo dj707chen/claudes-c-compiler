@@ -1,0 +1,22 @@
+Fix XMM scratch register overflow in x86 inline asm allocator
+
+Status: in_progress
+
+Problem:
+In src/backend/x86/codegen/asm_emitter.rs, the assign_scratch_reg() function
+allocates XMM scratch registers for inline asm "x" constraints. The scratch
+pool X86_XMM_SCRATCH only contains xmm0-xmm7. When all 8 are exhausted or
+excluded by clobbers, the fallback code generates "xmm{idx}" with idx >= 8,
+which can overflow past xmm15 to xmm16, xmm17, etc.
+
+xmm16-xmm31 require AVX-512 (EVEX encoding). Without AVX-512, using these
+registers causes GAS assembler errors like:
+  "no EVEX encoding for 'movdqu'"
+
+This breaks the asm-chacha-qr-x86-001-run2 test and similar tests that use
+many XMM operands with clobbers.
+
+Fix:
+1. Extend X86_XMM_SCRATCH to include xmm8-xmm15 (all valid SSE registers)
+2. Add an upper-bound check to prevent generating xmm16+
+3. Apply the same fix to the i686 backend

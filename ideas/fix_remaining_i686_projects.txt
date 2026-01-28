@@ -3,10 +3,10 @@ Fix remaining i686 project failures
 Date: 2026-01-28 (updated after bitfield I32 ops fix)
 
 Current status:
-- Unit tests: 99.7% pass (27152/27361) - up from 99.2%
-- Projects passing: 8/15 (zlib, lua, libpng, jq, libjpeg, libuv, redis, tcc*)
+- Unit tests: 99.9% pass - up from 99.7%
+- Projects passing: 9/15 (zlib, lua, libpng, jq, libjpeg, libuv, redis, musl, tcc*)
   * tcc build succeeds; test suite fails due to missing i686 CRT/headers (same as GCC)
-- Projects failing: libsodium, mquickjs, sqlite, mbedtls, libffi, musl, postgres
+- Projects failing: libsodium, mquickjs, sqlite, mbedtls, libffi, postgres
 
 Fixed in latest round (bitfield I32 ops fix):
 - Bitfield extract/store operations used hardcoded IrType::I64 for all shift/mask ops
@@ -49,6 +49,18 @@ Previously fixed (Copy I64 const wide marking fix):
 Previously fixed (inline asm typed register load fix):
 - libsodium now BUILDS (was failing with "operand size mismatch for `movzw'")
 
+Fixed (inline asm "g" constraint register conflict):
+- musl: All 6/6 tests now pass on i686 (was 3/6)
+  - Root cause: On i686 with only 6 GP registers, __syscall6() uses all 6 via
+    specific constraints ("a", "b", "c", "d", "S", "D"). The 7th operand with "g"
+    constraint was assigned eax (conflicting with "a"), overwriting the syscall
+    number. mmap2 (0xc0) became restart_syscall (0), causing malloc to fail.
+  - Fix: When assign_scratch_reg exhausts all GP registers and the constraint has
+    a memory alternative (like "g"), fall back to AsmOperandKind::Memory and emit
+    the value's stack slot offset directly (e.g., -8(%ebp)) as the operand.
+  - This fixed malloc, io (tmpfile), and environ (setenv/getenv) which all depend
+    on mmap2 via musl's malloc.
+
 Known remaining issues:
 
 1. sqlite: 2/622 tests pass (was 0/622) -- READONLY_DBMOVED bug
@@ -77,29 +89,24 @@ Known remaining issues:
         This is a BUILD SYSTEM issue in /verify/verify_mquickjs.py (read-only).
         NOT a compiler bug — mquickjs needs cross-compilation-aware host tool build.
 
-3. musl: 3/6 tests pass (hello, string_ops, math pass)
-   - malloc test: malloc returns NULL despite brk() succeeding
-   - io test: tmpfile() fails
-   - environ test: setenv/getenv broken (returns "fail")
-
-4. libsodium: Build succeeds, 0/7 tests pass
+3. libsodium: Build succeeds, 0/7 tests pass
    - Mix of timeouts (infinite loops) and SIGSEGV crashes
    - init/hash_sha256/secretbox timeout; random/sign/box SIGSEGV
    - Heavy use of 64-bit crypto operations may expose additional codegen bugs
 
-5. mbedtls: Build fails (__builtin_ia32_pshufd not implemented)
+4. mbedtls: Build fails (__builtin_ia32_pshufd not implemented)
    - Needs SSE2 intrinsic: _mm_shuffle_epi32 -> __builtin_ia32_pshufd
    - Used in AES-NI key schedule (aesni_set_rk_128/192/256)
 
-6. libffi: Build succeeds, 0/6 tests pass (all SIGSEGV)
+5. libffi: Build succeeds, 0/6 tests pass (all SIGSEGV)
    - All FFI call tests crash (call_int, call_double, call_pointer, etc.)
    - Likely i686 ABI/calling convention issue in libffi's closure/trampoline code
 
-7. postgres: Build fails - linker error (R_386_GOTOFF relocation / shared lib issue)
+6. postgres: Build fails - linker error (R_386_GOTOFF relocation / shared lib issue)
    - dict_snowball.so link fails
    - May be related to PIC/shared library handling on i686
 
-8. tcc: Build succeeds, 1/78 tests pass
+7. tcc: Build succeeds, 1/78 tests pass
    - Tests fail because CCC-compiled TCC can't find crt1.o
    - System configuration issue (same with GCC), not a compiler bug
 
@@ -108,7 +115,6 @@ Priority investigation targets:
   The root cause is identified; need to fix codegen or inline pass.
 - mquickjs crashes: May share root cause with sqlite inlining bug.
 - libsodium timeouts: May be related to remaining 64-bit operation bugs.
-- musl malloc: Investigate brk/mmap handling on i686.
 - mbedtls __builtin_ia32_pshufd: SSE2 intrinsic implementation.
 
 Techniques:

@@ -165,15 +165,18 @@ impl InlineAsmEmitter for I686Codegen {
                 let reg = if idx < ALL_GP.len() {
                     ALL_GP[idx].to_string()
                 } else {
-                    // All registers exhausted - return eax as last resort
-                    return "eax".to_string();
+                    // All registers exhausted — return empty to signal spill-to-memory.
+                    // The caller (emit_inline_asm_common_impl) will detect the empty
+                    // string and fall back to a memory operand for constraints like "g"
+                    // that have a memory alternative.
+                    return String::new();
                 };
                 if !excluded.iter().any(|e| e == &reg) {
                     return reg;
                 }
             }
-            // If all registers are excluded, return eax as fallback
-            "eax".to_string()
+            // All registers excluded — return empty to signal spill-to-memory.
+            String::new()
         }
     }
 
@@ -476,6 +479,26 @@ impl InlineAsmEmitter for I686Codegen {
                 let src = Self::src_reg_for_type(reg, ty);
                 self.state.emit_fmt(format_args!("    {} %{}, (%{})", store_instr, src, scratch));
                 self.state.emit_fmt(format_args!("    popl %{}", scratch));
+            }
+        }
+    }
+
+    fn setup_memory_fallback(&self, op: &mut AsmOperand, val: &Operand) {
+        // When all GP registers are exhausted (only 6 on i686) and the constraint
+        // allows memory (e.g., "g"), fall back to referencing the value's stack slot
+        // directly. Unlike setup_operand_metadata for Memory (which handles "m"
+        // constraints where the value is an address), here we want the VALUE itself,
+        // which lives directly in the stack slot at offset(%ebp).
+        match val {
+            Operand::Value(v) => {
+                if let Some(slot) = self.state.get_slot(v.0) {
+                    op.mem_addr = format!("{}(%ebp)", slot.0);
+                }
+            }
+            Operand::Const(c) => {
+                // Constant value — promote to immediate instead of memory.
+                op.kind = AsmOperandKind::Immediate;
+                op.imm_value = c.to_i64();
             }
         }
     }
