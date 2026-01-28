@@ -1,0 +1,13 @@
+Task: Fix goto cleanup depth clamping panic (mquickjs regression)
+
+Problem: Commit 43fd6c6 ("Fix goto cleanup double-emit") introduced a regression
+where collect_scope_cleanup_vars_above_depth(target_depth) panics with a slice
+index out of bounds when target_depth > scope_stack.len(). This happens when a
+goto jumps forward into a deeper scope than the current one. The prescan records
+the label's depth from the AST, but at the goto site the scope stack may be
+shallower.
+
+Fix: Clamp target_depth to min(target_depth, scope_stack.len()) in
+lower_goto_stmt so the slice index is always valid.
+
+Status: in_progress
