@@ -96,7 +96,12 @@ impl Lowerer {
             Expr::FloatLiteral(val, _) => Operand::Const(IrConst::F64(*val)),
             Expr::FloatLiteralF32(val, _) => Operand::Const(IrConst::F32(*val as f32)),
             Expr::FloatLiteralLongDouble(val, bytes, _) => Operand::Const(IrConst::long_double_with_bytes(*val, *bytes)),
-            Expr::CharLiteral(ch, _) => Operand::Const(IrConst::I32(*ch as i32)),
+            Expr::CharLiteral(ch, _) => {
+                // Sign-extend from signed char to int, matching GCC behavior.
+                // '\xEF' should be -17, not 239, when char is signed.
+                let val = *ch as u8 as i8 as i32;
+                Operand::Const(IrConst::I32(val))
+            }
 
             // Imaginary literals
             Expr::ImaginaryLiteral(val, _) => self.lower_imaginary_literal(*val, &CType::ComplexDouble),

@@ -41,7 +41,11 @@ pub fn eval_literal(expr: &Expr) -> Option<IrConst> {
         Expr::UIntLiteral(val, _) => Some(IrConst::I64(*val as i64)),
         Expr::ULongLiteral(val, _) => Some(IrConst::I64(*val as i64)),
         Expr::ULongLongLiteral(val, _) => Some(IrConst::I64(*val as i64)),
-        Expr::CharLiteral(ch, _) => Some(IrConst::I32(*ch as i32)),
+        Expr::CharLiteral(ch, _) => {
+            // Sign-extend from signed char to int, matching GCC behavior.
+            // '\xEF' should be -17, not 239, when char is signed.
+            Some(IrConst::I32(*ch as u8 as i8 as i32))
+        }
         Expr::FloatLiteral(val, _) => Some(IrConst::F64(*val)),
         Expr::FloatLiteralF32(val, _) => Some(IrConst::F32(*val as f32)),
         Expr::FloatLiteralLongDouble(val, bytes, _) => {

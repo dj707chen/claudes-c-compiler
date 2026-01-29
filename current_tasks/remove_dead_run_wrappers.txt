@@ -1,0 +1,14 @@
+Task: Remove dead run() wrappers from optimization passes
+Status: in_progress
+Container: 4921075cadf2
+Started: 2026-01-29T11:15:31Z
+
+Files to modify:
+- src/passes/dce.rs
+- src/passes/narrow.rs
+- src/passes/if_convert.rs
+- src/passes/div_by_const.rs
+- src/passes/gvn.rs
+- src/passes/iv_strength_reduce.rs
+- src/passes/licm.rs (also remove dead licm_function)
+- src/passes/cfg_simplify.rs
