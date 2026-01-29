@@ -1773,27 +1773,7 @@ impl Lowerer {
                 self.resolve_generic_selection_ctype(controlling, associations)
             }
             Expr::StmtExpr(compound, _) => {
-                // Statement expression: type is the type of the last expression statement
-                if let Some(last) = compound.items.last() {
-                    if let BlockItem::Statement(Stmt::Expr(Some(expr))) = last {
-                        if let Some(ctype) = self.get_expr_ctype(expr) {
-                            return Some(ctype);
-                        }
-                        // If the last expr references variables declared in this compound
-                        // statement (e.g., inside typeof where the stmt expr was never
-                        // lowered), build a local scope from the declarations and resolve.
-                        // This handles both simple identifiers and complex expressions
-                        // like ternaries referencing compound-local variables (e.g.,
-                        // kernel's min/max/clamp macros: __x < __y ? __x : __y).
-                        let scope = self.build_compound_scope(compound);
-                        if !scope.is_empty() {
-                            if let Some(ctype) = self.get_expr_ctype_with_scope(expr, &scope) {
-                                return Some(ctype);
-                            }
-                        }
-                    }
-                }
-                None
+                self.get_stmt_expr_ctype(compound, None)
             }
             // sizeof and alignof always produce size_t (unsigned long on 64-bit,
             // unsigned int on 32-bit). This is needed so typeof(sizeof(...)) resolves
@@ -1813,13 +1793,63 @@ impl Lowerer {
         }
     }
 
+    /// Resolve the type of a statement expression's compound body.
+    ///
+    /// Optionally accepts a parent scope from an enclosing statement expression,
+    /// enabling resolution of nested statement expression patterns like the kernel's
+    /// atomic_cmpxchg macro: `typeof(*({ typeof(&obj->member) __ai_ptr = ...; ({ typeof(*__ai_ptr) __ret; ...; __ret; }); }))`
+    fn get_stmt_expr_ctype(&self, compound: &CompoundStmt, parent_scope: Option<&FxHashMap<String, CType>>) -> Option<CType> {
+        if let Some(last) = compound.items.last() {
+            if let BlockItem::Statement(Stmt::Expr(Some(expr))) = last {
+                // If the last expression is itself a StmtExpr, we must build
+                // the current scope first and pass it down, so inner typeof()
+                // expressions can reference variables from this compound
+                // (e.g., kernel atomic_cmpxchg: outer declares __ai_ptr,
+                // inner uses typeof(*__ai_ptr)).
+                if let Expr::StmtExpr(inner_compound, _) = expr {
+                    let scope = self.build_compound_scope(compound, parent_scope);
+                    if !scope.is_empty() {
+                        if let Some(ctype) = self.get_stmt_expr_ctype(inner_compound, Some(&scope)) {
+                            return Some(ctype);
+                        }
+                    }
+                }
+                // Try normal resolution (works if vars are in sema scope)
+                if let Some(ctype) = self.get_expr_ctype(expr) {
+                    return Some(ctype);
+                }
+                // Build a local scope from declarations in this compound statement,
+                // inheriting any parent scope from enclosing statement expressions.
+                let scope = self.build_compound_scope(compound, parent_scope);
+                if !scope.is_empty() {
+                    if let Some(ctype) = self.get_expr_ctype_with_scope(expr, &scope) {
+                        return Some(ctype);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Build a local scope from declarations in a compound statement.
     ///
     /// Scans declarations in order, resolving typeof expressions against earlier
     /// declarations. This is needed for statement expressions inside typeof where
     /// the variables haven't been lowered yet (e.g., kernel min/max/clamp macros).
-    fn build_compound_scope(&self, compound: &CompoundStmt) -> FxHashMap<String, CType> {
+    ///
+    /// Optionally accepts a parent scope from an enclosing statement expression,
+    /// allowing inner declarations that use typeof() on outer variables to resolve
+    /// correctly (e.g., `typeof(*__ai_ptr)` where `__ai_ptr` is in the outer scope).
+    fn build_compound_scope(&self, compound: &CompoundStmt, parent_scope: Option<&FxHashMap<String, CType>>) -> FxHashMap<String, CType> {
         let mut local_scope: FxHashMap<String, CType> = FxHashMap::default();
+
+        // Seed with parent scope so inner typeof expressions can reference
+        // variables declared in an enclosing statement expression.
+        if let Some(parent) = parent_scope {
+            for (k, v) in parent {
+                local_scope.insert(k.clone(), v.clone());
+            }
+        }
 
         for item in &compound.items {
             if let BlockItem::Declaration(decl) = item {

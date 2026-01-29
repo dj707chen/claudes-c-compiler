@@ -543,25 +543,27 @@ impl MacroTable {
     /// Expand a function-like macro with given arguments.
     ///
     /// Per C11 §6.10.3.1: Arguments are fully macro-expanded before substitution
-    /// into the body, EXCEPT when the parameter is used with # (stringify) or
-    /// ## (token paste). After substitution, the result is rescanned with the
-    /// current macro name suppressed to prevent infinite recursion.
+    /// into the body. Occurrences adjacent to # or ## use the raw (unexpanded)
+    /// argument, handled by handle_stringify_and_paste. After substitution, the
+    /// result is rescanned with the current macro name suppressed (§6.10.3.4).
     fn expand_function_macro(
         &self,
         mac: &MacroDef,
         args: &[String],
         expanding: &mut FxHashSet<String>,
     ) -> String {
-        // Step 1: Determine which parameters are used with # or ## (these get raw args)
-        let paste_params = self.find_paste_and_stringify_params(&mac.body, &mac.params, mac.is_variadic);
-
-        // Step 2: Prescan - expand arguments that are NOT used with # or ##
-        let expanded_args: Vec<String> = args.iter().enumerate().map(|(idx, arg)| {
-            if idx < mac.params.len() && paste_params.contains(&idx) {
-                arg.clone()
-            } else {
-                self.expand_text(arg, expanding)
-            }
+        // Step 1-2: Prescan - expand ALL arguments (C11 §6.10.3.1).
+        // Per the standard, arguments adjacent to # or ## use the RAW (unexpanded)
+        // form, but that is handled separately by handle_stringify_and_paste (Step 3)
+        // which receives the original raw `args`. The expanded_args are used only by
+        // substitute_params (Step 4) for non-## occurrences.
+        //
+        // A parameter can appear both with ## and without ## in the same body
+        // (e.g., `#define bitfs(bf, s) __bitf(bf, bf##_##s)`). In that case, the
+        // non-## occurrence needs the expanded argument so that commas from macro
+        // expansion create additional arguments during rescanning.
+        let expanded_args: Vec<String> = args.iter().map(|arg| {
+            self.expand_text(arg, expanding)
         }).collect();
 
         let mut body = mac.body.clone();
@@ -576,92 +578,6 @@ impl MacroTable {
         expanding.insert(mac.name.clone());
         let result = self.expand_text(&body, expanding);
         expanding.remove(&mac.name);
-        result
-    }
-
-    /// Find parameter indices that are used with # (stringify) or ## (token paste).
-    fn find_paste_and_stringify_params(&self, body: &str, params: &[String], is_variadic: bool) -> FxHashSet<usize> {
-        let mut result = FxHashSet::default();
-        let bytes = body.as_bytes();
-        let len = bytes.len();
-        let mut i = 0;
-
-        while i < len {
-            if bytes[i] == b'#' && i + 1 < len && bytes[i + 1] == b'#' {
-                // Token paste: ## - mark both the token before and after
-                let mut j = i;
-                while j > 0 && (bytes[j - 1] == b' ' || bytes[j - 1] == b'\t') {
-                    j -= 1;
-                }
-                let end = j;
-                while j > 0 && is_ident_cont_byte(bytes[j - 1]) {
-                    j -= 1;
-                }
-                if j < end {
-                    let ident = bytes_to_str(bytes, j, end);
-                    if let Some(idx) = params.iter().position(|p| p == ident) {
-                        result.insert(idx);
-                    }
-                    if ident == "__VA_ARGS__" && is_variadic {
-                        for idx in params.len()..100 {
-                            result.insert(idx);
-                        }
-                    }
-                }
-
-                i += 2;
-                while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
-                    i += 1;
-                }
-                if i < len && is_ident_start_byte(bytes[i]) {
-                    let start = i;
-                    while i < len && is_ident_cont_byte(bytes[i]) {
-                        i += 1;
-                    }
-                    let ident = bytes_to_str(bytes, start, i);
-                    if let Some(idx) = params.iter().position(|p| p == ident) {
-                        result.insert(idx);
-                    }
-                    if ident == "__VA_ARGS__" && is_variadic {
-                        for idx in params.len()..100 {
-                            result.insert(idx);
-                        }
-                    }
-                }
-                continue;
-            }
-
-            if bytes[i] == b'#' && i + 1 < len && bytes[i + 1] != b'#' {
-                i += 1;
-                while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') {
-                    i += 1;
-                }
-                if i < len && is_ident_start_byte(bytes[i]) {
-                    let start = i;
-                    while i < len && is_ident_cont_byte(bytes[i]) {
-                        i += 1;
-                    }
-                    let ident = bytes_to_str(bytes, start, i);
-                    if let Some(idx) = params.iter().position(|p| p == ident) {
-                        result.insert(idx);
-                    }
-                    if ident == "__VA_ARGS__" && is_variadic {
-                        for idx in params.len()..100 {
-                            result.insert(idx);
-                        }
-                    }
-                }
-                continue;
-            }
-
-            if bytes[i] == b'"' || bytes[i] == b'\'' {
-                i = skip_literal_bytes(bytes, i, bytes[i]);
-                continue;
-            }
-
-            i += 1;
-        }
-
         result
     }
 
