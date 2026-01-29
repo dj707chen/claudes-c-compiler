@@ -1,0 +1,11 @@
+Task: Fix va_arg with typeof(struct_variable) causing segfault
+
+Problem: va_arg(ap, typeof(struct_variable)) segfaults because
+is_type_struct_or_union() doesn't handle TypeSpecifier::Typeof(expr).
+The struct va_arg path is not taken, and the scalar path reads
+struct bytes as a pointer address, causing a segfault.
+
+Fix: In lower_va_arg(), use the already-resolved ctype.is_struct_or_union()
+instead of is_type_struct_or_union(type_spec) which doesn't handle typeof(expr).
+
+Status: in_progress
