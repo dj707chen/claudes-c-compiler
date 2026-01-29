@@ -677,11 +677,30 @@ impl Lowerer {
                 return (total_size, ptr_sz, true, false, strides);
             }
             // Pointer to array (e.g., int (*p)[5]) - treat as pointer
-            // Compute strides from the Array dims BEFORE the pointer in the derived list
-            // (these are the pointed-to array dimensions)
-            let ptr_count = derived.iter().filter(|d| matches!(d, DerivedDeclarator::Pointer)).count();
-            let array_dims: Vec<usize> = derived.iter()
-                .take_while(|d| !matches!(d, DerivedDeclarator::Pointer))
+            // The trailing Pointer entries in derived represent the outermost indirection
+            // (e.g., `(*p)` adds one trailing Pointer). Everything before the trailing
+            // Pointer(s) describes the pointed-to type.
+            //
+            // Examples:
+            //   int (*p)[5]       -> derived=[Array(5), Pointer]          -> trailing=1, rest=[Array(5)]
+            //   Node* (*p)[2]     -> derived=[Pointer, Array(2), Pointer] -> trailing=1, rest=[Pointer, Array(2)]
+            //   char (**pp)[2]    -> derived=[Array(2), Pointer, Pointer] -> trailing=2, pp is ptr-to-ptr
+            let trailing_ptr_count = derived.iter().rev()
+                .take_while(|d| matches!(d, DerivedDeclarator::Pointer))
+                .count();
+
+            // When there are multiple trailing pointers (e.g., char (**pp)[2]),
+            // the outermost pointer is a pointer-to-pointer, not pointer-to-array.
+            // pp[i] strides by sizeof(pointer)=8 and requires a load (pointer deref).
+            if trailing_ptr_count >= 2 {
+                return (ptr_sz, ptr_sz, false, true, vec![]);
+            }
+
+            // The non-trailing portion of derived describes the pointed-to type.
+            // Collect array dimensions and count any pointer entries (which make the
+            // element type a pointer, e.g., Node* (*p)[2] has element type Node*).
+            let rest = &derived[..derived.len() - trailing_ptr_count];
+            let array_dims: Vec<usize> = rest.iter()
                 .filter_map(|d| {
                     if let DerivedDeclarator::Array(size_expr) = d {
                         Some(size_expr.as_ref()
@@ -691,22 +710,20 @@ impl Lowerer {
                         None
                     }
                 }).collect();
-            let base_elem_size = self.sizeof_type(ts);
+            // If the non-trailing part has Pointer entries, the element type includes
+            // those pointer levels. E.g., for Node* (*p)[2], rest=[Pointer, Array(2)],
+            // the Pointer makes the element type Node* (a pointer), so elem size = ptr_sz.
+            let rest_has_pointer = rest.iter().any(|d| matches!(d, DerivedDeclarator::Pointer));
+            let base_elem_size = if rest_has_pointer {
+                ptr_sz
+            } else {
+                self.sizeof_type(ts)
+            };
             let full_array_size: usize = if array_dims.is_empty() {
                 base_elem_size
             } else {
                 array_dims.iter().product::<usize>() * base_elem_size
             };
-
-            // When there are multiple pointers (e.g., char (**pp)[2] has ptr_count=2),
-            // the outermost pointer is a pointer-to-pointer, not pointer-to-array.
-            // pp[i] strides by sizeof(pointer)=8 and requires a load (pointer deref).
-            // The array strides only apply after dereferencing through all pointer levels.
-            // Treat as a simple pointer with no array strides, so subscript operations
-            // will use CType-based stride resolution for correct behavior.
-            if ptr_count >= 2 {
-                return (ptr_sz, ptr_sz, false, true, vec![]);
-            }
 
             // strides[0] = full pointed-to array size, then per-dim strides
             let mut strides = vec![full_array_size];
