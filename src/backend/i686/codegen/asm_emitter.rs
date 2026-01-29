@@ -4,6 +4,7 @@
 //! Handles 32-bit x86 registers (eax, ebx, ecx, edx, esi, edi) and i686
 //! calling conventions (cdecl, ILP32).
 
+use std::borrow::Cow;
 use crate::ir::ir::*;
 use crate::common::types::IrType;
 use crate::backend::state::CodegenState;
@@ -545,54 +546,54 @@ impl I686Codegen {
     }
 
     /// Convert register to 32-bit variant.
-    pub(super) fn reg_to_32(reg: &str) -> String {
+    pub(super) fn reg_to_32<'a>(reg: &'a str) -> Cow<'a, str> {
         match reg {
-            "eax" | "ax" | "al" | "ah" => "eax".to_string(),
-            "ebx" | "bx" | "bl" | "bh" => "ebx".to_string(),
-            "ecx" | "cx" | "cl" | "ch" => "ecx".to_string(),
-            "edx" | "dx" | "dl" | "dh" => "edx".to_string(),
-            "esi" | "si" => "esi".to_string(),
-            "edi" | "di" => "edi".to_string(),
-            "ebp" | "bp" => "ebp".to_string(),
-            "esp" | "sp" => "esp".to_string(),
-            _ => reg.to_string(),
+            "eax" | "ax" | "al" | "ah" => Cow::Borrowed("eax"),
+            "ebx" | "bx" | "bl" | "bh" => Cow::Borrowed("ebx"),
+            "ecx" | "cx" | "cl" | "ch" => Cow::Borrowed("ecx"),
+            "edx" | "dx" | "dl" | "dh" => Cow::Borrowed("edx"),
+            "esi" | "si" => Cow::Borrowed("esi"),
+            "edi" | "di" => Cow::Borrowed("edi"),
+            "ebp" | "bp" => Cow::Borrowed("ebp"),
+            "esp" | "sp" => Cow::Borrowed("esp"),
+            _ => Cow::Borrowed(reg),
         }
     }
 
     /// Convert register to 16-bit variant.
-    pub(super) fn reg_to_16(reg: &str) -> String {
+    pub(super) fn reg_to_16<'a>(reg: &'a str) -> Cow<'a, str> {
         match reg {
-            "eax" | "ax" | "al" | "ah" => "ax".to_string(),
-            "ebx" | "bx" | "bl" | "bh" => "bx".to_string(),
-            "ecx" | "cx" | "cl" | "ch" => "cx".to_string(),
-            "edx" | "dx" | "dl" | "dh" => "dx".to_string(),
-            "esi" | "si" => "si".to_string(),
-            "edi" | "di" => "di".to_string(),
-            "ebp" | "bp" => "bp".to_string(),
-            "esp" | "sp" => "sp".to_string(),
-            _ => reg.to_string(),
+            "eax" | "ax" | "al" | "ah" => Cow::Borrowed("ax"),
+            "ebx" | "bx" | "bl" | "bh" => Cow::Borrowed("bx"),
+            "ecx" | "cx" | "cl" | "ch" => Cow::Borrowed("cx"),
+            "edx" | "dx" | "dl" | "dh" => Cow::Borrowed("dx"),
+            "esi" | "si" => Cow::Borrowed("si"),
+            "edi" | "di" => Cow::Borrowed("di"),
+            "ebp" | "bp" => Cow::Borrowed("bp"),
+            "esp" | "sp" => Cow::Borrowed("sp"),
+            _ => Cow::Borrowed(reg),
         }
     }
 
     /// Convert register to 8-bit low variant.
-    pub(super) fn reg_to_8l(reg: &str) -> String {
+    pub(super) fn reg_to_8l<'a>(reg: &'a str) -> Cow<'a, str> {
         match reg {
-            "eax" | "ax" | "al" => "al".to_string(),
-            "ebx" | "bx" | "bl" => "bl".to_string(),
-            "ecx" | "cx" | "cl" => "cl".to_string(),
-            "edx" | "dx" | "dl" => "dl".to_string(),
+            "eax" | "ax" | "al" => Cow::Borrowed("al"),
+            "ebx" | "bx" | "bl" => Cow::Borrowed("bl"),
+            "ecx" | "cx" | "cl" => Cow::Borrowed("cl"),
+            "edx" | "dx" | "dl" => Cow::Borrowed("dl"),
             // esi/edi/ebp/esp don't have 8-bit low forms in 32-bit mode
-            _ => reg.to_string(),
+            _ => Cow::Borrowed(reg),
         }
     }
 
     /// Convert register to 8-bit high variant.
-    pub(super) fn reg_to_8h(reg: &str) -> String {
+    pub(super) fn reg_to_8h<'a>(reg: &'a str) -> Cow<'a, str> {
         match reg {
-            "eax" | "ax" | "ah" => "ah".to_string(),
-            "ebx" | "bx" | "bh" => "bh".to_string(),
-            "ecx" | "cx" | "ch" => "ch".to_string(),
-            "edx" | "dx" | "dh" => "dh".to_string(),
+            "eax" | "ax" | "ah" => Cow::Borrowed("ah"),
+            "ebx" | "bx" | "bh" => Cow::Borrowed("bh"),
+            "ecx" | "cx" | "ch" => Cow::Borrowed("ch"),
+            "edx" | "dx" | "dh" => Cow::Borrowed("dh"),
             _ => Self::reg_to_8l(reg),
         }
     }
@@ -623,7 +624,7 @@ impl I686Codegen {
     }
 
     /// Get the appropriately-sized source register name for a type.
-    fn src_reg_for_type(reg: &str, ty: IrType) -> String {
+    fn src_reg_for_type<'a>(reg: &'a str, ty: IrType) -> Cow<'a, str> {
         match ty {
             IrType::I8 | IrType::U8 => Self::reg_to_8l(reg),
             IrType::I16 | IrType::U16 => Self::reg_to_16(reg),
@@ -638,7 +639,7 @@ impl I686Codegen {
     }
 
     /// Get the appropriately-sized destination register name for a type.
-    fn dest_reg_for_type(reg: &str, ty: IrType) -> String {
+    fn dest_reg_for_type<'a>(reg: &'a str, ty: IrType) -> Cow<'a, str> {
         match ty {
             IrType::I8 | IrType::U8 => Self::reg_to_8l(reg),
             IrType::I16 | IrType::U16 => Self::reg_to_16(reg),

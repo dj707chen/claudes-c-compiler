@@ -4,6 +4,7 @@
 //! including template variable substitution (%0, %[name], etc.) and register name
 //! formatting with size modifiers (b/w/k/q/h/l) and special modifiers (P/a/c).
 
+use std::borrow::Cow;
 use crate::common::types::IrType;
 use crate::ir::ir::BlockId;
 use super::codegen::X86Codegen;
@@ -266,117 +267,102 @@ impl X86Codegen {
     /// Format x86 register with size modifier.
     /// Modifiers: k (32-bit), w (16-bit), b (8-bit low), h (8-bit high), q (64-bit), l (32-bit alt)
     /// XMM registers (xmm0-xmm15) have no size variants and are returned as-is.
-    pub(super) fn format_x86_reg(reg: &str, modifier: Option<char>) -> String {
+    pub(super) fn format_x86_reg<'a>(reg: &'a str, modifier: Option<char>) -> Cow<'a, str> {
         // XMM registers don't have size variants
         if reg.starts_with("xmm") {
-            return reg.to_string();
+            return Cow::Borrowed(reg);
         }
         // x87 FPU stack registers don't have size variants
         if reg.starts_with("st(") || reg == "st" {
-            return reg.to_string();
+            return Cow::Borrowed(reg);
         }
         match modifier {
-            Some('k') | Some('l') => {
-                // 32-bit version
-                Self::reg_to_32(reg)
-            }
-            Some('w') => {
-                // 16-bit version
-                Self::reg_to_16(reg)
-            }
-            Some('b') => {
-                // 8-bit low version
-                Self::reg_to_8l(reg)
-            }
-            Some('h') => {
-                // 8-bit high version
-                Self::reg_to_8h(reg)
-            }
-            Some('q') | None => {
-                // 64-bit (default for x86-64)
-                reg.to_string()
-            }
-            _ => reg.to_string(),
+            Some('k') | Some('l') => Self::reg_to_32(reg),
+            Some('w') => Self::reg_to_16(reg),
+            Some('b') => Self::reg_to_8l(reg),
+            Some('h') => Self::reg_to_8h(reg),
+            Some('q') | None => Cow::Borrowed(reg),
+            _ => Cow::Borrowed(reg),
         }
     }
 
     /// Convert 64-bit register name to 32-bit variant.
-    pub(super) fn reg_to_32(reg: &str) -> String {
+    pub(super) fn reg_to_32<'a>(reg: &'a str) -> Cow<'a, str> {
         match reg {
-            "rax" => "eax".to_string(),
-            "rbx" => "ebx".to_string(),
-            "rcx" => "ecx".to_string(),
-            "rdx" => "edx".to_string(),
-            "rsi" => "esi".to_string(),
-            "rdi" => "edi".to_string(),
-            "rbp" => "ebp".to_string(),
-            "rsp" => "esp".to_string(),
-            _ if reg.starts_with('r') => format!("{}d", reg), // r8 -> r8d, r10 -> r10d
-            _ => reg.to_string(),
+            "rax" => Cow::Borrowed("eax"),
+            "rbx" => Cow::Borrowed("ebx"),
+            "rcx" => Cow::Borrowed("ecx"),
+            "rdx" => Cow::Borrowed("edx"),
+            "rsi" => Cow::Borrowed("esi"),
+            "rdi" => Cow::Borrowed("edi"),
+            "rbp" => Cow::Borrowed("ebp"),
+            "rsp" => Cow::Borrowed("esp"),
+            _ if reg.starts_with('r') => Cow::Owned(format!("{}d", reg)), // r8 -> r8d, r10 -> r10d
+            _ => Cow::Borrowed(reg),
         }
     }
 
     /// Convert any register name (8/16/32-bit) to its 64-bit equivalent.
     /// If the register is already 64-bit, returns it unchanged.
-    pub(super) fn reg_to_64(reg: &str) -> String {
+    pub(super) fn reg_to_64<'a>(reg: &'a str) -> Cow<'a, str> {
         match reg {
-            "eax" | "ax" | "al" | "ah" => "rax".to_string(),
-            "ebx" | "bx" | "bl" | "bh" => "rbx".to_string(),
-            "ecx" | "cx" | "cl" | "ch" => "rcx".to_string(),
-            "edx" | "dx" | "dl" | "dh" => "rdx".to_string(),
-            "esi" | "si" | "sil" => "rsi".to_string(),
-            "edi" | "di" | "dil" => "rdi".to_string(),
-            "ebp" | "bp" | "bpl" => "rbp".to_string(),
-            "esp" | "sp" | "spl" => "rsp".to_string(),
-            "r8d" | "r8w" | "r8b" => "r8".to_string(),
-            "r9d" | "r9w" | "r9b" => "r9".to_string(),
-            "r10d" | "r10w" | "r10b" => "r10".to_string(),
-            "r11d" | "r11w" | "r11b" => "r11".to_string(),
-            "r12d" | "r12w" | "r12b" => "r12".to_string(),
-            "r13d" | "r13w" | "r13b" => "r13".to_string(),
-            "r14d" | "r14w" | "r14b" => "r14".to_string(),
-            "r15d" | "r15w" | "r15b" => "r15".to_string(),
-            _ => reg.to_string(),
+            "eax" | "ax" | "al" | "ah" => Cow::Borrowed("rax"),
+            "ebx" | "bx" | "bl" | "bh" => Cow::Borrowed("rbx"),
+            "ecx" | "cx" | "cl" | "ch" => Cow::Borrowed("rcx"),
+            "edx" | "dx" | "dl" | "dh" => Cow::Borrowed("rdx"),
+            "esi" | "si" | "sil" => Cow::Borrowed("rsi"),
+            "edi" | "di" | "dil" => Cow::Borrowed("rdi"),
+            "ebp" | "bp" | "bpl" => Cow::Borrowed("rbp"),
+            "esp" | "sp" | "spl" => Cow::Borrowed("rsp"),
+            "r8d" | "r8w" | "r8b" => Cow::Borrowed("r8"),
+            "r9d" | "r9w" | "r9b" => Cow::Borrowed("r9"),
+            "r10d" | "r10w" | "r10b" => Cow::Borrowed("r10"),
+            "r11d" | "r11w" | "r11b" => Cow::Borrowed("r11"),
+            "r12d" | "r12w" | "r12b" => Cow::Borrowed("r12"),
+            "r13d" | "r13w" | "r13b" => Cow::Borrowed("r13"),
+            "r14d" | "r14w" | "r14b" => Cow::Borrowed("r14"),
+            "r15d" | "r15w" | "r15b" => Cow::Borrowed("r15"),
+            _ => Cow::Borrowed(reg),
         }
     }
 
     /// Convert 64-bit register name to 16-bit variant.
-    pub(super) fn reg_to_16(reg: &str) -> String {
+    pub(super) fn reg_to_16<'a>(reg: &'a str) -> Cow<'a, str> {
         match reg {
-            "rax" => "ax".to_string(),
-            "rbx" => "bx".to_string(),
-            "rcx" => "cx".to_string(),
-            "rdx" => "dx".to_string(),
-            "rsi" => "si".to_string(),
-            "rdi" => "di".to_string(),
-            "rbp" => "bp".to_string(),
-            "rsp" => "sp".to_string(),
-            _ if reg.starts_with('r') => format!("{}w", reg), // r8 -> r8w
-            _ => reg.to_string(),
+            "rax" => Cow::Borrowed("ax"),
+            "rbx" => Cow::Borrowed("bx"),
+            "rcx" => Cow::Borrowed("cx"),
+            "rdx" => Cow::Borrowed("dx"),
+            "rsi" => Cow::Borrowed("si"),
+            "rdi" => Cow::Borrowed("di"),
+            "rbp" => Cow::Borrowed("bp"),
+            "rsp" => Cow::Borrowed("sp"),
+            _ if reg.starts_with('r') => Cow::Owned(format!("{}w", reg)), // r8 -> r8w
+            _ => Cow::Borrowed(reg),
         }
     }
 
     /// Convert 64-bit register name to 8-bit low variant.
-    pub(super) fn reg_to_8l(reg: &str) -> String {
+    pub(super) fn reg_to_8l<'a>(reg: &'a str) -> Cow<'a, str> {
         match reg {
-            "rax" => "al".to_string(),
-            "rbx" => "bl".to_string(),
-            "rcx" => "cl".to_string(),
-            "rdx" => "dl".to_string(),
-            "rsi" => "sil".to_string(),
-            "rdi" => "dil".to_string(),
-            _ if reg.starts_with('r') => format!("{}b", reg), // r8 -> r8b
-            _ => reg.to_string(),
+            "rax" => Cow::Borrowed("al"),
+            "rbx" => Cow::Borrowed("bl"),
+            "rcx" => Cow::Borrowed("cl"),
+            "rdx" => Cow::Borrowed("dl"),
+            "rsi" => Cow::Borrowed("sil"),
+            "rdi" => Cow::Borrowed("dil"),
+            _ if reg.starts_with('r') => Cow::Owned(format!("{}b", reg)), // r8 -> r8b
+            _ => Cow::Borrowed(reg),
         }
     }
 
     /// Convert 64-bit register name to 8-bit high variant.
-    pub(super) fn reg_to_8h(reg: &str) -> String {
+    pub(super) fn reg_to_8h<'a>(reg: &'a str) -> Cow<'a, str> {
         match reg {
-            "rax" => "ah".to_string(),
-            "rbx" => "bh".to_string(),
-            "rcx" => "ch".to_string(),
-            "rdx" => "dh".to_string(),
+            "rax" => Cow::Borrowed("ah"),
+            "rbx" => Cow::Borrowed("bh"),
+            "rcx" => Cow::Borrowed("ch"),
+            "rdx" => Cow::Borrowed("dh"),
             _ => Self::reg_to_8l(reg), // fallback to low byte
         }
     }

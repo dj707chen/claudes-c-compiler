@@ -10,6 +10,7 @@
 //! classification, loading, and storage. The shared `emit_inline_asm_common`
 //! orchestrates the phases.
 
+use std::borrow::Cow;
 use crate::ir::ir::{BlockId, Operand, Value};
 use crate::common::types::{AddressSpace, IrType};
 pub use crate::common::asm_constraints::constraint_is_immediate_only;
@@ -532,8 +533,8 @@ pub fn emit_inline_asm_common_impl(
         // Normalize clobber names to their 64-bit canonical form so the exclusion check
         // actually prevents assigning clobbered registers to operands.
         if let Some(canonical) = x86_normalize_reg_to_64bit(clobber) {
-            if canonical != *clobber {
-                specific_regs.push(canonical);
+            if *canonical != **clobber {
+                specific_regs.push(canonical.into_owned());
             }
         }
     }
@@ -833,7 +834,7 @@ pub fn substitute_goto_labels(line: &str, goto_labels: &[(String, BlockId)], num
 /// any of these forms, but the scratch register allocator uses 64-bit names.
 /// Returns `Some(canonical)` if the name is a recognized x86 register,
 /// `None` otherwise (non-x86 clobbers, "cc", "memory", etc.).
-fn x86_normalize_reg_to_64bit(name: &str) -> Option<String> {
+fn x86_normalize_reg_to_64bit(name: &str) -> Option<Cow<'static, str>> {
     // Map of all sub-register names to their 64-bit parent.
     // Legacy 8-bit: al/ah/bl/bh/cl/ch/dl/dh
     // Legacy 8-bit (REX): sil/dil/spl/bpl
@@ -843,21 +844,21 @@ fn x86_normalize_reg_to_64bit(name: &str) -> Option<String> {
     // Extended: r8-r15, r8d-r15d, r8w-r15w, r8b-r15b
     match name {
         // RAX family
-        "al" | "ah" | "ax" | "eax" | "rax" => Some("rax".to_string()),
+        "al" | "ah" | "ax" | "eax" | "rax" => Some(Cow::Borrowed("rax")),
         // RBX family
-        "bl" | "bh" | "bx" | "ebx" | "rbx" => Some("rbx".to_string()),
+        "bl" | "bh" | "bx" | "ebx" | "rbx" => Some(Cow::Borrowed("rbx")),
         // RCX family
-        "cl" | "ch" | "cx" | "ecx" | "rcx" => Some("rcx".to_string()),
+        "cl" | "ch" | "cx" | "ecx" | "rcx" => Some(Cow::Borrowed("rcx")),
         // RDX family
-        "dl" | "dh" | "dx" | "edx" | "rdx" => Some("rdx".to_string()),
+        "dl" | "dh" | "dx" | "edx" | "rdx" => Some(Cow::Borrowed("rdx")),
         // RSI family
-        "sil" | "si" | "esi" | "rsi" => Some("rsi".to_string()),
+        "sil" | "si" | "esi" | "rsi" => Some(Cow::Borrowed("rsi")),
         // RDI family
-        "dil" | "di" | "edi" | "rdi" => Some("rdi".to_string()),
+        "dil" | "di" | "edi" | "rdi" => Some(Cow::Borrowed("rdi")),
         // RSP family
-        "spl" | "sp" | "esp" | "rsp" => Some("rsp".to_string()),
+        "spl" | "sp" | "esp" | "rsp" => Some(Cow::Borrowed("rsp")),
         // RBP family
-        "bpl" | "bp" | "ebp" | "rbp" => Some("rbp".to_string()),
+        "bpl" | "bp" | "ebp" | "rbp" => Some(Cow::Borrowed("rbp")),
         _ => {
             // Extended registers: r8-r15 and their sub-register forms
             // r8d/r8w/r8b -> r8, r9d/r9w/r9b -> r9, etc.
@@ -871,7 +872,7 @@ fn x86_normalize_reg_to_64bit(name: &str) -> Option<String> {
             let num_str = &s[..num_end];
             let num: u32 = num_str.parse().ok()?;
             if num >= 8 && num <= 15 {
-                Some(format!("r{}", num))
+                Some(Cow::Owned(format!("r{}", num)))
             } else {
                 None
             }

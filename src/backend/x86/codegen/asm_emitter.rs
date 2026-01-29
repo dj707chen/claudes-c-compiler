@@ -364,7 +364,7 @@ impl InlineAsmEmitter for X86Codegen {
                 // Always derive reg64 and reg32 from the canonical 64-bit form
                 // to handle 8-bit (al), 16-bit (ax), and 32-bit (eax) names.
                 let reg64 = Self::reg_to_64(reg);
-                let is_subreg = reg64.as_str() != reg;
+                let is_subreg = &*reg64 != reg;
                 let effective_reg: &str = if is_subreg { &reg64 } else { reg };
                 let reg32 = Self::reg_to_32(effective_reg);
                 if imm == 0 {
@@ -392,7 +392,7 @@ impl InlineAsmEmitter for X86Codegen {
                         // from `register uint32_t x asm("edi")`), convert to the
                         // 64-bit equivalent to avoid truncating the address.
                         let reg64 = Self::reg_to_64(reg);
-                        let lea_reg: &str = if reg64.as_str() != reg { &reg64 } else { reg };
+                        let lea_reg: &str = if &*reg64 != reg { &reg64 } else { reg };
                         if let Some(align) = self.state.alloca_over_align(v.0) {
                             self.state.out.emit_instr_rbp_reg("    leaq", slot.0, lea_reg);
                             self.state.out.emit_instr_imm_reg("    addq", (align - 1) as i64, lea_reg);
@@ -405,14 +405,10 @@ impl InlineAsmEmitter for X86Codegen {
                         // Use type-appropriate load to avoid reading garbage from
                         // stack slots of smaller-than-8-byte variables.
                         let load_instr = Self::mov_load_for_type(ty);
-                        let dest_reg = match ty {
-                            IrType::U32 | IrType::F32 => Self::reg_to_32(reg),
-                            _ => format!("%{}", reg),
-                        };
                         let dest_reg_str = if matches!(ty, IrType::U32 | IrType::F32) {
-                            format!("%{}", dest_reg)
+                            format!("%{}", Self::reg_to_32(reg))
                         } else {
-                            dest_reg
+                            format!("%{}", reg)
                         };
                         self.state.emit_fmt(format_args!("    {} {}(%rbp), {}", load_instr, slot.0, dest_reg_str));
                     }

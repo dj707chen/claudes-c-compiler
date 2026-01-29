@@ -20,11 +20,15 @@ Items a Rust expert would flag, roughly ordered by impact:
    - Highest impact files: ir/ir.rs (133 pub), parser/ast.rs (117 pub),
      common/types.rs (98 pub), backend/state.rs (62 pub)
 
-4. String allocations from literals (medium effort)
-   - 420 .to_string() calls on string literals, especially in
-     builtin_macros.rs (41 calls) for macro definitions
-   - Register name functions (reg_to_32, reg_to_16, etc.) return String
-     from static matches -> should return &'static str or Cow
+4. [PARTIAL] String allocations from literals (medium effort)
+   - Was 420 .to_string() calls, now 334 (86 eliminated)
+   - Register name functions (reg_to_32, reg_to_16, reg_to_64, reg_to_8l,
+     reg_to_8h) in x86 and i686 backends now return Cow<'_, str> instead
+     of String, avoiding heap allocations for known register names.
+     format_x86_reg, format_i686_reg, src_reg_for_type, dest_reg_for_type
+     also updated. x86_normalize_reg_to_64bit returns Cow<'static, str>.
+   - Remaining: builtin_macros.rs (41 calls), preprocessor includes (33),
+     other frontend/IR files (~260 remaining calls)
 
 5. format! in codegen hot paths, zero write! usage (medium effort)
    - 320 format! calls across the codebase, 0 write!/writeln!

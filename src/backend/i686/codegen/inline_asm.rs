@@ -4,6 +4,7 @@
 //! for size variants (w=16-bit, b=8-bit low, h=8-bit high) and special operand
 //! forms (c=raw constant, P=raw symbol, a=address, n=negated immediate).
 
+use std::borrow::Cow;
 use crate::common::types::IrType;
 use crate::ir::ir::BlockId;
 use super::codegen::I686Codegen;
@@ -221,9 +222,9 @@ impl I686Codegen {
 
     /// Format i686 register with size modifier.
     /// On i686, default (no modifier or 'k') is 32-bit.
-    fn format_i686_reg(reg: &str, modifier: Option<char>) -> String {
+    fn format_i686_reg<'a>(reg: &'a str, modifier: Option<char>) -> Cow<'a, str> {
         if reg.starts_with("xmm") || reg.starts_with("st(") || reg == "st" {
-            return reg.to_string();
+            return Cow::Borrowed(reg);
         }
         match modifier {
             Some('w') => Self::reg_to_16(reg),
