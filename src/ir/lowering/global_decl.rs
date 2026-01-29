@@ -18,53 +18,20 @@ use crate::common::types::{IrType, CType};
 use super::lowering::Lowerer;
 use super::definitions::{GlobalInfo, DeclAnalysis};
 
+enum RedeclResult {
+    Skip,
+    Proceed { prior_was_weak: bool },
+}
+
 impl Lowerer {
     // --- Global declaration lowering ---
 
     pub(super) fn lower_global_decl(&mut self, decl: &Declaration) {
-        // Register any struct/union definitions
         self.register_struct_type(&decl.type_spec);
-
-        // Collect enum constants from top-level enum type declarations
         self.collect_enum_constants(&decl.type_spec);
 
-        // If this is a typedef, register the mapping and skip variable emission
         if decl.is_typedef() {
-            // Check if this typedef aliases an enum type (directly or transitively).
-            // Used to treat enum-typedef bitfields as unsigned (GCC compat).
-            let is_enum_type = self.is_enum_type_spec(&decl.type_spec);
-            for declarator in &decl.declarators {
-                if !declarator.name.is_empty() {
-                    let mut resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
-                    // Apply __attribute__((vector_size(N))): wrap base type in Vector
-                    if let Some(vs) = decl.vector_size {
-                        resolved_ctype = CType::Vector(Box::new(resolved_ctype), vs);
-                    }
-                    self.types.typedefs.insert(declarator.name.clone(), resolved_ctype);
-                    if is_enum_type && declarator.derived.is_empty() {
-                        self.types.enum_typedefs.insert(declarator.name.clone());
-                    }
-                    // Preserve alignment override from __attribute__((aligned(N))) on the typedef.
-                    // Recompute sizeof for aligned(sizeof(type)) with full layout info.
-                    let effective_alignment = {
-                        let mut align = decl.alignment;
-                        if let Some(ref sizeof_ts) = decl.alignment_sizeof_type {
-                            let real_sizeof = self.sizeof_type(sizeof_ts);
-                            align = Some(align.map_or(real_sizeof, |a| a.max(real_sizeof)));
-                        }
-                        align.or_else(|| {
-                            decl.alignas_type.as_ref().map(|ts| self.alignof_type(ts))
-                        })
-                    };
-                    if let Some(align) = effective_alignment {
-                        self.types.typedef_alignments.insert(declarator.name.clone(), align);
-                    }
-                }
-            }
-            // Mark transparent_union on the union's StructLayout
-            if decl.is_transparent_union() {
-                self.mark_transparent_union(decl);
-            }
+            self.lower_typedef(decl);
             return;
         }
 
@@ -72,279 +39,298 @@ impl Lowerer {
             if declarator.name.is_empty() {
                 continue;
             }
-
-            // Skip function declarations (prototypes), but NOT function pointer variables.
-            if declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Function(_, _)))
-                && !declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::FunctionPointer(_, _)))
-                && declarator.init.is_none()
-            {
+            if self.should_skip_global_declarator(decl, declarator) {
+                continue;
+            }
+            if self.try_lower_register_global(decl, declarator) {
+                continue;
+            }
+            if self.try_lower_extern_global(decl, declarator) {
                 continue;
             }
 
-            // Skip declarations using function typedefs (e.g., `func_t add;`),
-            // but NOT function pointer variables (e.g., `func_t *callback;`).
-            // When derived contains Pointer, this is a variable of type pointer-to-function.
-            if declarator.init.is_none() && declarator.derived.is_empty() {
-                if let TypeSpecifier::TypedefName(tname) = &decl.type_spec {
-                    if self.types.function_typedefs.contains_key(tname) {
-                        continue;
-                    }
-                }
-                // Skip typeof-declared functions (e.g., `extern typeof(func) alias;`).
-                // Sema correctly identifies these as functions via CType resolution,
-                // so they appear in known_functions. Without this skip, they would
-                // be incorrectly added to the globals map as variables, causing
-                // indirect calls instead of direct calls.
-                if matches!(&decl.type_spec, TypeSpecifier::Typeof(_) | TypeSpecifier::TypeofType(_)) {
-                    if self.known_functions.contains(&declarator.name) {
-                        continue;
-                    }
-                }
-            }
+            let prior_was_weak = match self.handle_global_redeclaration(decl, declarator) {
+                RedeclResult::Skip => continue,
+                RedeclResult::Proceed { prior_was_weak } => prior_was_weak,
+            };
 
-            // Global register variable: `register <type> <name> __asm__("reg")`
-            // No storage is emitted; reads/writes map directly to the named register.
-            if let Some(ref reg_name) = declarator.attrs.asm_register {
-                let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
-                if let Some(vs) = decl.vector_size {
-                    da.apply_vector_size(vs);
-                }
-                let mut ginfo = GlobalInfo::from_analysis(&da);
-                ginfo.asm_register = Some(reg_name.clone());
-                ginfo.var.address_space = decl.address_space;
-                self.globals.insert(declarator.name.clone(), ginfo);
-                continue;
-            }
-
-            // extern without initializer: track the type but don't emit a .bss entry
-            if decl.is_extern() && declarator.init.is_none() {
-                if !self.globals.contains_key(&declarator.name) {
-                    let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
-                    if let Some(vs) = decl.vector_size {
-                        da.apply_vector_size(vs);
-                    }
-                    let mut ginfo = GlobalInfo::from_analysis(&da);
-                    ginfo.var.address_space = decl.address_space;
-                    self.globals.insert(declarator.name.clone(), ginfo);
-                }
-                // For extern TLS variables, we still need an IrGlobal entry so the
-                // codegen layer knows to use TLS access patterns for this symbol.
-                if decl.is_thread_local() && !self.emitted_global_names.contains(&declarator.name) {
-                    let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
-                    if let Some(vs) = decl.vector_size {
-                        da.apply_vector_size(vs);
-                    }
-                    self.module.globals.push(IrGlobal {
-                        name: declarator.name.clone(),
-                        ty: da.var_ty,
-                        size: da.actual_alloc_size,
-                        align: da.var_ty.align(),
-                        init: GlobalInit::Zero,
-                        is_static: false,
-                        is_extern: true,
-                        is_common: false,
-                        section: None,
-                        is_weak: declarator.attrs.is_weak(),
-                        visibility: declarator.attrs.visibility.clone(),
-                        has_explicit_align: false,
-                        is_const: false,
-                        is_used: false,
-                        is_thread_local: true,
-                    });
-                    self.emitted_global_names.insert(declarator.name.clone());
-                }
-                continue;
-            }
-
-            // Handle tentative definitions and re-declarations
-            // When a global was previously declared with __weak and is now
-            // redefined with an initializer (without __weak), preserve the
-            // weak attribute from the earlier declaration. GCC keeps the weak
-            // binding in this case (e.g., Linux kernel's init/version.c uses
-            // `const char linux_banner[] __weak;` followed by a strong definition).
-            let mut prior_was_weak = false;
-            if self.globals.contains_key(&declarator.name) {
-                if declarator.init.is_none() {
-                    if self.emitted_global_names.contains(&declarator.name) {
-                        // Check if the previously-emitted global was extern but this
-                        // redeclaration is a tentative definition (not extern).
-                        // In C, `extern __thread T x;` followed by `__thread T x;`
-                        // makes x a defined (non-extern) symbol in this translation unit.
-                        // We must replace the extern IrGlobal with a defined one.
-                        let prior_is_extern = self.module.globals.iter()
-                            .any(|g| g.name == declarator.name && g.is_extern);
-                        if prior_is_extern && !decl.is_extern() {
-                            // Remove old extern entry and re-emit as defined
-                            for g in &self.module.globals {
-                                if g.name == declarator.name {
-                                    prior_was_weak = g.is_weak;
-                                    break;
-                                }
-                            }
-                            self.module.globals.retain(|g| g.name != declarator.name);
-                            self.emitted_global_names.remove(&declarator.name);
-                        } else {
-                            // Even though we skip re-emitting, propagate __weak
-                            // to the already-emitted global if this redeclaration
-                            // carries the weak attribute.
-                            if declarator.attrs.is_weak() {
-                                for g in &mut self.module.globals {
-                                    if g.name == declarator.name {
-                                        g.is_weak = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-                    }
-                } else {
-                    // Save the is_weak flag from the previous tentative definition
-                    for g in &self.module.globals {
-                        if g.name == declarator.name {
-                            prior_was_weak = g.is_weak;
-                            break;
-                        }
-                    }
-                    self.module.globals.retain(|g| g.name != declarator.name);
-                    self.emitted_global_names.remove(&declarator.name);
-                }
-            }
-
-            let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
-
-            // Apply inline __attribute__((vector_size(N))) to non-typedef declarations.
-            // For typedefs, this is handled above; for variables, we must wrap the
-            // CType and adjust sizes/types so the variable is treated as a vector aggregate.
-            if let Some(vs) = decl.vector_size {
-                da.apply_vector_size(vs);
-            }
-
-            // For global arrays-of-pointers, clear struct_layout
-            if da.is_array_of_pointers || da.is_array_of_func_ptrs {
-                da.struct_layout = None;
-                da.is_struct = false;
-            }
-
-            // For unsized arrays, compute actual size from initializer
-            self.fixup_unsized_array(&mut da, &decl.type_spec, &declarator.derived, &declarator.init);
-
-            // For scalar globals, use the actual C type size (handles long double = 16 bytes)
-            if !da.is_array && !da.is_pointer && da.struct_layout.is_none() {
-                let c_size = self.sizeof_type(&decl.type_spec);
-                da.actual_alloc_size = c_size.max(da.var_ty.size());
-            }
+            let mut da = self.prepare_global_analysis(decl, declarator);
 
             let is_extern_decl = decl.is_extern() && declarator.init.is_none();
 
-            // Register the global before evaluating its initializer so that
-            // self-referential initializers (e.g., `struct Node n = {&n}`)
-            // can resolve &n via eval_global_addr_expr.
+            // Register before evaluating initializer so self-referential
+            // initializers (e.g., `struct Node n = {&n}`) can resolve.
             let mut ginfo = GlobalInfo::from_analysis(&da);
             ginfo.var.address_space = decl.address_space;
             self.globals.insert(declarator.name.clone(), ginfo);
 
-            let init = if let Some(ref initializer) = declarator.init {
-                // For pointer globals (char *p = ...) and pointer arrays (char *a[] = ...),
-                // use Ptr as the base type for initializer coercion, not the pointee type.
-                // base_ty is the pointee type (e.g., I8 for char*), but the stored value
-                // is always pointer-sized. For non-pointer scalars and non-pointer arrays,
-                // base_ty is correct.
-                let init_base_ty = if da.is_pointer && !da.is_array {
-                    da.var_ty  // scalar pointer: var_ty = Ptr
-                } else if da.is_array_of_pointers || da.is_array_of_func_ptrs {
-                    IrType::Ptr  // pointer array: each element is Ptr
-                } else {
-                    da.base_ty
-                };
-                self.lower_global_init(initializer, &decl.type_spec, init_base_ty, da.is_array, da.elem_size, da.actual_alloc_size, &da.struct_layout, &da.array_dim_strides)
-            } else {
-                GlobalInit::Zero
-            };
+            let init = self.lower_declarator_init(decl, declarator, &da);
+            let (align, has_explicit_align) = self.compute_global_alignment(decl, &da);
 
-            let (align, has_explicit_align) = {
-                let c_align = self.alignof_type(&decl.type_spec);
-                let natural = if c_align > 0 { c_align.max(da.var_ty.align()) } else { da.var_ty.align() };
-                // Resolve _Alignas alignment: use the lowerer's alignof_type (which can
-                // resolve typedefs) for the alignas type specifier, falling back to the
-                // parser's pre-computed numeric alignment.
-                let mut explicit = if let Some(ref alignas_ts) = decl.alignas_type {
-                    Some(self.alignof_type(alignas_ts))
-                } else {
-                    decl.alignment
-                };
-                // Recompute sizeof for aligned(sizeof(type)) with full layout info
-                if let Some(ref sizeof_ts) = decl.alignment_sizeof_type {
-                    let real_sizeof = self.sizeof_type(sizeof_ts);
-                    explicit = Some(explicit.map_or(real_sizeof, |a| a.max(real_sizeof)));
-                }
-                // Also incorporate alignment from typedef
-                if let Some(&td_align) = self.typedef_alignment_for_type_spec(&decl.type_spec) {
-                    explicit = Some(explicit.map_or(td_align, |a| a.max(td_align)));
-                }
-                if let Some(explicit_val) = explicit {
-                    (natural.max(explicit_val), true)
-                } else {
-                    (natural, false)
-                }
-            };
-
-            // Store explicit alignment in GlobalInfo so _Alignof(var) returns
-            // the correct alignment per C11 6.2.8p3.
             if has_explicit_align {
                 if let Some(ginfo) = self.globals.get_mut(&declarator.name) {
                     ginfo.var.explicit_alignment = Some(align);
                 }
             }
 
-            let is_static = decl.is_static();
-
-            let global_ty = da.resolve_global_ty(&init);
-
-            let final_size = match &init {
-                GlobalInit::Array(vals) if da.is_struct && vals.len() > da.actual_alloc_size => vals.len(),
-                GlobalInit::Compound(_) if da.is_struct => {
-                    let emitted = init.emitted_byte_size();
-                    emitted.max(da.actual_alloc_size)
-                }
-                _ => da.actual_alloc_size,
-            };
-
-            // For pointer variables, decl.is_const refers to the pointee type
-            // (e.g., `const char *p` means p points to const char, but p itself is mutable).
-            // Only non-pointer variables get is_const from the declaration.
-            // Our parser doesn't track `* const` (pointer-to-const qualifier), so for
-            // pointers we conservatively mark as non-const.
-            let var_is_const = decl.is_const() && !da.is_pointer
-                && !da.is_array_of_pointers && !da.is_array_of_func_ptrs;
-
-            // Skip emitting storage for alias/weakref declarations. The variable
-            // is still registered in the globals table (line 210) for type lookups,
-            // but no data section entry is needed — the .set directive (emitted from
-            // module.aliases by the backend) handles the symbol binding.
+            // Skip emitting storage for alias/weakref declarations.
             if declarator.attrs.alias_target.is_some() {
                 continue;
             }
 
-            self.emitted_global_names.insert(declarator.name.clone());
+            self.emit_ir_global(decl, declarator, &da, init, align, has_explicit_align,
+                                is_extern_decl, prior_was_weak);
+        }
+    }
+
+    fn lower_typedef(&mut self, decl: &Declaration) {
+        let is_enum_type = self.is_enum_type_spec(&decl.type_spec);
+        for declarator in &decl.declarators {
+            if declarator.name.is_empty() {
+                continue;
+            }
+            let mut resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+            if let Some(vs) = decl.vector_size {
+                resolved_ctype = CType::Vector(Box::new(resolved_ctype), vs);
+            }
+            self.types.typedefs.insert(declarator.name.clone(), resolved_ctype);
+            if is_enum_type && declarator.derived.is_empty() {
+                self.types.enum_typedefs.insert(declarator.name.clone());
+            }
+            let effective_alignment = {
+                let mut align = decl.alignment;
+                if let Some(ref sizeof_ts) = decl.alignment_sizeof_type {
+                    let real_sizeof = self.sizeof_type(sizeof_ts);
+                    align = Some(align.map_or(real_sizeof, |a| a.max(real_sizeof)));
+                }
+                align.or_else(|| {
+                    decl.alignas_type.as_ref().map(|ts| self.alignof_type(ts))
+                })
+            };
+            if let Some(align) = effective_alignment {
+                self.types.typedef_alignments.insert(declarator.name.clone(), align);
+            }
+        }
+        if decl.is_transparent_union() {
+            self.mark_transparent_union(decl);
+        }
+    }
+
+    /// Returns true if this declarator should be skipped (function prototypes,
+    /// function typedefs, typeof-declared functions).
+    fn should_skip_global_declarator(&self, decl: &Declaration, declarator: &InitDeclarator) -> bool {
+        // Skip function declarations (prototypes), but NOT function pointer variables.
+        if declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::Function(_, _)))
+            && !declarator.derived.iter().any(|d| matches!(d, DerivedDeclarator::FunctionPointer(_, _)))
+            && declarator.init.is_none()
+        {
+            return true;
+        }
+        // Skip declarations using function typedefs or typeof-declared functions.
+        if declarator.init.is_none() && declarator.derived.is_empty() {
+            if let TypeSpecifier::TypedefName(tname) = &decl.type_spec {
+                if self.types.function_typedefs.contains_key(tname) {
+                    return true;
+                }
+            }
+            if matches!(&decl.type_spec, TypeSpecifier::Typeof(_) | TypeSpecifier::TypeofType(_)) {
+                if self.known_functions.contains(&declarator.name) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Handle global register variable. Returns true if handled (caller should continue).
+    fn try_lower_register_global(&mut self, decl: &Declaration, declarator: &InitDeclarator) -> bool {
+        let Some(ref reg_name) = declarator.attrs.asm_register else { return false };
+        let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+        if let Some(vs) = decl.vector_size {
+            da.apply_vector_size(vs);
+        }
+        let mut ginfo = GlobalInfo::from_analysis(&da);
+        ginfo.asm_register = Some(reg_name.clone());
+        ginfo.var.address_space = decl.address_space;
+        self.globals.insert(declarator.name.clone(), ginfo);
+        true
+    }
+
+    /// Handle extern without initializer. Returns true if handled (caller should continue).
+    fn try_lower_extern_global(&mut self, decl: &Declaration, declarator: &InitDeclarator) -> bool {
+        if !decl.is_extern() || declarator.init.is_some() {
+            return false;
+        }
+        if !self.globals.contains_key(&declarator.name) {
+            let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+            if let Some(vs) = decl.vector_size {
+                da.apply_vector_size(vs);
+            }
+            let mut ginfo = GlobalInfo::from_analysis(&da);
+            ginfo.var.address_space = decl.address_space;
+            self.globals.insert(declarator.name.clone(), ginfo);
+        }
+        // For extern TLS variables, emit an IrGlobal so codegen uses TLS access patterns.
+        if decl.is_thread_local() && !self.emitted_global_names.contains(&declarator.name) {
+            let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+            if let Some(vs) = decl.vector_size {
+                da.apply_vector_size(vs);
+            }
             self.module.globals.push(IrGlobal {
                 name: declarator.name.clone(),
-                ty: global_ty,
-                size: final_size,
-                align,
-                init,
-                is_static,
-                is_extern: is_extern_decl,
-                is_common: decl.is_common(),
-                section: declarator.attrs.section.clone(),
-                is_weak: declarator.attrs.is_weak() || prior_was_weak,
+                ty: da.var_ty,
+                size: da.actual_alloc_size,
+                align: da.var_ty.align(),
+                init: GlobalInit::Zero,
+                is_static: false,
+                is_extern: true,
+                is_common: false,
+                section: None,
+                is_weak: declarator.attrs.is_weak(),
                 visibility: declarator.attrs.visibility.clone(),
-                has_explicit_align,
-                is_const: var_is_const,
-                is_used: declarator.attrs.is_used(),
-                is_thread_local: decl.is_thread_local(),
+                has_explicit_align: false,
+                is_const: false,
+                is_used: false,
+                is_thread_local: true,
             });
+            self.emitted_global_names.insert(declarator.name.clone());
         }
+        true
+    }
+
+    /// Handle tentative definitions and re-declarations. Returns whether to skip
+    /// or proceed (with prior weak flag preserved).
+    fn handle_global_redeclaration(&mut self, decl: &Declaration, declarator: &InitDeclarator) -> RedeclResult {
+        if !self.globals.contains_key(&declarator.name) {
+            return RedeclResult::Proceed { prior_was_weak: false };
+        }
+        if declarator.init.is_none() {
+            if self.emitted_global_names.contains(&declarator.name) {
+                let prior_is_extern = self.module.globals.iter()
+                    .any(|g| g.name == declarator.name && g.is_extern);
+                if prior_is_extern && !decl.is_extern() {
+                    // Remove old extern entry and re-emit as defined
+                    let prior_was_weak = self.module.globals.iter()
+                        .find(|g| g.name == declarator.name)
+                        .map_or(false, |g| g.is_weak);
+                    self.module.globals.retain(|g| g.name != declarator.name);
+                    self.emitted_global_names.remove(&declarator.name);
+                    return RedeclResult::Proceed { prior_was_weak };
+                }
+                // Propagate __weak to already-emitted global if this redeclaration carries it.
+                if declarator.attrs.is_weak() {
+                    for g in &mut self.module.globals {
+                        if g.name == declarator.name {
+                            g.is_weak = true;
+                            break;
+                        }
+                    }
+                }
+                return RedeclResult::Skip;
+            }
+        } else {
+            let prior_was_weak = self.module.globals.iter()
+                .find(|g| g.name == declarator.name)
+                .map_or(false, |g| g.is_weak);
+            self.module.globals.retain(|g| g.name != declarator.name);
+            self.emitted_global_names.remove(&declarator.name);
+            return RedeclResult::Proceed { prior_was_weak };
+        }
+        RedeclResult::Proceed { prior_was_weak: false }
+    }
+
+    /// Run declaration analysis with vector_size, array-of-pointers fixup, unsized
+    /// array fixup, and scalar size adjustment.
+    fn prepare_global_analysis(&self, decl: &Declaration, declarator: &InitDeclarator) -> DeclAnalysis {
+        let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
+        if let Some(vs) = decl.vector_size {
+            da.apply_vector_size(vs);
+        }
+        if da.is_array_of_pointers || da.is_array_of_func_ptrs {
+            da.struct_layout = None;
+            da.is_struct = false;
+        }
+        self.fixup_unsized_array(&mut da, &decl.type_spec, &declarator.derived, &declarator.init);
+        if !da.is_array && !da.is_pointer && da.struct_layout.is_none() {
+            let c_size = self.sizeof_type(&decl.type_spec);
+            da.actual_alloc_size = c_size.max(da.var_ty.size());
+        }
+        da
+    }
+
+    fn lower_declarator_init(&mut self, decl: &Declaration, declarator: &InitDeclarator, da: &DeclAnalysis) -> GlobalInit {
+        if let Some(ref initializer) = declarator.init {
+            let init_base_ty = if da.is_pointer && !da.is_array {
+                da.var_ty
+            } else if da.is_array_of_pointers || da.is_array_of_func_ptrs {
+                IrType::Ptr
+            } else {
+                da.base_ty
+            };
+            self.lower_global_init(initializer, &decl.type_spec, init_base_ty, da.is_array, da.elem_size, da.actual_alloc_size, &da.struct_layout, &da.array_dim_strides)
+        } else {
+            GlobalInit::Zero
+        }
+    }
+
+    fn compute_global_alignment(&self, decl: &Declaration, da: &DeclAnalysis) -> (usize, bool) {
+        let c_align = self.alignof_type(&decl.type_spec);
+        let natural = if c_align > 0 { c_align.max(da.var_ty.align()) } else { da.var_ty.align() };
+        let mut explicit = if let Some(ref alignas_ts) = decl.alignas_type {
+            Some(self.alignof_type(alignas_ts))
+        } else {
+            decl.alignment
+        };
+        if let Some(ref sizeof_ts) = decl.alignment_sizeof_type {
+            let real_sizeof = self.sizeof_type(sizeof_ts);
+            explicit = Some(explicit.map_or(real_sizeof, |a| a.max(real_sizeof)));
+        }
+        if let Some(&td_align) = self.typedef_alignment_for_type_spec(&decl.type_spec) {
+            explicit = Some(explicit.map_or(td_align, |a| a.max(td_align)));
+        }
+        if let Some(explicit_val) = explicit {
+            (natural.max(explicit_val), true)
+        } else {
+            (natural, false)
+        }
+    }
+
+    fn emit_ir_global(
+        &mut self, decl: &Declaration, declarator: &InitDeclarator,
+        da: &DeclAnalysis, init: GlobalInit, align: usize, has_explicit_align: bool,
+        is_extern_decl: bool, prior_was_weak: bool,
+    ) {
+        let global_ty = da.resolve_global_ty(&init);
+        let final_size = match &init {
+            GlobalInit::Array(vals) if da.is_struct && vals.len() > da.actual_alloc_size => vals.len(),
+            GlobalInit::Compound(_) if da.is_struct => {
+                let emitted = init.emitted_byte_size();
+                emitted.max(da.actual_alloc_size)
+            }
+            _ => da.actual_alloc_size,
+        };
+        // For pointer variables, decl.is_const refers to the pointee type, not the pointer.
+        let var_is_const = decl.is_const() && !da.is_pointer
+            && !da.is_array_of_pointers && !da.is_array_of_func_ptrs;
+
+        self.emitted_global_names.insert(declarator.name.clone());
+        self.module.globals.push(IrGlobal {
+            name: declarator.name.clone(),
+            ty: global_ty,
+            size: final_size,
+            align,
+            init,
+            is_static: decl.is_static(),
+            is_extern: is_extern_decl,
+            is_common: decl.is_common(),
+            section: declarator.attrs.section.clone(),
+            is_weak: declarator.attrs.is_weak() || prior_was_weak,
+            visibility: declarator.attrs.visibility.clone(),
+            has_explicit_align,
+            is_const: var_is_const,
+            is_used: declarator.attrs.is_used(),
+            is_thread_local: decl.is_thread_local(),
+        });
     }
 
     // --- Declaration analysis ---
