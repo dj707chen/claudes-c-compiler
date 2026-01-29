@@ -524,7 +524,10 @@ impl Lowerer {
             | BuiltinIntrinsic::X86Pmovmskb128 | BuiltinIntrinsic::X86Pextrw128
             | BuiltinIntrinsic::X86Cvtsi128Si32 | BuiltinIntrinsic::X86Cvtsi128Si64
             | BuiltinIntrinsic::X86Crc32_8 | BuiltinIntrinsic::X86Crc32_16
-            | BuiltinIntrinsic::X86Crc32_32 | BuiltinIntrinsic::X86Crc32_64 => {
+            | BuiltinIntrinsic::X86Crc32_32 | BuiltinIntrinsic::X86Crc32_64
+            | BuiltinIntrinsic::X86Pinsrd128 | BuiltinIntrinsic::X86Pextrd128
+            | BuiltinIntrinsic::X86Pinsrb128 | BuiltinIntrinsic::X86Pextrb128
+            | BuiltinIntrinsic::X86Pinsrq128 | BuiltinIntrinsic::X86Pextrq128 => {
                 self.lower_x86_intrinsic(intrinsic, args)
             }
             // __builtin_frame_address(level) / __builtin_return_address(level)
@@ -633,7 +636,9 @@ fn x86_intrinsic_kind(intrinsic: &BuiltinIntrinsic) -> X86IntrinsicKind {
         BuiltinIntrinsic::X86Pmovmskb128 | BuiltinIntrinsic::X86Pextrw128
         | BuiltinIntrinsic::X86Cvtsi128Si32 | BuiltinIntrinsic::X86Cvtsi128Si64
         | BuiltinIntrinsic::X86Crc32_8 | BuiltinIntrinsic::X86Crc32_16
-        | BuiltinIntrinsic::X86Crc32_32 | BuiltinIntrinsic::X86Crc32_64 => X86IntrinsicKind::Scalar,
+        | BuiltinIntrinsic::X86Crc32_32 | BuiltinIntrinsic::X86Crc32_64
+        | BuiltinIntrinsic::X86Pextrd128 | BuiltinIntrinsic::X86Pextrb128
+        | BuiltinIntrinsic::X86Pextrq128 => X86IntrinsicKind::Scalar,
 
         // All remaining X86 intrinsics return 128-bit vector via stack pointer
         _ => X86IntrinsicKind::Vec128,
@@ -709,6 +714,13 @@ fn x86_intrinsic_op(intrinsic: &BuiltinIntrinsic) -> IntrinsicOp {
         BuiltinIntrinsic::X86Crc32_16 => IntrinsicOp::Crc32_16,
         BuiltinIntrinsic::X86Crc32_32 => IntrinsicOp::Crc32_32,
         BuiltinIntrinsic::X86Crc32_64 => IntrinsicOp::Crc32_64,
+        // SSE4.1 insert/extract
+        BuiltinIntrinsic::X86Pinsrd128 => IntrinsicOp::Pinsrd128,
+        BuiltinIntrinsic::X86Pextrd128 => IntrinsicOp::Pextrd128,
+        BuiltinIntrinsic::X86Pinsrb128 => IntrinsicOp::Pinsrb128,
+        BuiltinIntrinsic::X86Pextrb128 => IntrinsicOp::Pextrb128,
+        BuiltinIntrinsic::X86Pinsrq128 => IntrinsicOp::Pinsrq128,
+        BuiltinIntrinsic::X86Pextrq128 => IntrinsicOp::Pextrq128,
         _ => unreachable!("x86_intrinsic_op called with non-X86 intrinsic: {:?}", intrinsic),
     }
 }

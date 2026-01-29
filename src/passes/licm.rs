@@ -357,6 +357,12 @@ fn analyze_loop_memory(
                         stored_allocas.insert(ptr.0);
                     }
                 }
+                // Vec128 intrinsics write their result through dest_ptr.
+                // Track this as a store so that reads from the same alloca
+                // (by other intrinsics or loads) are not incorrectly hoisted.
+                Instruction::Intrinsic { dest_ptr: Some(dptr), .. } => {
+                    stored_allocas.insert(dptr.0);
+                }
                 _ => {}
             }
         }
@@ -496,6 +502,24 @@ fn hoist_loop_invariants(
                             all_invariant = false;
                         }
                     });
+                    // For pure intrinsics: also check that pointer args don't read
+                    // from allocas that are modified inside the loop. The pointer
+                    // value itself may be loop-invariant (e.g., an alloca defined
+                    // in the entry block), but the data at that pointer can change.
+                    if all_invariant {
+                        if let Instruction::Intrinsic { args, .. } = inst {
+                            for arg in args {
+                                if let Operand::Value(v) = arg {
+                                    if alloca_info.alloca_values.contains(&v.0)
+                                        && loop_mem.stored_allocas.contains(&v.0)
+                                    {
+                                        all_invariant = false;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     all_invariant
                 } else if let Instruction::Load { ptr, ty, .. } = inst {
                     // TODO: Extend to also hoist float, long double, and i128

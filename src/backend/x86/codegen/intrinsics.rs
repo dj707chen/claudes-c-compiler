@@ -437,6 +437,72 @@ impl X86Codegen {
                     self.store_rax_to(d);
                 }
             }
+            IntrinsicOp::Pinsrd128 => {
+                // Insert 32-bit value at lane: pinsrd $imm, %eax, %xmm0 (SSE4.1)
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    self.operand_to_reg(&args[1], "rcx");
+                    let imm = self.operand_to_imm_i64(&args[2]);
+                    self.state.emit_fmt(format_args!("    pinsrd ${}, %ecx, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            IntrinsicOp::Pextrd128 => {
+                // Extract 32-bit value at lane: pextrd $imm, %xmm0, %eax (SSE4.1)
+                self.operand_to_reg(&args[0], "rax");
+                self.state.emit("    movdqu (%rax), %xmm0");
+                let imm = self.operand_to_imm_i64(&args[1]);
+                self.state.emit_fmt(format_args!("    pextrd ${}, %xmm0, %eax", imm));
+                if let Some(d) = dest {
+                    self.store_rax_to(d);
+                }
+            }
+            IntrinsicOp::Pinsrb128 => {
+                // Insert 8-bit value at lane: pinsrb $imm, %eax, %xmm0 (SSE4.1)
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    self.operand_to_reg(&args[1], "rcx");
+                    let imm = self.operand_to_imm_i64(&args[2]);
+                    self.state.emit_fmt(format_args!("    pinsrb ${}, %ecx, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            IntrinsicOp::Pextrb128 => {
+                // Extract 8-bit value at lane: pextrb $imm, %xmm0, %eax (SSE4.1)
+                self.operand_to_reg(&args[0], "rax");
+                self.state.emit("    movdqu (%rax), %xmm0");
+                let imm = self.operand_to_imm_i64(&args[1]);
+                self.state.emit_fmt(format_args!("    pextrb ${}, %xmm0, %eax", imm));
+                if let Some(d) = dest {
+                    self.store_rax_to(d);
+                }
+            }
+            IntrinsicOp::Pinsrq128 => {
+                // Insert 64-bit value at lane: pinsrq $imm, %rax, %xmm0 (SSE4.1)
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_reg(&args[0], "rax");
+                    self.state.emit("    movdqu (%rax), %xmm0");
+                    self.operand_to_reg(&args[1], "rcx");
+                    let imm = self.operand_to_imm_i64(&args[2]);
+                    self.state.emit_fmt(format_args!("    pinsrq ${}, %rcx, %xmm0", imm));
+                    self.value_to_reg(dptr, "rax");
+                    self.state.emit("    movdqu %xmm0, (%rax)");
+                }
+            }
+            IntrinsicOp::Pextrq128 => {
+                // Extract 64-bit value at lane: pextrq $imm, %xmm0, %rax (SSE4.1)
+                self.operand_to_reg(&args[0], "rax");
+                self.state.emit("    movdqu (%rax), %xmm0");
+                let imm = self.operand_to_imm_i64(&args[1]);
+                self.state.emit_fmt(format_args!("    pextrq ${}, %xmm0, %rax", imm));
+                if let Some(d) = dest {
+                    self.store_rax_to(d);
+                }
+            }
             IntrinsicOp::Storeldi128 => {
                 // Store low 64 bits to memory (MOVQ)
                 if let Some(ptr) = dest_ptr {

@@ -532,6 +532,11 @@ impl Lowerer {
                         // array filler which handles Initializer::List sub-items correctly.
                         let elem_size = self.resolve_ctype_size(inner_ty);
                         self.fill_array_of_composites(nested_items, inner_ty, arr_size, elem_size, &mut bytes, 0);
+                    } else if let CType::Array(ref inner_elem, Some(inner_size)) = inner_ty.as_ref() {
+                        // Multi-dimensional array (e.g., unsigned char hash[2][24]):
+                        // each sub-item is a braced list for one element of the outer dimension.
+                        let elem_size = self.resolve_ctype_size(inner_ty);
+                        self.fill_multidim_array_field(nested_items, inner_elem, *inner_size, arr_size, elem_size, &mut bytes, 0);
                     } else {
                         self.fill_scalar_list_to_bytes(nested_items, inner_ty, field_size, &mut bytes);
                     }

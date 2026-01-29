@@ -296,6 +296,73 @@ impl I686Codegen {
                     self.store_eax_to(d);
                 }
             }
+            IntrinsicOp::Pinsrd128 => {
+                // Insert 32-bit value at lane: pinsrd $imm, %eax, %xmm0 (SSE4.1)
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movdqu (%eax), %xmm0");
+                    self.operand_to_ecx(&args[1]);
+                    let imm = Self::operand_to_imm_i64(&args[2]);
+                    self.state.emit_fmt(format_args!("    pinsrd ${}, %ecx, %xmm0", imm));
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
+            IntrinsicOp::Pextrd128 => {
+                // Extract 32-bit value at lane: pextrd $imm, %xmm0, %eax (SSE4.1)
+                self.operand_to_eax(&args[0]);
+                self.state.emit("    movdqu (%eax), %xmm0");
+                let imm = Self::operand_to_imm_i64(&args[1]);
+                self.state.emit_fmt(format_args!("    pextrd ${}, %xmm0, %eax", imm));
+                self.state.reg_cache.invalidate_acc();
+                if let Some(d) = dest {
+                    self.store_eax_to(d);
+                }
+            }
+            IntrinsicOp::Pinsrb128 => {
+                // Insert 8-bit value at lane: pinsrb $imm, %eax, %xmm0 (SSE4.1)
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movdqu (%eax), %xmm0");
+                    self.operand_to_ecx(&args[1]);
+                    let imm = Self::operand_to_imm_i64(&args[2]);
+                    self.state.emit_fmt(format_args!("    pinsrb ${}, %ecx, %xmm0", imm));
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
+            IntrinsicOp::Pextrb128 => {
+                // Extract 8-bit value at lane: pextrb $imm, %xmm0, %eax (SSE4.1)
+                self.operand_to_eax(&args[0]);
+                self.state.emit("    movdqu (%eax), %xmm0");
+                let imm = Self::operand_to_imm_i64(&args[1]);
+                self.state.emit_fmt(format_args!("    pextrb ${}, %xmm0, %eax", imm));
+                self.state.reg_cache.invalidate_acc();
+                if let Some(d) = dest {
+                    self.store_eax_to(d);
+                }
+            }
+            IntrinsicOp::Pinsrq128 => {
+                // TODO: PINSRQ is not available on i686 - could emulate with two PINSRD
+                // Currently just copies input unchanged (no-op)
+                if let Some(dptr) = dest_ptr {
+                    self.operand_to_eax(&args[0]);
+                    self.state.emit("    movdqu (%eax), %xmm0");
+                    self.operand_to_eax(&Operand::Value(*dptr));
+                    self.state.emit("    movdqu %xmm0, (%eax)");
+                }
+            }
+            IntrinsicOp::Pextrq128 => {
+                // TODO: PEXTRQ is not available on i686 - could emulate with MOVQ or two PEXTRD
+                // Currently only extracts low 32 bits as fallback
+                self.operand_to_eax(&args[0]);
+                self.state.emit("    movdqu (%eax), %xmm0");
+                self.state.emit("    movd %xmm0, %eax");
+                self.state.reg_cache.invalidate_acc();
+                if let Some(d) = dest {
+                    self.store_eax_to(d);
+                }
+            }
             IntrinsicOp::Storeldi128 => {
                 if let Some(ptr) = dest_ptr {
                     self.operand_to_eax(&args[0]);

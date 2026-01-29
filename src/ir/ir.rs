@@ -1559,6 +1559,20 @@ pub enum IntrinsicOp {
     Pshuflw128,
     /// Shuffle high 16-bit integers (PSHUFHW)
     Pshufhw128,
+
+    // --- SSE4.1 insert/extract operations ---
+    /// Insert 32-bit value at lane (PINSRD)
+    Pinsrd128,
+    /// Extract 32-bit value at lane (PEXTRD) - returns scalar i32
+    Pextrd128,
+    /// Insert 8-bit value at lane (PINSRB)
+    Pinsrb128,
+    /// Extract 8-bit value at lane (PEXTRB) - returns scalar i32
+    Pextrb128,
+    /// Insert 64-bit value at lane (PINSRQ)
+    Pinsrq128,
+    /// Extract 64-bit value at lane (PEXTRQ) - returns scalar i64
+    Pextrq128,
 }
 
 impl IntrinsicOp {
@@ -1589,7 +1603,11 @@ impl IntrinsicOp {
             IntrinsicOp::SetEpi16 | IntrinsicOp::Pinsrw128 |
             IntrinsicOp::Pextrw128 | IntrinsicOp::Cvtsi128Si32 |
             IntrinsicOp::Cvtsi32Si128 | IntrinsicOp::Cvtsi128Si64 |
-            IntrinsicOp::Pshuflw128 | IntrinsicOp::Pshufhw128
+            IntrinsicOp::Pshuflw128 | IntrinsicOp::Pshufhw128 |
+            // SSE4.1 insert/extract are pure
+            IntrinsicOp::Pinsrd128 | IntrinsicOp::Pextrd128 |
+            IntrinsicOp::Pinsrb128 | IntrinsicOp::Pextrb128 |
+            IntrinsicOp::Pinsrq128 | IntrinsicOp::Pextrq128
         )
     }
 }

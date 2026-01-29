@@ -602,7 +602,7 @@ impl Lowerer {
     /// Fill a multi-dimensional array field from a braced initializer list.
     /// Handles arrays like `int a[2][3]`, `struct S a[2][2][2]`, `union U a[3][4]`, etc.
     /// Each sub-item at this level represents one element of the outermost dimension.
-    fn fill_multidim_array_field(
+    pub(super) fn fill_multidim_array_field(
         &self,
         sub_items: &[InitializerItem],
         inner_elem_ty: &CType,

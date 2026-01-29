@@ -789,6 +789,11 @@ impl Lowerer {
                         }
                     }
                 }
+            } else if let CType::Array(ref inner_elem, Some(inner_size)) = elem_ty.as_ref() {
+                // Multi-dimensional array of scalars (e.g., unsigned char hash[2][4]):
+                // each item is a braced list for one row of the outer dimension.
+                let elem_size = self.resolve_ctype_size(elem_ty);
+                self.fill_multidim_array_field(items, inner_elem, *inner_size, items.len(), elem_size, bytes, offset);
             } else {
                 // Array of non-composite elements (scalars, pointers, etc.)
                 self.fill_scalar_array_with_ptrs(items, elem_ty, offset, bytes, ptr_ranges);

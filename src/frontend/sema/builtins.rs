@@ -360,6 +360,13 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("_mm_cvtsi128_si64x", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Cvtsi128Si64));
     m.insert("_mm_shufflelo_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pshuflw128));
     m.insert("_mm_shufflehi_epi16", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pshufhw128));
+    // SSE4.1 _mm_* direct name mappings
+    m.insert("_mm_insert_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pinsrd128));
+    m.insert("_mm_extract_epi32", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pextrd128));
+    m.insert("_mm_insert_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pinsrb128));
+    m.insert("_mm_extract_epi8", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pextrb128));
+    m.insert("_mm_insert_epi64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pinsrq128));
+    m.insert("_mm_extract_epi64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pextrq128));
     // __builtin_ia32_* names for the new SSE2 operations
     m.insert("__builtin_ia32_paddw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Paddw128));
     m.insert("__builtin_ia32_psubw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Psubw128));
@@ -389,6 +396,14 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("__builtin_ia32_cvtsi128si64", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Cvtsi128Si64));
     m.insert("__builtin_ia32_pshuflw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pshuflw128));
     m.insert("__builtin_ia32_pshufhw128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pshufhw128));
+
+    // x86 SSE4.1 insert/extract builtins (__builtin_ia32_* names)
+    m.insert("__builtin_ia32_pinsrd128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pinsrd128));
+    m.insert("__builtin_ia32_pextrd128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pextrd128));
+    m.insert("__builtin_ia32_pinsrb128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pinsrb128));
+    m.insert("__builtin_ia32_pextrb128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pextrb128));
+    m.insert("__builtin_ia32_pinsrq128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pinsrq128));
+    m.insert("__builtin_ia32_pextrq128", BuiltinInfo::intrinsic(BuiltinIntrinsic::X86Pextrq128));
 
     m
 });
@@ -553,6 +568,13 @@ pub enum BuiltinIntrinsic {
     X86Cvtsi128Si64,   // _mm_cvtsi128_si64
     X86Pshuflw128,     // _mm_shufflelo_epi16 (PSHUFLW)
     X86Pshufhw128,     // _mm_shufflehi_epi16 (PSHUFHW)
+    // SSE4.1 insert/extract operations
+    X86Pinsrd128,      // _mm_insert_epi32 (PINSRD)
+    X86Pextrd128,      // _mm_extract_epi32 (PEXTRD)
+    X86Pinsrb128,      // _mm_insert_epi8 (PINSRB)
+    X86Pextrb128,      // _mm_extract_epi8 (PEXTRB)
+    X86Pinsrq128,      // _mm_insert_epi64 (PINSRQ)
+    X86Pextrq128,      // _mm_extract_epi64 (PEXTRQ)
 }
 
 impl BuiltinInfo {
