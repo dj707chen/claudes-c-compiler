@@ -8,6 +8,51 @@
 /// - Conversion between x87 and f128 formats
 /// - Conversion from raw bytes back to f64 for operations that need it
 
+/// Result of preprocessing a long double string literal.
+enum PreparsedFloat<'a> {
+    /// Hex float (sign, text including "0x" prefix)
+    Hex(bool, &'a str),
+    /// Infinity
+    Infinity(bool),
+    /// NaN
+    NaN(bool),
+    /// Decimal float (sign, text without suffix/sign)
+    Decimal(bool, &'a str),
+}
+
+/// Preprocess a long double string: strip suffix, detect sign, classify format.
+/// Shared by both x87 and f128 parsing entry points.
+fn preparse_long_double(text: &str) -> PreparsedFloat<'_> {
+    let text = text.trim();
+    let text = if text.ends_with('L') || text.ends_with('l') {
+        &text[..text.len() - 1]
+    } else {
+        text
+    };
+
+    let (negative, text) = if text.starts_with('-') {
+        (true, &text[1..])
+    } else if text.starts_with('+') {
+        (false, &text[1..])
+    } else {
+        (false, text)
+    };
+
+    if text.len() > 2 && (text.starts_with("0x") || text.starts_with("0X")) {
+        return PreparsedFloat::Hex(negative, text);
+    }
+
+    let text_lower = text.to_ascii_lowercase();
+    if text_lower == "inf" || text_lower == "infinity" {
+        return PreparsedFloat::Infinity(negative);
+    }
+    if text_lower == "nan" || text_lower.starts_with("nan(") {
+        return PreparsedFloat::NaN(negative);
+    }
+
+    PreparsedFloat::Decimal(negative, text)
+}
+
 /// Parse a float string to x87 80-bit extended precision bytes.
 /// Returns `[u8; 16]` with the 10 x87 bytes in positions `[0..10]` and zeros in `[10..16]`.
 ///
@@ -18,114 +63,20 @@
 ///
 /// This gives ~18.96 decimal digits of precision (vs ~15.95 for f64).
 pub fn parse_long_double_to_x87_bytes(text: &str) -> [u8; 16] {
-    // Strip the L/l suffix if present
-    let text = text.trim();
-    let text = if text.ends_with('L') || text.ends_with('l') {
-        &text[..text.len() - 1]
-    } else {
-        text
-    };
-
-    // Handle sign prefix (for negative constants in initializers)
-    let (negative_prefix, text) = if text.starts_with('-') {
-        (true, &text[1..])
-    } else if text.starts_with('+') {
-        (false, &text[1..])
-    } else {
-        (false, text)
-    };
-
-    // Handle hex floats
-    if text.len() > 2 && (text.starts_with("0x") || text.starts_with("0X")) {
-        return parse_hex_float_to_x87(negative_prefix, text);
+    match preparse_long_double(text) {
+        PreparsedFloat::Hex(neg, text) => parse_hex_float_to_x87(neg, text),
+        PreparsedFloat::Infinity(neg) => make_x87_infinity(neg),
+        PreparsedFloat::NaN(neg) => make_x87_nan(neg),
+        PreparsedFloat::Decimal(neg, text) => parse_decimal_float_to_x87(neg, text),
     }
-
-    // Handle special values
-    let text_lower = text.to_ascii_lowercase();
-    if text_lower == "inf" || text_lower == "infinity" {
-        return make_x87_infinity(negative_prefix);
-    }
-    if text_lower == "nan" || text_lower.starts_with("nan(") {
-        return make_x87_nan(negative_prefix);
-    }
-
-    // Parse decimal float: [digits][.digits][(e|E)[+-]digits]
-    parse_decimal_float_to_x87(negative_prefix, text)
 }
 
 /// Parse a decimal float string to x87 80-bit format.
 fn parse_decimal_float_to_x87(negative: bool, text: &str) -> [u8; 16] {
-    let bytes = text.as_bytes();
-
-    // Collect all significant digits and track decimal point position
-    let mut digits: Vec<u8> = Vec::with_capacity(24);
-    let mut decimal_point_offset: Option<usize> = None;
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if bytes[i] == b'.' {
-            decimal_point_offset = Some(digits.len());
-            i += 1;
-        } else if bytes[i].is_ascii_digit() {
-            digits.push(bytes[i] - b'0');
-            i += 1;
-        } else {
-            break;
-        }
+    match parse_decimal_digits(text, 24) {
+        Some(parsed) => decimal_to_x87_bigint(negative, &parsed.digits, parsed.decimal_exp),
+        None => make_x87_zero(negative),
     }
-
-    // Parse optional exponent
-    let mut exp10: i32 = 0;
-    if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
-        i += 1;
-        let exp_neg = if i < bytes.len() && bytes[i] == b'-' {
-            i += 1;
-            true
-        } else {
-            if i < bytes.len() && bytes[i] == b'+' {
-                i += 1;
-            }
-            false
-        };
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            exp10 = exp10.saturating_mul(10).saturating_add((bytes[i] - b'0') as i32);
-            i += 1;
-        }
-        if exp_neg {
-            exp10 = -exp10;
-        }
-    }
-
-    // Calculate effective decimal exponent
-    // The number represented by digits is an integer D.
-    // If decimal_point_offset = Some(k), then the actual value is D * 10^(exp10 - (digits.len() - k))
-    let frac_digits = if let Some(dp) = decimal_point_offset {
-        (digits.len() - dp) as i32
-    } else {
-        0
-    };
-    let decimal_exp = exp10 - frac_digits;
-
-    // Strip leading zeros
-    while digits.len() > 1 && digits[0] == 0 {
-        digits.remove(0);
-    }
-
-    if digits.is_empty() || (digits.len() == 1 && digits[0] == 0) {
-        return make_x87_zero(negative);
-    }
-
-    // Now: value = integer_from_digits * 10^decimal_exp
-    // We need to convert this to binary: mantissa64 * 2^binary_exp
-    //
-    // Strategy: Use big integer arithmetic with u64 limbs.
-    // 1. Convert digits to a big integer
-    // 2. If decimal_exp > 0, multiply by 10^decimal_exp
-    // 3. If decimal_exp < 0, we need to divide but preserve precision.
-    //    We do this by multiplying the big integer by 2^N first (shifting left),
-    //    then dividing by 10^(-decimal_exp), giving us the binary mantissa * 2^(-N).
-
-    decimal_to_x87_bigint(negative, &digits, decimal_exp)
 }
 
 // Simple big integer using Vec<u32> limbs (little-endian: limbs[0] is least significant)
@@ -427,82 +378,171 @@ fn pow10_big(n: u32) -> BigUint {
     result
 }
 
+/// Parsed decimal float: digits and exponent extracted from a decimal float string.
+/// Used by the shared parsing pipeline for both x87 and f128 formats.
+struct ParsedDecimal {
+    digits: Vec<u8>,
+    decimal_exp: i32,
+}
+
+/// Parse a decimal float string into digits and decimal exponent.
+/// Returns None if the string represents zero.
+/// This is the shared front-end for both x87 and f128 decimal parsing.
+fn parse_decimal_digits(text: &str, capacity: usize) -> Option<ParsedDecimal> {
+    let bytes = text.as_bytes();
+
+    let mut digits: Vec<u8> = Vec::with_capacity(capacity);
+    let mut decimal_point_offset: Option<usize> = None;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'.' {
+            decimal_point_offset = Some(digits.len());
+            i += 1;
+        } else if bytes[i].is_ascii_digit() {
+            digits.push(bytes[i] - b'0');
+            i += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Parse optional exponent
+    let mut exp10: i32 = 0;
+    if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+        i += 1;
+        let exp_neg = if i < bytes.len() && bytes[i] == b'-' {
+            i += 1;
+            true
+        } else {
+            if i < bytes.len() && bytes[i] == b'+' {
+                i += 1;
+            }
+            false
+        };
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            exp10 = exp10.saturating_mul(10).saturating_add((bytes[i] - b'0') as i32);
+            i += 1;
+        }
+        if exp_neg {
+            exp10 = -exp10;
+        }
+    }
+
+    let frac_digits = if let Some(dp) = decimal_point_offset {
+        (digits.len() - dp) as i32
+    } else {
+        0
+    };
+    let decimal_exp = exp10 - frac_digits;
+
+    // Strip leading zeros
+    while digits.len() > 1 && digits[0] == 0 {
+        digits.remove(0);
+    }
+
+    if digits.is_empty() || (digits.len() == 1 && digits[0] == 0) {
+        return None;
+    }
+
+    Some(ParsedDecimal { digits, decimal_exp })
+}
+
 /// Convert decimal digits and exponent to x87 format using big integer arithmetic.
 fn decimal_to_x87_bigint(negative: bool, digits: &[u8], decimal_exp: i32) -> [u8; 16] {
-    // value = D * 10^decimal_exp where D is the integer formed by digits
-
     if decimal_exp >= 0 {
-        // value = D * 10^exp
-        // Multiply D by 10^exp
         let mut big_val = BigUint::from_decimal_digits(digits);
-        let exp = decimal_exp as u32;
-        // Multiply by 10^exp
-        let p10 = pow10_big(exp);
+        let p10 = pow10_big(decimal_exp as u32);
         big_val = mul_big(&big_val, &p10);
 
         if big_val.is_zero() {
             return make_x87_zero(negative);
         }
 
-        // Now big_val is an integer. Convert to x87 float.
-        // Find the binary exponent: value = big_val = mantissa64 * 2^(shift)
         let (top64, shift) = big_val.top_64_bits();
-
         if top64 == 0 {
             return make_x87_zero(negative);
         }
 
-        // Normalize: ensure top bit (bit 63) is set for the x87 integer bit
         let lz = top64.leading_zeros();
         let mantissa64 = top64 << lz;
-        // top64 has its MSB at bit (63-lz) of the extracted value.
-        // In the original big number, that MSB is at bit position (shift + 63 - lz).
-        // For x87, binary_exp = position of MSB = the unbiased exponent.
         let binary_exp = shift + 63 - lz as i32;
-
         encode_x87(negative, binary_exp, mantissa64)
     } else {
-        // value = D * 10^(-|decimal_exp|) = D / 10^|decimal_exp|
-        // To preserve precision, we shift D left by enough bits before dividing
         let neg_exp = (-decimal_exp) as u32;
-
         let big_d = BigUint::from_decimal_digits(digits);
         if big_d.is_zero() {
             return make_x87_zero(negative);
         }
 
-        // We want 64+ bits of precision in the quotient.
-        // Shift D left by (64 + neg_exp * log2(10) + safety_margin) bits
-        // log2(10) ≈ 3.322, so neg_exp * 4 is a safe upper bound
-        let extra_bits = 80 + neg_exp * 4; // generous extra precision
-        let extra_bits = extra_bits.min(100000); // sanity limit
-
+        let extra_bits = (80 + neg_exp * 4).min(100000);
         let mut shifted_d = big_d;
         shifted_d.shl(extra_bits);
 
-        // Divide by 10^neg_exp
         let p10 = pow10_big(neg_exp);
         let quotient = BigUint::div_big(&shifted_d, &p10);
-
         if quotient.is_zero() {
             return make_x87_zero(negative);
         }
 
-        // The quotient represents: D * 2^extra_bits / 10^neg_exp = value * 2^extra_bits
         let (top64, shift) = quotient.top_64_bits();
-
         if top64 == 0 {
             return make_x87_zero(negative);
         }
 
         let lz = top64.leading_zeros();
         let mantissa64 = top64 << lz;
-        // MSB of top64 is at bit (shift + 63 - lz) of the quotient.
-        // The quotient = value * 2^extra_bits, so the MSB of value is at:
-        // (shift + 63 - lz) - extra_bits
         let binary_exp = shift + 63 - lz as i32 - extra_bits as i32;
-
         encode_x87(negative, binary_exp, mantissa64)
+    }
+}
+
+/// Shared decimal-to-float bigint conversion for f128 (113-bit mantissa).
+fn decimal_to_float_bigint_f128(negative: bool, digits: &[u8], decimal_exp: i32) -> [u8; 16] {
+    if decimal_exp >= 0 {
+        let mut big_val = BigUint::from_decimal_digits(digits);
+        let p10 = pow10_big(decimal_exp as u32);
+        big_val = mul_big(&big_val, &p10);
+
+        if big_val.is_zero() {
+            return make_f128_zero(negative);
+        }
+
+        let (top113, shift) = big_val.top_n_bits(113);
+        if top113 == 0 {
+            return make_f128_zero(negative);
+        }
+
+        let lz = top113.leading_zeros() - (128 - 113);
+        let mantissa113 = top113 << lz;
+        let binary_exp = shift + 112 - lz as i32;
+        encode_f128(negative, binary_exp, mantissa113)
+    } else {
+        let neg_exp = (-decimal_exp) as u32;
+        let big_d = BigUint::from_decimal_digits(digits);
+        if big_d.is_zero() {
+            return make_f128_zero(negative);
+        }
+
+        let extra_bits = (128 + neg_exp * 4).min(200000);
+        let mut shifted_d = big_d;
+        shifted_d.shl(extra_bits);
+
+        let p10 = pow10_big(neg_exp);
+        let quotient = BigUint::div_big(&shifted_d, &p10);
+        if quotient.is_zero() {
+            return make_f128_zero(negative);
+        }
+
+        let (top113, shift) = quotient.top_n_bits(113);
+        if top113 == 0 {
+            return make_f128_zero(negative);
+        }
+
+        let lz = top113.leading_zeros() - (128 - 113);
+        let mantissa113 = top113 << lz;
+        let binary_exp = shift + 112 - lz as i32 - extra_bits as i32;
+        encode_f128(negative, binary_exp, mantissa113)
     }
 }
 
@@ -772,164 +812,22 @@ pub fn x87_bytes_to_f128_bytes(x87: &[u8; 16]) -> [u8; 16] {
 /// 64 bits of mantissa, f128 has 112 bits, so parsing directly to f128 preserves more
 /// precision than parsing to x87 and converting.
 pub fn parse_long_double_to_f128_bytes(text: &str) -> [u8; 16] {
-    // Strip the L/l suffix if present
-    let text = text.trim();
-    let text = if text.ends_with('L') || text.ends_with('l') {
-        &text[..text.len() - 1]
-    } else {
-        text
-    };
-
-    // Handle sign prefix
-    let (negative_prefix, text) = if text.starts_with('-') {
-        (true, &text[1..])
-    } else if text.starts_with('+') {
-        (false, &text[1..])
-    } else {
-        (false, text)
-    };
-
-    // Handle hex floats
-    if text.len() > 2 && (text.starts_with("0x") || text.starts_with("0X")) {
-        return parse_hex_float_to_f128(negative_prefix, text);
+    match preparse_long_double(text) {
+        PreparsedFloat::Hex(neg, text) => parse_hex_float_to_f128(neg, text),
+        PreparsedFloat::Infinity(neg) => make_f128_infinity(neg),
+        PreparsedFloat::NaN(neg) => make_f128_nan(neg),
+        PreparsedFloat::Decimal(neg, text) => parse_decimal_float_to_f128(neg, text),
     }
-
-    // Handle special values
-    let text_lower = text.to_ascii_lowercase();
-    if text_lower == "inf" || text_lower == "infinity" {
-        return make_f128_infinity(negative_prefix);
-    }
-    if text_lower == "nan" || text_lower.starts_with("nan(") {
-        return make_f128_nan(negative_prefix);
-    }
-
-    // Parse decimal float
-    parse_decimal_float_to_f128(negative_prefix, text)
 }
 
 /// Parse a decimal float string to IEEE 754 binary128 format.
 fn parse_decimal_float_to_f128(negative: bool, text: &str) -> [u8; 16] {
-    let bytes = text.as_bytes();
-
-    // Collect all significant digits and track decimal point position
-    let mut digits: Vec<u8> = Vec::with_capacity(40);
-    let mut decimal_point_offset: Option<usize> = None;
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if bytes[i] == b'.' {
-            decimal_point_offset = Some(digits.len());
-            i += 1;
-        } else if bytes[i].is_ascii_digit() {
-            digits.push(bytes[i] - b'0');
-            i += 1;
-        } else {
-            break;
-        }
-    }
-
-    // Parse optional exponent
-    let mut exp10: i32 = 0;
-    if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
-        i += 1;
-        let exp_neg = if i < bytes.len() && bytes[i] == b'-' {
-            i += 1;
-            true
-        } else {
-            if i < bytes.len() && bytes[i] == b'+' {
-                i += 1;
-            }
-            false
-        };
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            exp10 = exp10.saturating_mul(10).saturating_add((bytes[i] - b'0') as i32);
-            i += 1;
-        }
-        if exp_neg {
-            exp10 = -exp10;
-        }
-    }
-
-    let frac_digits = if let Some(dp) = decimal_point_offset {
-        (digits.len() - dp) as i32
-    } else {
-        0
-    };
-    let decimal_exp = exp10 - frac_digits;
-
-    // Strip leading zeros
-    while digits.len() > 1 && digits[0] == 0 {
-        digits.remove(0);
-    }
-
-    if digits.is_empty() || (digits.len() == 1 && digits[0] == 0) {
-        return make_f128_zero(negative);
-    }
-
-    decimal_to_f128_bigint(negative, &digits, decimal_exp)
-}
-
-/// Convert decimal digits and exponent to f128 format using big integer arithmetic.
-/// f128 has 112 mantissa bits (+ 1 implicit), so we need 113 bits of precision.
-fn decimal_to_f128_bigint(negative: bool, digits: &[u8], decimal_exp: i32) -> [u8; 16] {
-    if decimal_exp >= 0 {
-        let mut big_val = BigUint::from_decimal_digits(digits);
-        let exp = decimal_exp as u32;
-        let p10 = pow10_big(exp);
-        big_val = mul_big(&big_val, &p10);
-
-        if big_val.is_zero() {
-            return make_f128_zero(negative);
-        }
-
-        let (top113, shift) = big_val.top_n_bits(113);
-
-        if top113 == 0 {
-            return make_f128_zero(negative);
-        }
-
-        // Normalize: ensure top bit (bit 112) is set for the implicit integer bit
-        let lz = top113.leading_zeros() - (128 - 113); // leading zeros within 113-bit field
-        let mantissa113 = top113 << lz;
-        let binary_exp = shift + 112 - lz as i32;
-
-        encode_f128(negative, binary_exp, mantissa113)
-    } else {
-        let neg_exp = (-decimal_exp) as u32;
-
-        let big_d = BigUint::from_decimal_digits(digits);
-        if big_d.is_zero() {
-            return make_f128_zero(negative);
-        }
-
-        // We want 113+ bits of precision in the quotient.
-        // Shift D left by enough bits before dividing.
-        let extra_bits = 128 + neg_exp * 4; // generous extra precision
-        let extra_bits = extra_bits.min(200000); // sanity limit
-
-        let mut shifted_d = big_d;
-        shifted_d.shl(extra_bits);
-
-        let p10 = pow10_big(neg_exp);
-        let quotient = BigUint::div_big(&shifted_d, &p10);
-
-        if quotient.is_zero() {
-            return make_f128_zero(negative);
-        }
-
-        let (top113, shift) = quotient.top_n_bits(113);
-
-        if top113 == 0 {
-            return make_f128_zero(negative);
-        }
-
-        let lz = top113.leading_zeros() - (128 - 113);
-        let mantissa113 = top113 << lz;
-        let binary_exp = shift + 112 - lz as i32 - extra_bits as i32;
-
-        encode_f128(negative, binary_exp, mantissa113)
+    match parse_decimal_digits(text, 40) {
+        Some(parsed) => decimal_to_float_bigint_f128(negative, &parsed.digits, parsed.decimal_exp),
+        None => make_f128_zero(negative),
     }
 }
+
 
 /// Encode an IEEE 754 binary128 value from sign, binary exponent, and 113-bit mantissa.
 /// `binary_exp` is the exponent of the MSB (bit 112) of `mantissa113`.
