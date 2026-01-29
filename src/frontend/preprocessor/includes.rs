@@ -18,6 +18,44 @@ fn read_c_source_file(path: &Path) -> std::io::Result<String> {
     Ok(crate::common::encoding::bytes_to_string(bytes))
 }
 
+/// Make a path absolute without resolving symlinks.
+///
+/// Unlike `std::fs::canonicalize`, this preserves symlinks in the path.
+/// This is important for `#include "..."` resolution: GCC searches for
+/// included files relative to the directory where the including file was
+/// found (through symlinks), not relative to the symlink target's directory.
+///
+/// For example, if `build/local_scan.h -> ../src/local_scan.h` includes
+/// `"config.h"`, we should search in `build/` (the symlink's directory),
+/// not in `../src/` (the target's directory).
+pub(super) fn make_absolute(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        // Clean up . and .. components without resolving symlinks
+        clean_path(path)
+    } else if let Ok(cwd) = std::env::current_dir() {
+        clean_path(&cwd.join(path))
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Clean a path by resolving `.` and `..` components without following symlinks.
+fn clean_path(path: &Path) -> PathBuf {
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => { /* skip */ }
+            std::path::Component::ParentDir => {
+                result.pop();
+            }
+            other => {
+                result.push(other);
+            }
+        }
+    }
+    result
+}
+
 /// Normalize a computed include path by collapsing anti-paste spaces around '/'.
 ///
 /// During macro expansion, the preprocessor inserts a space between adjacent '/'
@@ -257,6 +295,7 @@ impl Preprocessor {
         // Find which path contains the current file
         let mut found_current = false;
         if let Some(cur_dir) = current_file_dir {
+            // Use canonicalize for COMPARISON only (to match paths through symlinks)
             let cur_dir_canon = std::fs::canonicalize(cur_dir).unwrap_or_else(|_| cur_dir.clone());
             for search_path in &all_paths {
                 let search_canon = std::fs::canonicalize(search_path)
@@ -268,7 +307,7 @@ impl Preprocessor {
                 if found_current {
                     let candidate = search_path.join(include_path);
                     if candidate.is_file() {
-                        return std::fs::canonicalize(&candidate).ok().or(Some(candidate));
+                        return Some(make_absolute(&candidate));
                     }
                 }
             }
@@ -287,6 +326,7 @@ impl Preprocessor {
             for search_path in &all_paths {
                 let candidate = search_path.join(include_path);
                 if candidate.is_file() {
+                    // Use canonicalize for comparison to detect same-file
                     let candidate_canon = std::fs::canonicalize(&candidate).ok();
                     // Skip if this resolves to the same file we're currently in
                     if let (Some(ref cur), Some(ref cand)) = (&current_file_canon, &candidate_canon) {
@@ -294,7 +334,7 @@ impl Preprocessor {
                             continue;
                         }
                     }
-                    return candidate_canon.or(Some(candidate));
+                    return Some(make_absolute(&candidate));
                 }
             }
         }
@@ -305,6 +345,10 @@ impl Preprocessor {
     /// Resolve an include path to an actual file path.
     /// For "file.h": search current dir, then -I paths, then system paths.
     /// For <file.h>: search -I paths, then system paths.
+    ///
+    /// Returns the path WITHOUT resolving symlinks, matching GCC behavior.
+    /// This ensures that `#include "..."` searches relative to the directory
+    /// where the including file was found (through symlinks), not the target.
     pub(super) fn resolve_include_path(&self, include_path: &str, is_system: bool) -> Option<PathBuf> {
         // For quoted includes, first search relative to the current file's directory
         if !is_system {
@@ -313,7 +357,7 @@ impl Preprocessor {
                 if let Some(current_dir) = current_file.parent() {
                     let candidate = current_dir.join(include_path);
                     if candidate.is_file() {
-                        return std::fs::canonicalize(&candidate).ok().or(Some(candidate));
+                        return Some(make_absolute(&candidate));
                     }
                 }
             }
@@ -322,7 +366,7 @@ impl Preprocessor {
                 if let Some(parent) = Path::new(&self.filename).parent() {
                     let candidate = parent.join(include_path);
                     if candidate.is_file() {
-                        return std::fs::canonicalize(&candidate).ok().or(Some(candidate));
+                        return Some(make_absolute(&candidate));
                     }
                 }
             }
@@ -332,7 +376,7 @@ impl Preprocessor {
         for dir in &self.include_paths {
             let candidate = dir.join(include_path);
             if candidate.is_file() {
-                return std::fs::canonicalize(&candidate).ok().or(Some(candidate));
+                return Some(make_absolute(&candidate));
             }
         }
 
@@ -340,7 +384,7 @@ impl Preprocessor {
         for dir in &self.system_include_paths {
             let candidate = dir.join(include_path);
             if candidate.is_file() {
-                return std::fs::canonicalize(&candidate).ok().or(Some(candidate));
+                return Some(make_absolute(&candidate));
             }
         }
 

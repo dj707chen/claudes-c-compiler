@@ -432,12 +432,13 @@ impl Preprocessor {
             body: format!("\"{}\"", filename),
             is_predefined: true,
         });
-        // Push the file path onto the include stack for relative includes
-        // (resolve_include_path uses .parent() to get the directory)
+        // Push the file path onto the include stack for relative includes.
+        // Use make_absolute (not canonicalize) to preserve symlinks, matching GCC
+        // behavior: #include "..." searches relative to the directory where the
+        // including file was found (through symlinks), not the symlink target.
         let path = PathBuf::from(filename);
-        let canonical = std::fs::canonicalize(&path)
-            .unwrap_or(path);
-        self.include_stack.push(canonical);
+        let abs = super::includes::make_absolute(&path);
+        self.include_stack.push(abs);
     }
 
     /// Get the list of includes encountered during preprocessing.
