@@ -1,0 +1,12 @@
+Fix div_by_const: signed-to-unsigned cast incorrectly treated as 32-bit
+
+The is_known_32bit analysis in div_by_const.rs marks sign-extending casts
+from signed types (I8/I16/I32) to U64 as "known 32-bit". But sign-extending
+a negative value to U64 produces a huge unsigned value (e.g. (U64)(char)-128
+= 0xFFFFFFFFFFFFFF80) that exceeds the u32 range. Using 32-bit magic numbers
+for the unsigned modulo then gives wrong results.
+
+Fix: split into is_known_u32 and is_known_i32 flags. Only mark unsigned
+casts as u32-safe, and use the appropriate flag for unsigned vs signed ops.
+
+This fixes the vedis project which crashes in vedisPagerRandomString().
