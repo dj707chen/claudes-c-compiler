@@ -91,6 +91,9 @@ impl Lowerer {
     /// Emit an array-of-pointers field from a braced initializer list.
     /// Each element is either a GlobalAddr (for string literals / address expressions)
     /// or zero-filled (for missing elements).
+    ///
+    /// Uses a sparse map to correctly handle designated initializers with
+    /// out-of-order or backward-jumping indices (e.g., `[3]=&v3, [1]=&v1`).
     pub(super) fn emit_compound_ptr_array_init(
         &mut self,
         elements: &mut Vec<GlobalInit>,
@@ -99,36 +102,43 @@ impl Lowerer {
         arr_size: usize,
     ) {
         let ptr_size = crate::common::types::target_ptr_size();
+
+        // Build a sparse map: for each array index, store the initializer (if any).
+        // This correctly handles out-of-order designators like [3]=x, [1]=y.
+        let mut index_inits: Vec<Option<&Initializer>> = vec![None; arr_size];
         let mut ai = 0usize;
 
         for item in items {
-            if ai >= arr_size { break; }
+            if ai >= arr_size && item.designators.is_empty() {
+                break;
+            }
 
             // Handle index designator: [idx] = val
             if let Some(Designator::Index(ref idx_expr)) = item.designators.first() {
                 if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
-                    // Zero-fill skipped elements
-                    while ai < idx && ai < arr_size {
-                        push_zero_bytes(elements, ptr_size);
-                        ai += 1;
-                    }
+                    ai = idx;
                 }
             }
-            if ai >= arr_size { break; }
 
-            if let Initializer::Expr(ref expr) = item.init {
-                self.emit_expr_to_compound(elements, expr, ptr_size, None);
-            } else {
-                // Nested list - zero fill this element
-                push_zero_bytes(elements, ptr_size);
+            if ai < arr_size {
+                index_inits[ai] = Some(&item.init);
             }
             ai += 1;
         }
 
-        // Zero-fill remaining elements
-        while ai < arr_size {
-            push_zero_bytes(elements, ptr_size);
-            ai += 1;
+        // Emit each element in order
+        for slot in &index_inits {
+            if let Some(init) = slot {
+                if let Initializer::Expr(ref expr) = init {
+                    self.emit_expr_to_compound(elements, expr, ptr_size, None);
+                } else {
+                    // Nested list - zero fill this element
+                    push_zero_bytes(elements, ptr_size);
+                }
+            } else {
+                // Uninitialized element - zero fill
+                push_zero_bytes(elements, ptr_size);
+            }
         }
     }
 

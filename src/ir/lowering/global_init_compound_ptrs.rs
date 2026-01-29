@@ -271,14 +271,25 @@ impl Lowerer {
                     _ => inner_items.len(),
                 };
                 let ptr_ty = CType::Pointer(Box::new(CType::Void), AddressSpace::Default);
-                for (ai, inner_item) in inner_items.iter().enumerate() {
-                    if ai >= arr_size { break; }
-                    let elem_offset = field_offset + ai * crate::common::types::target_ptr_size();
+                let ptr_size = crate::common::types::target_ptr_size();
+                // Use a sequential index that respects designated initializers.
+                // Items may have [idx] designators that jump forward or backward.
+                let mut ai = 0usize;
+                for inner_item in inner_items.iter() {
+                    // Check for index designator
+                    if let Some(crate::frontend::parser::ast::Designator::Index(ref idx_expr)) = inner_item.designators.first() {
+                        if let Some(idx) = self.eval_const_expr(idx_expr).and_then(|c| c.to_usize()) {
+                            ai = idx;
+                        }
+                    }
+                    if ai >= arr_size { ai += 1; continue; }
+                    let elem_offset = field_offset + ai * ptr_size;
                     if let Initializer::Expr(ref expr) = inner_item.init {
                         self.write_expr_to_bytes_or_ptrs(
                             expr, &ptr_ty, elem_offset, None, None, bytes, ptr_ranges,
                         );
                     }
+                    ai += 1;
                 }
             } else {
                 self.fill_composite_or_array_with_ptrs(

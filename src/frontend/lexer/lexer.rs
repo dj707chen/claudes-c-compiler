@@ -58,7 +58,8 @@ impl Lexer {
         }
 
         // Identifiers and keywords
-        if ch == b'_' || ch.is_ascii_alphabetic() {
+        // GCC extension: '$' is allowed in identifiers (-fdollars-in-identifiers, on by default)
+        if ch == b'_' || ch == b'$' || ch.is_ascii_alphabetic() {
             return self.lex_identifier(start);
         }
 
@@ -845,7 +846,7 @@ impl Lexer {
     }
 
     fn lex_identifier(&mut self, start: usize) -> Token {
-        while self.pos < self.input.len() && (self.input[self.pos] == b'_' || self.input[self.pos].is_ascii_alphanumeric()) {
+        while self.pos < self.input.len() && (self.input[self.pos] == b'_' || self.input[self.pos] == b'$' || self.input[self.pos].is_ascii_alphanumeric()) {
             self.pos += 1;
         }
 

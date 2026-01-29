@@ -6,35 +6,39 @@
 /// retained for code that still operates on `&[char]`.
 
 /// Check if a character can start a C identifier.
+/// GCC extension: '$' is allowed in identifiers (-fdollars-in-identifiers, on by default).
 pub fn is_ident_start(c: char) -> bool {
-    c.is_ascii_alphabetic() || c == '_'
+    c.is_ascii_alphabetic() || c == '_' || c == '$'
 }
 
 /// Check if a character can continue a C identifier.
+/// GCC extension: '$' is allowed in identifiers (-fdollars-in-identifiers, on by default).
 pub fn is_ident_cont(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
+    c.is_ascii_alphanumeric() || c == '_' || c == '$'
 }
 
-/// Check if a byte can start a C identifier (ASCII letter or underscore).
+/// Check if a byte can start a C identifier (ASCII letter, underscore, or dollar sign).
+/// GCC extension: '$' is allowed in identifiers (-fdollars-in-identifiers, on by default).
 #[inline(always)]
 pub fn is_ident_start_byte(b: u8) -> bool {
-    b.is_ascii_alphabetic() || b == b'_'
+    b.is_ascii_alphabetic() || b == b'_' || b == b'$'
 }
 
-/// Check if a byte can continue a C identifier (ASCII alphanumeric or underscore).
+/// Check if a byte can continue a C identifier (ASCII alphanumeric, underscore, or dollar sign).
+/// GCC extension: '$' is allowed in identifiers (-fdollars-in-identifiers, on by default).
 #[inline(always)]
 pub fn is_ident_cont_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
 /// Extract a `&str` slice from `bytes[start..end]`.
 ///
 /// # Safety
 /// Caller must ensure `bytes[start..end]` contains valid UTF-8. This is guaranteed
-/// for C identifiers, which consist only of ASCII letters, digits, and underscores.
+/// for C identifiers, which consist only of ASCII letters, digits, underscores, and dollar signs.
 #[inline(always)]
 pub fn bytes_to_str(bytes: &[u8], start: usize, end: usize) -> &str {
-    // SAFETY: C identifiers consist only of ASCII letters, digits, and underscores,
+    // SAFETY: C identifiers consist only of ASCII letters, digits, underscores, and dollar signs,
     // which are all valid single-byte UTF-8 characters.
     unsafe { std::str::from_utf8_unchecked(&bytes[start..end]) }
 }

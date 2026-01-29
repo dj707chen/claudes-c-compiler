@@ -24,6 +24,7 @@ impl Preprocessor {
             ("__STDC_HOSTED__", "1"),
             // Platform
             ("__linux__", "1"), ("__linux", "1"), ("linux", "1"),
+            ("__gnu_linux__", "1"),
             ("__unix__", "1"), ("__unix", "1"), ("unix", "1"),
             ("__LP64__", "1"), ("_LP64", "1"),
             // Default arch: x86_64 (overridden by set_target)
