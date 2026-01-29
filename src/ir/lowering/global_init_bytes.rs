@@ -625,7 +625,17 @@ impl Lowerer {
                     );
                     sub_idx += 1;
                 }
-                Initializer::Expr(_) => {
+                Initializer::Expr(expr) => {
+                    // String literal initializing a char array element (e.g., char arr[3][8] = { "hello", "world", "foo" })
+                    // Each string literal initializes one inner char array (e.g., char[8]).
+                    if matches!(inner_elem_ty, CType::Char | CType::UChar) {
+                        if let Expr::StringLiteral(s, _) = expr {
+                            Self::write_string_to_bytes(bytes, elem_offset, s, inner_arr_size);
+                            sub_idx += 1;
+                            ai += 1;
+                            continue;
+                        }
+                    }
                     // Flat init: fill inner array elements from consecutive Expr items.
                     // Determine the leaf type to figure out how to consume items.
                     let leaf_composite = Self::leaf_composite_type(inner_elem_ty);
@@ -686,6 +696,16 @@ impl Lowerer {
             );
         } else if matches!(elem_ty, CType::Struct(_) | CType::Union(_)) {
             self.fill_array_of_composites(items, elem_ty, arr_size, elem_size, bytes, field_offset);
+        } else if matches!(elem_ty, CType::Char | CType::UChar) {
+            // Char array: check for string literal initializer (e.g., char[8] init from "hello")
+            if items.len() == 1 {
+                if let Initializer::Expr(Expr::StringLiteral(s, _)) = &items[0].init {
+                    Self::write_string_to_bytes(bytes, field_offset, s, arr_size);
+                    return;
+                }
+            }
+            let elem_ir_ty = IrType::from_ctype(elem_ty);
+            self.fill_array_of_scalars(items, arr_size, elem_size, elem_ir_ty, bytes, field_offset);
         } else {
             let elem_ir_ty = IrType::from_ctype(elem_ty);
             self.fill_array_of_scalars(items, arr_size, elem_size, elem_ir_ty, bytes, field_offset);

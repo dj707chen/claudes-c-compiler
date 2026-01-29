@@ -15,6 +15,7 @@
 use crate::ir::ir::{
     Instruction,
     IrFunction,
+    Operand,
 };
 
 /// Eliminate dead code in a single function using use-count-based worklist DCE.
@@ -34,15 +35,37 @@ pub(crate) fn eliminate_dead_code(func: &mut IrFunction) -> usize {
     }
 
     // Step 1: Build use-counts for all values.
+    // For Phi nodes, exclude self-references from the use count. A phi that only
+    // references itself (e.g., phi V: [entry: 0, backedge: V]) is dead if no
+    // other instruction uses V. Without this exclusion, the self-reference keeps
+    // use_count at 1, preventing removal of dead phis from promoted inlined
+    // parameter allocas in loops. These dead phis generate copies during phi
+    // elimination that corrupt inline asm output pointer stack slots, causing
+    // NULL pointer dereferences (e.g., kernel boot crash in
+    // init_scattered_cpuid_features).
     let mut use_count: Vec<u32> = vec![0; max_id + 1];
     for block in &func.blocks {
         for inst in &block.instructions {
-            inst.for_each_used_value(|id| {
-                let idx = id as usize;
-                if idx < use_count.len() {
-                    use_count[idx] += 1;
+            if let Instruction::Phi { dest, incoming, .. } = inst {
+                // Count uses from incoming values, but skip self-references
+                for (op, _) in incoming {
+                    if let Operand::Value(v) = op {
+                        if v.0 != dest.0 {
+                            let idx = v.0 as usize;
+                            if idx < use_count.len() {
+                                use_count[idx] += 1;
+                            }
+                        }
+                    }
                 }
-            });
+            } else {
+                inst.for_each_used_value(|id| {
+                    let idx = id as usize;
+                    if idx < use_count.len() {
+                        use_count[idx] += 1;
+                    }
+                });
+            }
         }
         block.terminator.for_each_used_value(|id| {
             let idx = id as usize;
@@ -156,12 +179,26 @@ fn eliminate_dead_code_simple(func: &mut IrFunction, max_id: usize) -> usize {
         }
         for block in &func.blocks {
             for inst in &block.instructions {
-                inst.for_each_used_value(|id| {
-                    let idx = id as usize;
-                    if idx < used.len() {
-                        used[idx] = true;
+                if let Instruction::Phi { dest, incoming, .. } = inst {
+                    // Exclude self-references (same fix as main DCE path)
+                    for (op, _) in incoming {
+                        if let Operand::Value(v) = op {
+                            if v.0 != dest.0 {
+                                let idx = v.0 as usize;
+                                if idx < used.len() {
+                                    used[idx] = true;
+                                }
+                            }
+                        }
                     }
-                });
+                } else {
+                    inst.for_each_used_value(|id| {
+                        let idx = id as usize;
+                        if idx < used.len() {
+                            used[idx] = true;
+                        }
+                    });
+                }
             }
             block.terminator.for_each_used_value(|id| {
                 let idx = id as usize;
@@ -369,5 +406,66 @@ mod tests {
         let removed = eliminate_dead_code(&mut func);
         assert_eq!(removed, 3); // All three dead BinOps should be removed
         assert_eq!(func.blocks[0].instructions.len(), 1); // Only alloca remains
+    }
+
+    #[test]
+    fn test_self_referencing_phi_removed() {
+        // A phi that only references itself should be considered dead.
+        // This happens with promoted inlined parameter allocas in loops:
+        //   loop_header: phi V = [entry: Const(0), backedge: V]
+        // V is only used by itself, so it's dead.
+        // Without the fix, the self-reference keeps use_count=1.
+        let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);
+
+        // Block 0 (entry): branch to loop header
+        func.blocks.push(BasicBlock {
+            label: BlockId(0),
+            instructions: vec![],
+            terminator: Terminator::Branch(BlockId(1)),
+            source_spans: Vec::new(),
+        });
+
+        // Block 1 (loop header): self-referencing phi, unused
+        func.blocks.push(BasicBlock {
+            label: BlockId(1),
+            instructions: vec![
+                Instruction::Phi {
+                    dest: Value(0),
+                    ty: IrType::I64,
+                    incoming: vec![
+                        (Operand::Const(IrConst::I64(0)), BlockId(0)),
+                        (Operand::Value(Value(0)), BlockId(2)),  // self-reference
+                    ],
+                },
+            ],
+            terminator: Terminator::CondBranch {
+                cond: Operand::Const(IrConst::I32(1)),
+                true_label: BlockId(2),
+                false_label: BlockId(3),
+            },
+            source_spans: Vec::new(),
+        });
+
+        // Block 2 (loop body): branch back
+        func.blocks.push(BasicBlock {
+            label: BlockId(2),
+            instructions: vec![],
+            terminator: Terminator::Branch(BlockId(1)),
+            source_spans: Vec::new(),
+        });
+
+        // Block 3 (exit): return
+        func.blocks.push(BasicBlock {
+            label: BlockId(3),
+            instructions: vec![],
+            terminator: Terminator::Return(Some(Operand::Const(IrConst::I32(0)))),
+            source_spans: Vec::new(),
+        });
+
+        let removed = eliminate_dead_code(&mut func);
+        assert_eq!(removed, 1, "Self-referencing dead phi should be removed");
+        // Loop header should have no instructions left
+        assert!(func.blocks[1].instructions.is_empty(),
+                "Phi should be removed from loop header");
     }
 }
