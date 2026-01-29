@@ -1,0 +1,19 @@
+Fix typeof() on statement expressions with compound-local variables
+
+When typeof() wraps a statement expression like:
+  typeof(({ typeof(a) __x = a; typeof(b) __y = b; __x > __y ? __x : __y; }))
+
+The StmtExpr handler in get_expr_ctype_lowerer tries to resolve the type of the
+last expression (__x > __y ? __x : __y), but __x and __y are declared inside the
+compound statement and aren't in the lowerer's local variable scope. This causes
+the typeof resolution to fail with "could not resolve type of 'typeof' expression".
+
+This is the dominant error preventing x86 defconfig kernel builds (~30+ files fail).
+The kernel's min()/max() macros expand to nested __builtin_choose_expr() calls that
+produce statement expressions with compound-local variables.
+
+Fix: Extend the StmtExpr handler to build a local scope from the compound's
+declarations (reusing resolve_var_type_from_compound logic) and retry expression
+type resolution with that scope when the initial resolution fails.
+
+Status: in_progress
