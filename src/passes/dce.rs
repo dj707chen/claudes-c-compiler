@@ -116,7 +116,7 @@ pub(crate) fn eliminate_dead_code(func: &mut IrFunction) -> usize {
             continue;
         }
 
-        let has_spans = !block.source_spans.is_empty();
+        let has_spans = block.source_spans.len() == original_len && !block.source_spans.is_empty();
         if has_spans {
             let mut write_idx = 0;
             for read_idx in 0..original_len {
@@ -131,6 +131,11 @@ pub(crate) fn eliminate_dead_code(func: &mut IrFunction) -> usize {
             block.instructions.truncate(write_idx);
             block.source_spans.truncate(write_idx);
         } else {
+            // If source_spans is non-empty but wrong length, clear it to
+            // restore the invariant (empty = no debug info for this block).
+            if !block.source_spans.is_empty() && block.source_spans.len() != original_len {
+                block.source_spans.clear();
+            }
             let mut idx = 0;
             block.instructions.retain(|_| {
                 let keep = !dead_flags[idx];
@@ -172,11 +177,11 @@ fn eliminate_dead_code_simple(func: &mut IrFunction, max_id: usize) -> usize {
         let mut removed = 0;
         for block in &mut func.blocks {
             let original_len = block.instructions.len();
-            let has_spans = !block.source_spans.is_empty();
+            let has_spans = block.source_spans.len() == original_len && !block.source_spans.is_empty();
 
             if has_spans {
                 let mut write_idx = 0;
-                for read_idx in 0..block.instructions.len() {
+                for read_idx in 0..original_len {
                     let keep = is_live(&block.instructions[read_idx], &used);
                     if keep {
                         if write_idx != read_idx {
@@ -189,6 +194,9 @@ fn eliminate_dead_code_simple(func: &mut IrFunction, max_id: usize) -> usize {
                 block.instructions.truncate(write_idx);
                 block.source_spans.truncate(write_idx);
             } else {
+                if !block.source_spans.is_empty() && block.source_spans.len() != original_len {
+                    block.source_spans.clear();
+                }
                 block.instructions.retain(|inst| is_live(inst, &used));
             }
             removed += original_len - block.instructions.len();

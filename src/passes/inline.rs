@@ -1217,7 +1217,8 @@ fn inline_call_site(
     // stores the (now-removed) ParamRef dest into a param alloca.
     let param_alloca_set: std::collections::HashSet<u32> = param_alloca_info.iter().map(|(v, _, _)| v.0).collect();
     for block in &mut inlined_blocks {
-        let has_spans = !block.source_spans.is_empty();
+        let has_spans = block.source_spans.len() == block.instructions.len() && !block.source_spans.is_empty();
+        let old_spans = std::mem::take(&mut block.source_spans);
         let mut new_insts = Vec::with_capacity(block.instructions.len());
         let mut new_spans = Vec::new();
         let mut paramref_dests: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -1235,7 +1236,7 @@ fn inline_call_site(
             }
             new_insts.push(inst);
             if has_spans {
-                new_spans.push(block.source_spans[idx]);
+                new_spans.push(old_spans[idx]);
             }
         }
         block.instructions = new_insts;

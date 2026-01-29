@@ -1025,7 +1025,27 @@ fn merge_single_pred_blocks(func: &mut IrFunction) -> usize {
             }
         }
 
-        // Append to predecessor.
+        // Append to predecessor, maintaining the source_spans invariant:
+        // source_spans must be either empty or exactly parallel to instructions.
+        // When merging blocks with mixed span states, we pad the missing side
+        // with dummy spans to keep them in sync.
+        let pred_has_spans = !func.blocks[pred_idx].source_spans.is_empty();
+        let succ_has_spans = !converted_spans.is_empty();
+
+        if pred_has_spans && !succ_has_spans && !converted_instructions.is_empty() {
+            // Predecessor has spans but successor doesn't: pad successor spans
+            // with dummy entries so the merged block stays in sync.
+            converted_spans.resize(converted_instructions.len(), crate::common::source::Span::dummy());
+        } else if !pred_has_spans && succ_has_spans {
+            // Successor has spans but predecessor doesn't: pad predecessor spans
+            // with dummy entries for its existing instructions.
+            let pred_inst_len = func.blocks[pred_idx].instructions.len();
+            func.blocks[pred_idx].source_spans.resize(
+                pred_inst_len,
+                crate::common::source::Span::dummy(),
+            );
+        }
+
         func.blocks[pred_idx].instructions.extend(converted_instructions);
         func.blocks[pred_idx].terminator = succ_terminator;
         if !converted_spans.is_empty() {

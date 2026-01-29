@@ -535,7 +535,7 @@ fn hoist_loop_invariants(
             let block = &mut func.blocks[block_idx];
             let mut new_insts = Vec::with_capacity(block.instructions.len());
             let old_spans = std::mem::take(&mut block.source_spans);
-            let has_spans = !old_spans.is_empty();
+            let has_spans = old_spans.len() == block.instructions.len() && !old_spans.is_empty();
             let mut new_spans = if has_spans { Vec::with_capacity(old_spans.len()) } else { Vec::new() };
             for (i, inst) in block.instructions.drain(..).enumerate() {
                 if !indices.contains(&i) {
