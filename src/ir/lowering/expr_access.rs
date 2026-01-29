@@ -1016,7 +1016,10 @@ impl Lowerer {
         // by value in variadic arguments (their bytes are inline on the va_list),
         // but IrType maps structs to Ptr. We need to read the struct data as
         // individual slots and store to a temporary alloca.
-        if self.is_type_struct_or_union(type_spec) {
+        // Use the resolved ctype rather than pattern-matching on the TypeSpecifier,
+        // because typeof(expr) produces TypeSpecifier::Typeof which would not be
+        // recognized by is_type_struct_or_union but resolves correctly via ctype.
+        if ctype.is_struct_or_union() {
             return self.lower_va_arg_struct(ap_expr, type_spec, &ctype);
         }
 

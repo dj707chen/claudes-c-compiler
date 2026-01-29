@@ -33,6 +33,7 @@ impl Lowerer {
         match ts {
             TypeSpecifier::TypedefName(name) => self.types.typedefs.get(name).cloned(),
             TypeSpecifier::TypeofType(inner) => self.resolve_typedef_ctype(inner),
+            TypeSpecifier::Typeof(expr) => self.get_expr_ctype(expr),
             _ => None,
         }
     }
