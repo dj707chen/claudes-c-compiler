@@ -2571,22 +2571,44 @@ fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [LineInfo]) -> 
             //
             // Conservative approach: scan forward from the branch until we hit a
             // ret or unconditional jmp. If either register is read before being
-            // overwritten, bail out.
+            // overwritten, bail out. When we reach an unconditional jmp, follow
+            // its target (up to 2 levels) and continue checking there, since the
+            // exit block may read src_fam which was NOPped by coalescing.
             let check_regs = [dst_fam, src_fam];
             let mut fall_through_safe = true;
             let mut m = branch_idx + 1;
             // Track whether each register has been killed (overwritten) on the
             // fall-through path so far.
             let mut killed = [false; 2];
-            while m < len {
+            // Allow following unconditional jmps to their targets (up to 2 hops)
+            let mut jumps_followed = 0u32;
+            'ft_scan: while m < len {
                 if infos[m].is_nop() || infos[m].kind == LineKind::Empty
                     || infos[m].kind == LineKind::Label {
                     m += 1;
                     continue;
                 }
-                // Stop at unconditional jumps or returns - end of fall-through path
-                if matches!(infos[m].kind, LineKind::Jmp | LineKind::JmpIndirect
-                    | LineKind::Ret) {
+                // At unconditional jumps: follow the target if we haven't
+                // confirmed all registers are dead, to catch exit blocks
+                // that read src_fam after the loop.
+                if infos[m].kind == LineKind::Jmp {
+                    if jumps_followed < 2 && (!killed[0] || !killed[1]) {
+                        let trimmed = infos[m].trimmed(store.get(m));
+                        if let Some(target) = extract_jump_target(trimmed) {
+                            if let Some(n) = parse_dotl_number(target) {
+                                if (n as usize) < label_line.len()
+                                    && label_line[n as usize] != usize::MAX
+                                {
+                                    m = label_line[n as usize] + 1;
+                                    jumps_followed += 1;
+                                    continue 'ft_scan;
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+                if matches!(infos[m].kind, LineKind::JmpIndirect | LineKind::Ret) {
                     break;
                 }
                 // Conditional jumps: fall-through continues past them, but they

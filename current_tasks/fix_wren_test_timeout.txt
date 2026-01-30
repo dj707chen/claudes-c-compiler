@@ -1,0 +1,12 @@
+Fix Wren project build script: test runner timeout too short
+
+The Wren project's check_x86.sh runs `python3 ./util/test.py` which has a
+hardcoded 5-second per-test timeout. Three tests (deeply_nested_gc,
+many_reallocations, sample_count_multiple) take 5-30 seconds even when
+compiled with GCC, causing them to timeout and fail.
+
+Fix: Patch util/test.py to increase timeout from 5 to 60 seconds before
+running the test suite.
+
+This is a build script issue, not a compiler bug.
+Status: in_progress
