@@ -1,0 +1,16 @@
+Refactor driver/driver.rs into focused submodules (in_progress)
+
+Started: 2026-01-30
+
+The driver/driver.rs file is a 1559-line monolith containing CLI parsing,
+external tool invocation, file type detection, GCC fallback logic, and the
+compilation pipeline all in one file.
+
+Plan:
+- Extract CLI argument parsing into driver/cli.rs (~385 lines)
+- Extract external tool invocation (gcc fallback, assembler, linker arg building)
+  into driver/external_tools.rs (~180 lines)
+- Extract file type detection utilities into driver/file_types.rs (~45 lines)
+- Keep the core pipeline (compile_to_assembly, run modes) in driver/driver.rs
+- Group Driver struct fields into logical sub-structs where appropriate
+- Update driver/README.md

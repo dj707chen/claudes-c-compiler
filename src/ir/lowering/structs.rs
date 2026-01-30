@@ -66,6 +66,108 @@ impl Lowerer {
         }
     }
 
+    /// Re-compute struct/union layouts that contain vector typedef fields.
+    /// Sema computed these layouts before vector_size was applied to typedefs,
+    /// so their field sizes may be wrong (e.g., float4 treated as float instead
+    /// of Vector(float, 16)). This updates the EXISTING layout entries by key
+    /// rather than creating new ones, since CType::Union/Struct references
+    /// use the key assigned by sema.
+    pub(super) fn recompute_vector_struct_layouts(
+        &mut self,
+        tu: &crate::frontend::parser::ast::TranslationUnit,
+    ) {
+        use crate::frontend::parser::ast::ExternalDecl;
+        let mut type_specs_to_recompute: Vec<&TypeSpecifier> = Vec::new();
+        for decl in &tu.decls {
+            match decl {
+                ExternalDecl::Declaration(decl) => {
+                    Self::collect_struct_union_type_specs(&decl.type_spec, &mut type_specs_to_recompute);
+                }
+                ExternalDecl::FunctionDef(func) => {
+                    Self::collect_struct_union_type_specs(&func.return_type, &mut type_specs_to_recompute);
+                    for p in &func.params {
+                        Self::collect_struct_union_type_specs(&p.type_spec, &mut type_specs_to_recompute);
+                    }
+                }
+                ExternalDecl::TopLevelAsm(_) => {}
+            }
+        }
+        for ts in type_specs_to_recompute {
+            self.recompute_layout_if_vector_fields(ts);
+        }
+    }
+
+    /// Collect all struct/union TypeSpecifiers with inline field definitions from a type.
+    fn collect_struct_union_type_specs<'a>(ts: &'a TypeSpecifier, out: &mut Vec<&'a TypeSpecifier>) {
+        match ts {
+            TypeSpecifier::Struct(_, Some(fields), _, _, _) |
+            TypeSpecifier::Union(_, Some(fields), _, _, _) => {
+                out.push(ts);
+                for f in fields {
+                    Self::collect_struct_union_type_specs(&f.type_spec, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Re-compute a struct/union layout if any of its fields use vector typedefs.
+    /// Updates the existing layout entry in the map using the key from sema.
+    fn recompute_layout_if_vector_fields(&mut self, ts: &TypeSpecifier) {
+        let (tag, fields, is_union, is_packed, pragma_pack, struct_aligned) = match ts {
+            TypeSpecifier::Struct(tag, Some(fields), is_packed, pragma_pack, struct_aligned) =>
+                (tag, fields, false, *is_packed, *pragma_pack, *struct_aligned),
+            TypeSpecifier::Union(tag, Some(fields), is_packed, pragma_pack, struct_aligned) =>
+                (tag, fields, true, *is_packed, *pragma_pack, *struct_aligned),
+            _ => return,
+        };
+        // Check if any field uses a vector typedef
+        let has_vector_field = fields.iter().any(|f| {
+            let ctype = self.struct_field_ctype(f);
+            ctype.is_vector()
+        });
+        if !has_vector_field { return; }
+
+        // Find the existing layout key. For tagged types, use the tag-based key.
+        // For anonymous types (e.g., typedef union { ... } name), find the key
+        // that sema assigned by searching typedefs for a matching CType.
+        let existing_key = if let Some(name) = tag {
+            let prefix = if is_union { "union." } else { "struct." };
+            Some(format!("{}{}", prefix, name))
+        } else {
+            let layouts = self.types.borrow_struct_layouts();
+            let mut found_key = None;
+            for (_, ctype) in self.types.typedefs.iter() {
+                match ctype {
+                    CType::Struct(key) | CType::Union(key) => {
+                        if let Some(layout) = layouts.get(&**key) {
+                            if layout.is_union == is_union && layout.fields.len() == fields.len() {
+                                found_key = Some(key.to_string());
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            drop(layouts);
+            found_key
+        };
+
+        if let Some(key) = existing_key {
+            let max_field_align = if is_packed { Some(1) } else { pragma_pack };
+            let mut layout = self.compute_struct_union_layout_packed(fields, is_union, max_field_align);
+            if let Some(a) = struct_aligned {
+                if a > layout.align {
+                    layout.align = a;
+                    let mask = layout.align - 1;
+                    layout.size = (layout.size + mask) & !mask;
+                }
+            }
+            self.types.insert_struct_layout_from_ref(&key, layout);
+        }
+    }
+
     /// Insert a struct layout into the cache, tracking the change in the current
     /// scope frame so it can be undone on scope exit.
     fn insert_struct_layout_scoped(&mut self, key: String, layout: StructLayout) {
