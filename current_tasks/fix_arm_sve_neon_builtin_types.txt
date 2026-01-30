@@ -1,0 +1,19 @@
+Fix ARM SVE and NEON builtin type definitions
+=============================================
+Status: in_progress
+Date: 2026-01-30
+
+Problem:
+When compiling for AArch64, system headers (bits/math-vector.h) use GCC builtin
+types __Float32x4_t, __Float64x2_t (NEON) and __SVFloat32_t, __SVFloat64_t,
+__SVBool_t (SVE). Since we claim __GNUC__=14, the preprocessor conditions
+__GNUC_PREREQ(9,0) and __GNUC_PREREQ(10,0) pass, but our compiler doesn't
+define these types, causing 70+ parse errors.
+
+This breaks lua, mquickjs, libpng, jq, libjpeg, and tcc on ARM.
+
+Fix:
+Define the GCC builtin NEON and SVE types as predefined types for the AArch64
+target, either as predefined macros or as recognized type keywords in the parser.
+The types only need to parse correctly in function declarations; we don't need
+to generate actual SVE/NEON code for them.
