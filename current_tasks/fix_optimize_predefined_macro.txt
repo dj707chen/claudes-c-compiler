@@ -1,0 +1,17 @@
+Bug: __OPTIMIZE__ and __OPTIMIZE_SIZE__ predefined macros not defined
+
+The compiler does not define __OPTIMIZE__ when -O1/-O2/-O3/-Os/-Oz is passed,
+and does not define __OPTIMIZE_SIZE__ when -Os/-Oz is passed.
+
+GCC defines __OPTIMIZE__ for any optimization level >= 1 and __OPTIMIZE_SIZE__
+for -Os/-Oz. The Linux kernel relies on __OPTIMIZE__ in BUILD_BUG() and related
+macros - when it's missing, the compile-time assertion expands to a no-op
+instead of a noreturn function call, causing false -Wreturn-type errors that
+block the kernel build.
+
+Fix: Track optimization level in the driver, pass it to the preprocessor,
+and define __OPTIMIZE__ (for O1+) and __OPTIMIZE_SIZE__ (for Os/Oz) as
+predefined macros.
+
+Started: 2026-01-30
+Status: in_progress

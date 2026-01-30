@@ -523,6 +523,18 @@ impl Parser {
         if self.attrs.parsing_used() {
             last_decl.attrs.set_used(true);
         }
+        if self.attrs.parsing_noreturn() {
+            last_decl.attrs.set_noreturn(true);
+        }
+        if self.attrs.parsing_fastcall() {
+            last_decl.attrs.set_fastcall(true);
+        }
+        if self.attrs.parsing_naked() {
+            last_decl.attrs.set_naked(true);
+        }
+        if self.attrs.parsing_error_attr() {
+            last_decl.attrs.set_error_attr(true);
+        }
         self.attrs.set_weak(false);
         self.attrs.parsing_alias_target = None;
         self.attrs.parsing_visibility = None;
@@ -695,6 +707,19 @@ impl Parser {
                     da.asm_register = skip_asm_reg;
                     da.cleanup_fn = local_cleanup_fn;
                     da.set_used(self.attrs.parsing_used());
+                    da.set_noreturn(self.attrs.parsing_noreturn());
+                    da.set_constructor(self.attrs.parsing_constructor());
+                    da.set_destructor(self.attrs.parsing_destructor());
+                    da.set_weak(self.attrs.parsing_weak());
+                    da.set_fastcall(self.attrs.parsing_fastcall());
+                    da.set_naked(self.attrs.parsing_naked());
+                    da.set_error_attr(self.attrs.parsing_error_attr());
+                    if let Some(ref target) = self.attrs.parsing_alias_target {
+                        da.alias_target = Some(target.clone());
+                    }
+                    if let Some(ref vis) = self.attrs.parsing_visibility {
+                        da.visibility = Some(vis.clone());
+                    }
                     da
                 },
                 span: start,

@@ -45,6 +45,17 @@ use super::const_eval::{SemaConstEval, ConstMap};
 use std::cell::{Cell, RefCell};
 use crate::common::fx_hash::FxHashMap;
 
+/// Outcome of a case segment in a switch statement for -Wreturn-type analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwitchSegmentOutcome {
+    /// Segment returns or otherwise diverges (goto, continue to outer loop, infinite loop)
+    Returns,
+    /// Segment breaks out of the switch
+    Breaks,
+    /// Segment falls through (to next case or end of switch body)
+    FallsThrough,
+}
+
 /// Map from AST expression node identity to its inferred CType.
 ///
 /// Keyed by [`ExprId`], a type-safe wrapper around each `Expr` node's identity.
@@ -66,6 +77,7 @@ pub struct FunctionInfo {
     pub params: Vec<(CType, Option<String>)>,
     pub variadic: bool,
     pub is_defined: bool,
+    /// Whether the function is declared with __attribute__((noreturn)) or _Noreturn
     pub is_noreturn: bool,
 }
 
@@ -854,15 +866,20 @@ impl SemanticAnalyzer {
     /// Returns `true` if control can reach the end of the compound statement,
     /// `false` if all paths through the block are guaranteed to return/diverge.
     fn compound_can_fall_through(&self, compound: &CompoundStmt) -> bool {
-        // Empty body can fall through
         if compound.items.is_empty() {
             return true;
         }
-        // Check the last item in the block
-        match compound.items.last().unwrap() {
-            BlockItem::Statement(stmt) => self.stmt_can_fall_through(stmt),
-            BlockItem::Declaration(_) => true,
+        // Check each item - if any item doesn't fall through, the rest is unreachable
+        for item in &compound.items {
+            let falls_through = match item {
+                BlockItem::Statement(stmt) => self.stmt_can_fall_through(stmt),
+                BlockItem::Declaration(_) => true,
+            };
+            if !falls_through {
+                return false;
+            }
         }
+        true
     }
 
     /// Check whether a statement can fall through (i.e., control can reach the
@@ -880,24 +897,44 @@ impl SemanticAnalyzer {
             Stmt::Break(_) | Stmt::Continue(_) => false,
 
             // if/else: falls through only if either branch can fall through
-            // if without else: always can fall through (the else path is implicit fallthrough)
-            Stmt::If(_, then_br, else_br, _) => {
+            // if without else: can fall through unless the condition is constant true
+            // and the then-branch diverges (e.g., `if(1) noreturn_call()`)
+            Stmt::If(cond, then_br, else_br, _) => {
                 match else_br {
                     Some(else_stmt) => {
                         // Both branches must not fall through for the if/else to not fall through
                         self.stmt_can_fall_through(then_br) || self.stmt_can_fall_through(else_stmt)
                     }
-                    None => true, // no else means we can fall through
+                    None => {
+                        // if without else: can fall through unless condition is constant true
+                        // and the body diverges (handles `if(1) abort()` and BUILD_BUG patterns)
+                        if self.is_constant_true_expr(cond) && !self.stmt_can_fall_through(then_br) {
+                            false
+                        } else {
+                            true
+                        }
+                    }
                 }
             }
 
             // while/do-while/for: conservatively can fall through, unless the
-            // condition is a compile-time constant true (infinite loop)
+            // condition is a compile-time constant true (infinite loop), or the
+            // body itself diverges (contains __builtin_unreachable(), etc.)
             Stmt::While(cond, _body, _) => {
-                !self.is_constant_true_expr(cond)
+                if self.is_constant_true_expr(cond) {
+                    false // infinite loop
+                } else {
+                    true // might not execute body at all, so can fall through
+                }
             }
-            Stmt::DoWhile(_body, cond, _) => {
-                !self.is_constant_true_expr(cond)
+            Stmt::DoWhile(body, cond, _) => {
+                if self.is_constant_true_expr(cond) {
+                    false // infinite loop
+                } else if !self.stmt_can_fall_through(body) {
+                    false // body diverges, condition never reached
+                } else {
+                    true
+                }
             }
             Stmt::For(_init, cond, _inc, _body, _) => {
                 // for(;;) with no condition is an infinite loop
@@ -907,9 +944,9 @@ impl SemanticAnalyzer {
                 }
             }
 
-            // switch: conservatively can fall through
-            // (would need exhaustiveness + break analysis to prove otherwise)
-            Stmt::Switch(_, _, _) => true,
+            // switch: can fall through unless it has a default case and every
+            // case segment ends with a return/goto/diverge (not break/fallthrough).
+            Stmt::Switch(_, body, _) => self.switch_can_fall_through(body),
 
             // compound: delegate to compound analysis
             Stmt::Compound(compound) => self.compound_can_fall_through(compound),
@@ -928,30 +965,284 @@ impl SemanticAnalyzer {
         }
     }
 
-    /// Check if an expression is a call to a function declared with _Noreturn
-    /// or __attribute__((noreturn)), such as abort(), exit(), _Exit(), etc.
-    fn is_noreturn_call(&self, expr: &Expr) -> bool {
-        if let Expr::FunctionCall(callee, _, _) = expr {
-            if let Expr::Identifier(name, _) = callee.as_ref() {
-                if let Some(func_info) = self.result.functions.get(name) {
-                    return func_info.is_noreturn;
+    /// Check whether a switch statement can fall through to the next statement.
+    ///
+    /// A switch cannot fall through if:
+    /// 1. It has a `default` label (so all values are covered), AND
+    /// 2. No case segment contains a `break` that exits the switch, AND
+    /// 3. The last segment in the compound body doesn't fall through.
+    ///
+    /// Segments that fall through to the next case (without break) are allowed,
+    /// since control just continues to the next case label.
+    fn switch_can_fall_through(&self, body: &Stmt) -> bool {
+        let compound = match body {
+            Stmt::Compound(c) => c,
+            // Non-compound switch body: conservatively say it can fall through
+            _ => return true,
+        };
+
+        if compound.items.is_empty() {
+            return true;
+        }
+
+        // Must have a default label to cover all values
+        if !self.switch_has_default(&compound.items) {
+            return true;
+        }
+
+        // Collect case segment boundaries
+        let mut segment_starts: Vec<usize> = Vec::new();
+        for (i, item) in compound.items.iter().enumerate() {
+            if let BlockItem::Statement(stmt) = item {
+                if self.is_case_label(stmt) {
+                    segment_starts.push(i);
+                }
+            }
+        }
+
+        if segment_starts.is_empty() {
+            return true;
+        }
+
+        // Check each segment:
+        // - If ANY segment ends with a break, the switch falls through
+        // - If the LAST segment falls through, the switch falls through
+        for (seg_idx, &start) in segment_starts.iter().enumerate() {
+            let end = if seg_idx + 1 < segment_starts.len() {
+                segment_starts[seg_idx + 1]
+            } else {
+                compound.items.len()
+            };
+
+            let segment = &compound.items[start..end];
+            let outcome = self.segment_outcome(segment);
+            match outcome {
+                SwitchSegmentOutcome::Returns => {
+                    // This segment returns/diverges - doesn't cause fallthrough
+                }
+                SwitchSegmentOutcome::Breaks => {
+                    // This segment breaks out of the switch - switch falls through
+                    return true;
+                }
+                SwitchSegmentOutcome::FallsThrough => {
+                    // Falls through to next segment. Only a problem if this is the last segment.
+                    if seg_idx + 1 >= segment_starts.len() {
+                        return true;
+                    }
+                    // Otherwise, fallthrough to next case is fine (C semantics)
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Determine the outcome of a case segment: does it return, break, or fall through?
+    fn segment_outcome(&self, segment: &[BlockItem]) -> SwitchSegmentOutcome {
+        if segment.is_empty() {
+            return SwitchSegmentOutcome::FallsThrough;
+        }
+
+        let last = &segment[segment.len() - 1];
+        match last {
+            BlockItem::Declaration(_) => SwitchSegmentOutcome::FallsThrough,
+            BlockItem::Statement(stmt) => {
+                let inner = self.unwrap_case_label(stmt);
+                self.stmt_switch_outcome(inner)
+            }
+        }
+    }
+
+    /// Determine what a statement does in a switch context: return, break, or fall through.
+    fn stmt_switch_outcome(&self, stmt: &Stmt) -> SwitchSegmentOutcome {
+        match stmt {
+            Stmt::Return(_, _) | Stmt::Goto(_, _) | Stmt::GotoIndirect(_, _) => {
+                SwitchSegmentOutcome::Returns
+            }
+            Stmt::Break(_) => SwitchSegmentOutcome::Breaks,
+            Stmt::Continue(_) => SwitchSegmentOutcome::Returns,
+
+            Stmt::Compound(compound) => {
+                if compound.items.is_empty() {
+                    return SwitchSegmentOutcome::FallsThrough;
+                }
+                match compound.items.last().unwrap() {
+                    BlockItem::Statement(s) => self.stmt_switch_outcome(s),
+                    BlockItem::Declaration(_) => SwitchSegmentOutcome::FallsThrough,
+                }
+            }
+
+            Stmt::If(_, then_br, else_br, _) => match else_br {
+                Some(else_stmt) => {
+                    let then_out = self.stmt_switch_outcome(then_br);
+                    let else_out = self.stmt_switch_outcome(else_stmt);
+                    if then_out == SwitchSegmentOutcome::Returns
+                        && else_out == SwitchSegmentOutcome::Returns
+                    {
+                        SwitchSegmentOutcome::Returns
+                    } else if then_out == SwitchSegmentOutcome::Breaks
+                        || else_out == SwitchSegmentOutcome::Breaks
+                    {
+                        SwitchSegmentOutcome::Breaks
+                    } else {
+                        SwitchSegmentOutcome::FallsThrough
+                    }
+                }
+                None => SwitchSegmentOutcome::FallsThrough,
+            },
+
+            Stmt::While(cond, _, _) => {
+                if self.is_constant_true_expr(cond) {
+                    SwitchSegmentOutcome::Returns
+                } else {
+                    SwitchSegmentOutcome::FallsThrough
+                }
+            }
+            Stmt::DoWhile(body, cond, _) => {
+                if self.is_constant_true_expr(cond) {
+                    SwitchSegmentOutcome::Returns
+                } else if !self.stmt_can_fall_through(body) {
+                    SwitchSegmentOutcome::Returns // body diverges
+                } else {
+                    SwitchSegmentOutcome::FallsThrough
+                }
+            }
+            Stmt::For(_, cond, _, _, _) => match cond {
+                None => SwitchSegmentOutcome::Returns,
+                Some(c) => {
+                    if self.is_constant_true_expr(c) {
+                        SwitchSegmentOutcome::Returns
+                    } else {
+                        SwitchSegmentOutcome::FallsThrough
+                    }
+                }
+            },
+
+            Stmt::Label(_, inner, _)
+            | Stmt::Case(_, inner, _)
+            | Stmt::CaseRange(_, _, inner, _)
+            | Stmt::Default(inner, _) => self.stmt_switch_outcome(inner),
+
+            Stmt::Switch(_, inner_body, _) => {
+                if self.switch_can_fall_through(inner_body) {
+                    SwitchSegmentOutcome::FallsThrough
+                } else {
+                    SwitchSegmentOutcome::Returns
+                }
+            }
+
+            Stmt::Expr(Some(expr)) => {
+                if self.is_noreturn_call(expr) {
+                    SwitchSegmentOutcome::Returns
+                } else {
+                    SwitchSegmentOutcome::FallsThrough
+                }
+            }
+
+            _ => SwitchSegmentOutcome::FallsThrough,
+        }
+    }
+
+    /// Unwrap case/default label wrappers to get to the inner statement.
+    fn unwrap_case_label<'b>(&self, stmt: &'b Stmt) -> &'b Stmt {
+        match stmt {
+            Stmt::Case(_, inner, _) | Stmt::CaseRange(_, _, inner, _) | Stmt::Default(inner, _) => {
+                self.unwrap_case_label(inner)
+            }
+            other => other,
+        }
+    }
+
+    /// Check if a statement is a case/default label.
+    fn is_case_label(&self, stmt: &Stmt) -> bool {
+        matches!(stmt, Stmt::Case(_, _, _) | Stmt::CaseRange(_, _, _, _) | Stmt::Default(_, _))
+    }
+
+    /// Check if any item in a switch body contains a `default` label.
+    fn switch_has_default(&self, items: &[BlockItem]) -> bool {
+        for item in items {
+            if let BlockItem::Statement(stmt) = item {
+                if self.stmt_contains_default(stmt) {
+                    return true;
                 }
             }
         }
         false
     }
 
-    /// Check if an expression is a compile-time constant that evaluates to true (non-zero).
-    /// Used to detect infinite loops like `while(1)` and `for(;1;)`.
-    fn is_constant_true_expr(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::IntLiteral(val, _) => *val != 0,
-            Expr::UIntLiteral(val, _) => *val != 0,
-            Expr::LongLiteral(val, _) => *val != 0,
-            Expr::ULongLiteral(val, _) => *val != 0,
-            Expr::LongLongLiteral(val, _) => *val != 0,
-            Expr::ULongLongLiteral(val, _) => *val != 0,
+    /// Check if a statement is or contains a `default` label (handles nested case labels).
+    fn stmt_contains_default(&self, stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Default(_, _) => true,
+            Stmt::Case(_, inner, _) | Stmt::CaseRange(_, _, inner, _) => {
+                self.stmt_contains_default(inner)
+            }
             _ => false,
+        }
+    }
+
+    /// Check if an expression is a call to a noreturn function like
+    /// `__builtin_unreachable()`, `abort()`, `exit()`, or any function
+    /// declared with `__attribute__((noreturn))`.
+    fn is_noreturn_call(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::FunctionCall(callee, _, _) => {
+                if let Expr::Identifier(name, _) = callee.as_ref() {
+                    // Check built-in noreturn functions
+                    if matches!(
+                        name.as_str(),
+                        "__builtin_unreachable"
+                            | "__builtin_trap"
+                            | "__builtin_abort"
+                            | "abort"
+                            | "exit"
+                            | "_exit"
+                            | "_Exit"
+                    ) {
+                        return true;
+                    }
+                    // Check user-declared noreturn functions
+                    if let Some(func_info) = self.result.functions.get(name) {
+                        return func_info.is_noreturn;
+                    }
+                    false
+                } else {
+                    false
+                }
+            }
+            // Handle comma expressions: (void)0, __builtin_unreachable()
+            Expr::Comma(_, rhs, _) => self.is_noreturn_call(rhs),
+            _ => false,
+        }
+    }
+
+    /// Check if an expression is a compile-time constant that evaluates to true (non-zero).
+    /// Used to detect infinite loops like `while(1)` and `for(;1;)`, and for
+    /// `if(1)` patterns like `if(!(0)) noreturn_call()` in BUILD_BUG macros.
+    fn is_constant_true_expr(&self, expr: &Expr) -> bool {
+        match self.try_eval_constant_bool(expr) {
+            Some(val) => val,
+            None => false,
+        }
+    }
+
+    /// Try to evaluate an expression as a compile-time boolean (true=non-zero, false=zero).
+    /// Returns None if the expression is not a compile-time constant.
+    fn try_eval_constant_bool(&self, expr: &Expr) -> Option<bool> {
+        match expr {
+            Expr::IntLiteral(val, _) => Some(*val != 0),
+            Expr::UIntLiteral(val, _) => Some(*val != 0),
+            Expr::LongLiteral(val, _) => Some(*val != 0),
+            Expr::ULongLiteral(val, _) => Some(*val != 0),
+            Expr::LongLongLiteral(val, _) => Some(*val != 0),
+            Expr::ULongLongLiteral(val, _) => Some(*val != 0),
+            // !expr: invert the constant
+            Expr::UnaryOp(crate::frontend::parser::ast::UnaryOp::LogicalNot, inner, _) => {
+                self.try_eval_constant_bool(inner).map(|v| !v)
+            }
+            // Cast to another type preserves truthiness
+            Expr::Cast(_, inner, _) => self.try_eval_constant_bool(inner),
+            _ => None,
         }
     }
 
