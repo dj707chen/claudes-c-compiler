@@ -73,9 +73,11 @@ impl X86Codegen {
         // For pure INTEGER+INTEGER returns, rax:rdx already correct — noop.
         // For mixed INTEGER+SSE or SSE+INTEGER returns, move the SSE eightbyte
         // from the GP register to xmm0 per SysV AMD64 ABI.
+        // Use func_ret_classes (set once in prologue) so that intervening call
+        // instructions cannot clobber the function's own return classification.
         use crate::common::types::EightbyteClass;
-        if self.current_ret_classes.len() == 2 {
-            let (c0, c1) = (self.current_ret_classes[0], self.current_ret_classes[1]);
+        if self.func_ret_classes.len() == 2 {
+            let (c0, c1) = (self.func_ret_classes[0], self.func_ret_classes[1]);
             match (c0, c1) {
                 (EightbyteClass::Integer, EightbyteClass::Sse) => {
                     // Second eightbyte is SSE: move rdx -> xmm0

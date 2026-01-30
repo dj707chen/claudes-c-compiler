@@ -103,7 +103,7 @@ impl X86Codegen {
 
     pub(super) fn emit_prologue_impl(&mut self, func: &IrFunction, frame_size: i64) {
         self.current_return_type = func.return_type;
-        self.current_ret_classes = func.ret_eightbyte_classes.clone();
+        self.func_ret_classes = func.ret_eightbyte_classes.clone();
         if self.state.cf_protection_branch {
             self.state.emit("    endbr64");
         }

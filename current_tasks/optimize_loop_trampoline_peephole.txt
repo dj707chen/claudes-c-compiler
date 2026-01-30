@@ -1,0 +1,16 @@
+Optimize eliminate_loop_trampolines peephole pass
+
+This is the #1 performance bottleneck (19.76% of total compile time on sqlite3.c).
+
+The main issue: For each trampoline label candidate, the function does a full
+O(n) linear scan of ALL assembly lines (line 185) to find the conditional branch
+targeting that label. This creates O(labels * lines) = quadratic complexity.
+
+Fix: Pre-build a reverse index from label numbers to their conditional branch
+source lines during the initial scan. This turns the inner search into O(1) lookup.
+
+Also: Eliminate unnecessary format!() string allocations in the trampoline block
+parsing code (lines 107-108, 122-123, 145) by adding a register_family_from_name
+helper that doesn't require the % prefix.
+
+Status: in_progress
