@@ -93,6 +93,11 @@ pub fn peephole_optimize(asm: String) -> String {
     let global_changed = global_changed | eliminate_dead_reg_moves(&store, &mut infos);
     let global_changed = global_changed | eliminate_dead_stores(&store, &mut infos);
     let global_changed = global_changed | fuse_compare_and_branch(&mut store, &mut infos);
+    // Memory operand folding: fold remaining stack loads into subsequent ALU
+    // instructions as memory source operands. This runs after store forwarding
+    // has already converted loads that can be forwarded from registers; the
+    // remaining loads benefit from being folded into ALU instructions.
+    let global_changed = global_changed | fold_memory_operands(&mut store, &mut infos);
 
     // Phase 3: One more local cleanup if global passes made changes.
     if global_changed {
@@ -104,6 +109,7 @@ pub fn peephole_optimize(asm: String) -> String {
             changed2 |= fuse_movq_ext_truncation(&mut store, &mut infos);
             changed2 |= eliminate_dead_reg_moves(&store, &mut infos);
             changed2 |= eliminate_dead_stores(&store, &mut infos);
+            changed2 |= fold_memory_operands(&mut store, &mut infos);
             pass_count2 += 1;
         }
     }
@@ -127,6 +133,7 @@ pub fn peephole_optimize(asm: String) -> String {
             changed3 |= fuse_movq_ext_truncation(&mut store, &mut infos);
             changed3 |= eliminate_dead_reg_moves(&store, &mut infos);
             changed3 |= eliminate_dead_stores(&store, &mut infos);
+            changed3 |= fold_memory_operands(&mut store, &mut infos);
             pass_count3 += 1;
         }
     }
@@ -3092,6 +3099,182 @@ fn rewrite_instruction_register(inst: &str, old_fam: RegId, new_fam: RegId) -> O
     }
 }
 
+// ── Memory operand folding ────────────────────────────────────────────────────
+//
+// Folds a stack load followed by an ALU instruction that uses the loaded register
+// as a source operand into a single instruction with a memory source operand.
+//
+// Pattern:
+//   movq  -N(%rbp), %rcx       ; LoadRbp { reg: 1(rcx), offset: -N, size: Q }
+//   addq  %rcx, %rax           ; Other: rax = rax + rcx
+//
+// Transformed to:
+//   addq  -N(%rbp), %rax       ; rax = rax + mem[rbp-N]
+//
+// Supported ALU ops: add, sub, and, or, xor, cmp (with q/l suffixes).
+// The loaded register must be used as the first (source) operand in AT&T syntax.
+// We only fold when the loaded register is one of the scratch registers (rax=0,
+// rcx=1, rdx=2) to avoid breaking live register values.
+
+/// Format a stack slot as an assembly memory operand string.
+fn format_rbp_offset(offset: i32) -> String {
+    format!("{}(%rbp)", offset)
+}
+
+/// Try to parse an ALU instruction of the form "OPsuffix %src, %dst"
+/// where OP is add/sub/and/or/xor/cmp.
+/// Returns (op_name_with_suffix, dst_reg_str, src_family, dst_family).
+fn parse_alu_reg_reg(trimmed: &str) -> Option<(&str, &str, RegId, RegId)> {
+    // Must start with a known ALU op prefix
+    let b = trimmed.as_bytes();
+    if b.len() < 6 { return None; } // minimum: "addl X,Y"
+
+    // Check for known ALU operations
+    let op_len = if b.starts_with(b"add") { 3 }
+        else if b.starts_with(b"sub") { 3 }
+        else if b.starts_with(b"and") { 3 }
+        else if b.starts_with(b"xor") { 3 }
+        else if b.starts_with(b"cmp") { 3 }
+        else if b.starts_with(b"or") && b.len() > 2 && (b[2] == b'q' || b[2] == b'l' || b[2] == b'w' || b[2] == b'b') { 2 }
+        else { return None; };
+
+    // Get the size suffix
+    let suffix = b[op_len];
+    if suffix != b'q' && suffix != b'l' && suffix != b'w' && suffix != b'b' {
+        return None;
+    }
+    let op_with_suffix = &trimmed[..op_len + 1];
+
+    // Rest should be " %src, %dst"
+    let rest = trimmed[op_len + 1..].trim();
+    let (src_str, dst_str) = rest.split_once(',')?;
+    let src_str = src_str.trim();
+    let dst_str = dst_str.trim();
+
+    // Both must be register operands
+    if !src_str.starts_with('%') || !dst_str.starts_with('%') {
+        return None;
+    }
+
+    let src_fam = register_family_fast(src_str);
+    let dst_fam = register_family_fast(dst_str);
+    if src_fam == REG_NONE || dst_fam == REG_NONE {
+        return None;
+    }
+
+    Some((op_with_suffix, dst_str, src_fam, dst_fam))
+}
+
+/// Fold stack loads into subsequent ALU instructions as memory operands.
+///
+/// This pass scans for `LoadRbp` instructions immediately followed by an ALU
+/// instruction that uses the loaded register as the source operand. The load is
+/// eliminated and the ALU instruction is rewritten to use a memory operand.
+///
+/// Safety: We only fold when the loaded register (the one being eliminated) is
+/// a scratch register (rax=0, rcx=1, rdx=2) because the codegen guarantees
+/// these are temporary and overwritten before the next use. We also verify
+/// the loaded register is not the *destination* of the ALU instruction to avoid
+/// creating a memory-destination instruction (which would write to the stack slot).
+fn fold_memory_operands(store: &mut LineStore, infos: &mut [LineInfo]) -> bool {
+    let len = store.len();
+    let mut changed = false;
+    let mut i = 0;
+
+    while i + 1 < len {
+        if infos[i].is_nop() {
+            i += 1;
+            continue;
+        }
+
+        // Look for LoadRbp (load from stack to a register)
+        if let LineKind::LoadRbp { reg: load_reg, offset, size: load_size } = infos[i].kind {
+            // Only fold loads into scratch registers (rax=0, rcx=1, rdx=2)
+            // These are guaranteed to be temporary by the accumulator codegen model.
+            if load_reg > 2 {
+                i += 1;
+                continue;
+            }
+
+            // Only fold Q and L loads (64-bit and 32-bit). SLQ (sign-extending)
+            // loads have different semantics that can't be represented as a simple
+            // memory operand in most ALU instructions.
+            //
+            // Size compatibility note: A 64-bit load (movq) followed by a 32-bit
+            // ALU (e.g., subl %ecx, %eax) is safe to fold into `subl -N(%rbp), %eax`
+            // because x86 is little-endian, so the lower 4 bytes of the 8-byte slot
+            // contain the correct 32-bit value. The codegen stores all values with
+            // movq, so the slot always has valid data for both 32-bit and 64-bit reads.
+            if load_size != MoveSize::Q && load_size != MoveSize::L {
+                i += 1;
+                continue;
+            }
+
+            // Find the next non-NOP, non-empty instruction
+            let mut j = i + 1;
+            while j < len && (infos[j].is_nop() || infos[j].kind == LineKind::Empty) {
+                j += 1;
+            }
+            if j >= len {
+                i += 1;
+                continue;
+            }
+
+            // The next instruction must be an Other (regular ALU instruction)
+            if let LineKind::Other { dest_reg: _ } = infos[j].kind {
+                let trimmed_j = infos[j].trimmed(store.get(j));
+                if let Some((op_suffix, dst_str, src_fam, dst_fam)) = parse_alu_reg_reg(trimmed_j) {
+                    // The loaded register must be the SOURCE operand (first in AT&T syntax)
+                    // and must NOT be the destination. If they're the same, the instruction
+                    // reads-then-writes the register (e.g., addq %rax, %rax = rax *= 2),
+                    // and we'd need the value in a register, not memory.
+                    if src_fam == load_reg && dst_fam != load_reg {
+                        // Additional safety: don't fold if there's a StoreRbp between
+                        // the load and the ALU that writes to the same offset (the value
+                        // might have changed).
+                        let mut intervening_store = false;
+                        for k in (i + 1)..j {
+                            if let LineKind::StoreRbp { offset: so, .. } = infos[k].kind {
+                                if so == offset {
+                                    intervening_store = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if intervening_store {
+                            i += 1;
+                            continue;
+                        }
+
+                        // Build the folded instruction: OP mem_operand, %dst
+                        let mem_op = format_rbp_offset(offset);
+                        let new_inst = format!("    {} {}, {}", op_suffix, mem_op, dst_str);
+
+                        // NOP the load instruction
+                        mark_nop(&mut infos[i]);
+                        // Replace the ALU instruction with the memory-operand version
+                        replace_line(store, &mut infos[j], j, new_inst);
+                        changed = true;
+                        i = j + 1;
+                        continue;
+                    }
+
+                    // When the loaded register is the destination, creating a
+                    // memory-destination instruction would write the ALU result
+                    // back to the stack slot instead of keeping it in a register,
+                    // changing program semantics. Commutative swapping isn't
+                    // needed since the case where the loaded register is the
+                    // source operand is already handled above.
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    changed
+}
+
 #[cfg(test)]
 fn is_self_move(s: &str) -> bool {
     if let Some(rest) = s.strip_prefix("movq ") {
@@ -3759,5 +3942,141 @@ mod tests {
         let result = peephole_optimize(asm);
         assert_eq!(result.matches("cltq").count(), 1,
             "second cltq should be eliminated past store and mov: {}", result);
+    }
+
+    // ── Memory operand folding tests ──────────────────────────────────────
+
+    #[test]
+    fn test_mem_fold_addq_rcx() {
+        // movq -48(%rbp), %rcx; addq %rcx, %rax -> addq -48(%rbp), %rax
+        let asm = [
+            "    movq -48(%rbp), %rcx",
+            "    addq %rcx, %rax",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("addq -48(%rbp), %rax"),
+            "should fold load+add into memory operand: {}", result);
+        assert!(!result.contains("movq -48(%rbp), %rcx"),
+            "load should be eliminated: {}", result);
+    }
+
+    #[test]
+    fn test_mem_fold_subl_ecx() {
+        // movq -64(%rbp), %rcx; subl %ecx, %eax -> subl -64(%rbp), %eax
+        let asm = [
+            "    movq -64(%rbp), %rcx",
+            "    subl %ecx, %eax",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("subl -64(%rbp), %eax"),
+            "should fold load+sub into memory operand: {}", result);
+    }
+
+    #[test]
+    fn test_mem_fold_cmpq_rcx() {
+        // movq -8(%rbp), %rcx; cmpq %rcx, %rax -> cmpq -8(%rbp), %rax
+        let asm = [
+            "    movq -8(%rbp), %rcx",
+            "    cmpq %rcx, %rax",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("cmpq -8(%rbp), %rax"),
+            "should fold load+cmp into memory operand: {}", result);
+    }
+
+    #[test]
+    fn test_mem_fold_no_fold_when_dest_is_loaded_reg() {
+        // movq -48(%rbp), %rcx; addq %rax, %rcx
+        // Here %rcx is the destination, so we can't fold (would write to memory).
+        let asm = [
+            "    movq -48(%rbp), %rcx",
+            "    addq %rax, %rcx",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("movq -48(%rbp), %rcx") || result.contains("addq %rax, %rcx"),
+            "should not fold when loaded reg is destination: {}", result);
+    }
+
+    #[test]
+    fn test_mem_fold_no_fold_for_callee_saved() {
+        // movq -48(%rbp), %rbx; addq %rbx, %rax
+        // We don't fold callee-saved registers (rbx = family 3).
+        let asm = [
+            "    movq -48(%rbp), %rbx",
+            "    addq %rbx, %rax",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // The load may be kept or converted to a reg-to-reg move by store forwarding,
+        // but should not be folded into the add as a memory operand.
+        // (Note: store forwarding might still optimize this, but the fold pass specifically
+        // should not handle callee-saved registers.)
+        assert!(!result.contains("addq -48(%rbp), %rax"),
+            "should not fold callee-saved register loads: {}", result);
+    }
+
+    #[test]
+    fn test_mem_fold_andq() {
+        // movq -16(%rbp), %rcx; andq %rcx, %rax -> andq -16(%rbp), %rax
+        let asm = [
+            "    movq -16(%rbp), %rcx",
+            "    andq %rcx, %rax",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("andq -16(%rbp), %rax"),
+            "should fold load+and into memory operand: {}", result);
+    }
+
+    #[test]
+    fn test_mem_fold_xorq() {
+        // movq -24(%rbp), %rcx; xorq %rcx, %rax -> xorq -24(%rbp), %rax
+        let asm = [
+            "    movq -24(%rbp), %rcx",
+            "    xorq %rcx, %rax",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("xorq -24(%rbp), %rax"),
+            "should fold load+xor into memory operand: {}", result);
+    }
+
+    #[test]
+    fn test_mem_fold_load_rax_into_add_with_reg_dest() {
+        // movq -32(%rbp), %rax; addq %rax, %r12 -> addq -32(%rbp), %r12
+        // This should NOT fold because rax (family 0) is a scratch register,
+        // but %r12 is callee-saved. The fold is valid because the loaded register
+        // (%rax) is the source and the dest is %r12.
+        let asm = [
+            "    movq -32(%rbp), %rax",
+            "    addq %rax, %r12",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("addq -32(%rbp), %r12"),
+            "should fold rax load into add with callee-saved dest: {}", result);
+    }
+
+    #[test]
+    fn test_mem_fold_orq() {
+        // movq -16(%rbp), %rcx; orq %rcx, %rax -> orq -16(%rbp), %rax
+        let asm = [
+            "    movq -16(%rbp), %rcx",
+            "    orq %rcx, %rax",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("orq -16(%rbp), %rax"),
+            "should fold load+or into memory operand: {}", result);
+    }
+
+    #[test]
+    fn test_mem_fold_with_empty_line_between() {
+        // The fold should work even with empty lines between the load and ALU.
+        // Empty lines are classified as LineKind::Empty and are skipped by
+        // the NOP/empty scanning loop.
+        let asm = [
+            "    movq -48(%rbp), %rcx",
+            "",  // empty line (LineKind::Empty)
+            "    addq %rcx, %rax",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("addq -48(%rbp), %rax"),
+            "should fold with empty lines between: {}", result);
     }
 }
