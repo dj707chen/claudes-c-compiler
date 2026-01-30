@@ -1,0 +1,35 @@
+Task: Fix _Generic lvalue conversion: array-to-pointer decay and const propagation
+Status: in_progress
+Started: 2026-01-30
+
+Problem:
+_Generic type resolution did not apply C11 lvalue conversion to the controlling
+expression's type. This caused two bugs:
+
+1. Array-to-pointer decay missing: For _Generic(((void)0, arr), ...) where arr
+   is char[], the controlling type was CType::Array(Char) instead of
+   CType::Pointer(Char). Since the association list had char* (Pointer) but not
+   char[] (Array), the match fell through to int8_t (which Char aliases),
+   dispatching to the wrong function.
+
+2. Const qualifier lost through comma: For _Generic(((void)0, s), ...) where s
+   is const char*, expr_is_const_qualified did not recurse through Comma
+   expressions, so the const was lost and const char* matched char* instead.
+
+These bugs caused mpack's _Generic-based type-dispatch macros (mpack_write,
+mpack_write_kv) to call wrong serialization functions, producing incorrect
+MessagePack output.
+
+Fix:
+- Added lvalue conversion (array-to-pointer and function-to-pointer decay) at
+  the start of resolve_generic_selection in both expr_access.rs and expr_types.rs.
+- Extended expr_is_const_qualified to propagate const through Comma expressions.
+
+Files changed:
+- src/ir/lowering/expr_access.rs: resolve_generic_selection, expr_is_const_qualified
+- src/ir/lowering/expr_types.rs: resolve_generic_selection_expr
+
+Test:
+- tests/generic-array-decay-comma/ - regression test covering array decay and
+  const propagation through comma operator in _Generic
+- mpack project now passes all 1,027,860 checks on x86 and riscv
