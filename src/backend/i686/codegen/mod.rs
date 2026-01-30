@@ -1,5 +1,10 @@
 pub(crate) mod codegen;
 mod asm_emitter;
+mod atomics_helpers;
+mod calls_helpers;
 mod casts;
+mod float_helpers;
+mod helpers;
+mod i64_helpers;
 mod inline_asm;
 mod intrinsics;

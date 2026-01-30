@@ -54,7 +54,7 @@ pub(super) fn callee_saved_name(reg: PhysReg) -> &'static str {
 /// number of GP register arguments across all calls. This is used to determine
 /// which callee-saved temporaries (s2-s6) emit_call_reg_args will use, so that
 /// they can be saved/restored in the prologue/epilogue.
-fn max_gp_reg_args_in_calls(func: &IrFunction, config: &CallAbiConfig) -> usize {
+pub(super) fn max_gp_reg_args_in_calls(func: &IrFunction, config: &CallAbiConfig) -> usize {
     use crate::backend::call_abi::classify_call_args;
     use crate::backend::call_abi::CallArgClass;
 
@@ -78,14 +78,14 @@ fn max_gp_reg_args_in_calls(func: &IrFunction, config: &CallAbiConfig) -> usize 
 /// Scan inline asm instructions in a function and collect any callee-saved
 /// registers that are used via specific constraints or listed in clobbers.
 /// These must be saved/restored in the function prologue/epilogue.
-fn collect_inline_asm_callee_saved_riscv(func: &IrFunction, used: &mut Vec<PhysReg>) {
+pub(super) fn collect_inline_asm_callee_saved_riscv(func: &IrFunction, used: &mut Vec<PhysReg>) {
     crate::backend::generation::collect_inline_asm_callee_saved(
         func, used, constraint_to_callee_saved_riscv, riscv_reg_to_callee_saved,
     );
 }
 
 /// Map a RISC-V register name to its PhysReg index, if it is callee-saved.
-fn riscv_reg_to_callee_saved(name: &str) -> Option<PhysReg> {
+pub(super) fn riscv_reg_to_callee_saved(name: &str) -> Option<PhysReg> {
     match name {
         "s1" | "x9" => Some(PhysReg(1)),
         "s2" | "x18" => Some(PhysReg(2)),
@@ -103,7 +103,7 @@ fn riscv_reg_to_callee_saved(name: &str) -> Option<PhysReg> {
 }
 
 /// Check if a constraint string refers to a specific RISC-V callee-saved register.
-fn constraint_to_callee_saved_riscv(constraint: &str) -> Option<PhysReg> {
+pub(super) fn constraint_to_callee_saved_riscv(constraint: &str) -> Option<PhysReg> {
     // Handle explicit register constraint: {regname}
     if constraint.starts_with('{') && constraint.ends_with('}') {
         let reg = &constraint[1..constraint.len()-1];
@@ -117,17 +117,17 @@ fn constraint_to_callee_saved_riscv(constraint: &str) -> Option<PhysReg> {
 /// Uses standard RISC-V calling convention with register allocation for hot values.
 pub struct RiscvCodegen {
     pub(crate) state: CodegenState,
-    current_return_type: IrType,
+    pub(super) current_return_type: IrType,
     /// Number of named integer params for current variadic function.
     /// This is the effective GP register index after classification (including
     /// alignment gaps for I128/F128 pairs), capped at 8.
-    va_named_gp_count: usize,
+    pub(super) va_named_gp_count: usize,
     /// Total bytes of named params that overflow to the caller's stack.
-    va_named_stack_bytes: usize,
+    pub(super) va_named_stack_bytes: usize,
     /// Current frame size (below s0, not including the register save area above s0).
-    current_frame_size: i64,
+    pub(super) current_frame_size: i64,
     /// Whether the current function is variadic.
-    is_variadic: bool,
+    pub(super) is_variadic: bool,
     /// Scratch register indices for inline asm allocation.
     pub(super) asm_gp_scratch_idx: usize,
     pub(super) asm_fp_scratch_idx: usize,
@@ -135,11 +135,11 @@ pub struct RiscvCodegen {
     /// Maps value ID -> callee-saved register assignment.
     pub(super) reg_assignments: FxHashMap<u32, PhysReg>,
     /// Which callee-saved registers are used and need save/restore.
-    used_callee_saved: Vec<PhysReg>,
+    pub(super) used_callee_saved: Vec<PhysReg>,
     /// Whether to suppress linker relaxation (-mno-relax).
     /// When true, emits `.option norelax` at the top of the assembly output
     /// to prevent R_RISCV_RELAX relocations. Required for EFI stub code.
-    no_relax: bool,
+    pub(super) no_relax: bool,
 }
 
 impl RiscvCodegen {
@@ -181,446 +181,24 @@ impl RiscvCodegen {
         self.set_no_relax(opts.no_relax);
     }
 
-    /// Emit `.option norelax` if -mno-relax is set. Must be called once
-    /// before any code is generated. This prevents the GNU assembler from
-    /// generating R_RISCV_RELAX relocation entries, which is required for
-    /// EFI stub code that forbids absolute symbol references from linker
-    /// relaxation.
-    pub fn emit_pre_directives(&mut self) {
-        if self.no_relax {
-            self.state.emit(".option norelax");
-        }
-    }
-
-    /// Load comparison operands into t1 and t2, then sign/zero-extend
-    /// sub-64-bit types. Shared by emit_cmp and emit_fused_cmp_branch.
-    fn emit_cmp_operand_load(&mut self, lhs: &Operand, rhs: &Operand, ty: IrType) {
-        self.operand_to_t0(lhs);
-        self.state.emit("    mv t1, t0");
-        self.operand_to_t0(rhs);
-        self.state.emit("    mv t2, t0");
-
-        // Sign/zero-extend operands to 64 bits based on their actual type width.
-        // The narrow optimization pass can produce I8/I16/U8/U16 typed comparisons,
-        // so we must extend at the correct width, not just 32-bit for all sub-64 types.
-        match ty {
-            IrType::U8 => {
-                self.state.emit("    andi t1, t1, 0xff");
-                self.state.emit("    andi t2, t2, 0xff");
-            }
-            IrType::U16 => {
-                self.state.emit("    slli t1, t1, 48");
-                self.state.emit("    srli t1, t1, 48");
-                self.state.emit("    slli t2, t2, 48");
-                self.state.emit("    srli t2, t2, 48");
-            }
-            IrType::U32 => {
-                self.state.emit("    slli t1, t1, 32");
-                self.state.emit("    srli t1, t1, 32");
-                self.state.emit("    slli t2, t2, 32");
-                self.state.emit("    srli t2, t2, 32");
-            }
-            IrType::I8 => {
-                self.state.emit("    slli t1, t1, 56");
-                self.state.emit("    srai t1, t1, 56");
-                self.state.emit("    slli t2, t2, 56");
-                self.state.emit("    srai t2, t2, 56");
-            }
-            IrType::I16 => {
-                self.state.emit("    slli t1, t1, 48");
-                self.state.emit("    srai t1, t1, 48");
-                self.state.emit("    slli t2, t2, 48");
-                self.state.emit("    srai t2, t2, 48");
-            }
-            IrType::I32 => {
-                self.state.emit("    sext.w t1, t1");
-                self.state.emit("    sext.w t2, t2");
-            }
-            _ => {} // I64/U64/Ptr: no extension needed
-        }
-    }
-
     // --- RISC-V helpers ---
-
-    /// Check if an immediate fits in a 12-bit signed field.
-    fn fits_imm12(val: i64) -> bool {
-        (-2048..=2047).contains(&val)
-    }
-
-    /// Emit: store `reg` to `offset(s0)`, handling large offsets via t6.
-    /// Uses t6 as scratch to avoid conflicts with t3-t5 call argument temps.
-    pub(super) fn emit_store_to_s0(&mut self, reg: &str, offset: i64, store_instr: &str) {
-        if Self::fits_imm12(offset) {
-            self.state.emit_fmt(format_args!("    {} {}, {}(s0)", store_instr, reg, offset));
-        } else {
-            self.state.emit_fmt(format_args!("    li t6, {}", offset));
-            self.state.emit("    add t6, s0, t6");
-            self.state.emit_fmt(format_args!("    {} {}, 0(t6)", store_instr, reg));
-        }
-    }
-
-    /// Emit: load from `offset(base)` into `dest`, handling large offsets via t6.
-    /// For arbitrary base registers (not s0/sp). Uses t6 as scratch when offset
-    /// exceeds RISC-V's 12-bit signed immediate range (-2048..2047).
-    fn emit_load_from_reg(state: &mut crate::backend::state::CodegenState, dest: &str, base: &str, offset: i64, load_instr: &str) {
-        if Self::fits_imm12(offset) {
-            state.emit_fmt(format_args!("    {} {}, {}({})", load_instr, dest, offset, base));
-        } else {
-            state.emit_fmt(format_args!("    li t6, {}", offset));
-            state.emit_fmt(format_args!("    add t6, {}, t6", base));
-            state.emit_fmt(format_args!("    {} {}, 0(t6)", load_instr, dest));
-        }
-    }
-
-    /// Emit: load from `offset(s0)` into `reg`, handling large offsets via t6.
-    /// Uses t6 as scratch to avoid conflicts with t3-t5 call argument temps.
-    pub(super) fn emit_load_from_s0(&mut self, reg: &str, offset: i64, load_instr: &str) {
-        if Self::fits_imm12(offset) {
-            self.state.emit_fmt(format_args!("    {} {}, {}(s0)", load_instr, reg, offset));
-        } else {
-            self.state.emit_fmt(format_args!("    li t6, {}", offset));
-            self.state.emit("    add t6, s0, t6");
-            self.state.emit_fmt(format_args!("    {} {}, 0(t6)", load_instr, reg));
-        }
-    }
-
-    /// Emit: `dest_reg = s0 + offset`, handling large offsets.
-    pub(super) fn emit_addi_s0(&mut self, dest_reg: &str, offset: i64) {
-        if Self::fits_imm12(offset) {
-            self.state.emit_fmt(format_args!("    addi {}, s0, {}", dest_reg, offset));
-        } else {
-            self.state.emit_fmt(format_args!("    li {}, {}", dest_reg, offset));
-            self.state.emit_fmt(format_args!("    add {}, s0, {}", dest_reg, dest_reg));
-        }
-    }
-
-    /// Emit: store `reg` to `offset(sp)`, handling large offsets via t6.
-    /// Used for stack overflow arguments in emit_call.
-    fn emit_store_to_sp(&mut self, reg: &str, offset: i64, store_instr: &str) {
-        if Self::fits_imm12(offset) {
-            self.state.emit_fmt(format_args!("    {} {}, {}(sp)", store_instr, reg, offset));
-        } else {
-            self.state.emit_fmt(format_args!("    li t6, {}", offset));
-            self.state.emit("    add t6, sp, t6");
-            self.state.emit_fmt(format_args!("    {} {}, 0(t6)", store_instr, reg));
-        }
-    }
-
-    /// Emit: load from `offset(sp)` into `reg`, handling large offsets via t6.
-    /// Used for loading stack overflow arguments in emit_call.
-    fn emit_load_from_sp(&mut self, reg: &str, offset: i64, load_instr: &str) {
-        if Self::fits_imm12(offset) {
-            self.state.emit_fmt(format_args!("    {} {}, {}(sp)", load_instr, reg, offset));
-        } else {
-            self.state.emit_fmt(format_args!("    li t6, {}", offset));
-            self.state.emit("    add t6, sp, t6");
-            self.state.emit_fmt(format_args!("    {} {}, 0(t6)", load_instr, reg));
-        }
-    }
-
-    /// Emit: `sp = sp + imm`, handling large immediates via t6.
-    /// Positive imm deallocates stack, negative allocates.
-    pub(super) fn emit_addi_sp(&mut self, imm: i64) {
-        if Self::fits_imm12(imm) {
-            self.state.emit_fmt(format_args!("    addi sp, sp, {}", imm));
-        } else if imm > 0 {
-            self.state.emit_fmt(format_args!("    li t6, {}", imm));
-            self.state.emit("    add sp, sp, t6");
-        } else {
-            self.state.emit_fmt(format_args!("    li t6, {}", -imm));
-            self.state.emit("    sub sp, sp, t6");
-        }
-    }
-
-    /// Emit prologue: allocate stack and save ra/s0.
-    ///
-    /// Stack layout (s0 points to top of frame = old sp):
-    ///   s0 - 8:  saved ra
-    ///   s0 - 16: saved s0
-    ///   s0 - 16 - ...: local data (allocas and value slots)
-    ///   sp: bottom of frame
-    fn emit_prologue_riscv(&mut self, frame_size: i64) {
-        // For variadic functions, the register save area (64 bytes for a0-a7) is
-        // placed ABOVE s0, contiguous with the caller's stack-passed arguments.
-        // Layout: s0+0..s0+56 = a0..a7, s0+64+ = caller stack args.
-        // This means total_alloc = frame_size + 64 for variadic, but s0 = sp + frame_size.
-        let total_alloc = if self.is_variadic { frame_size + 64 } else { frame_size };
-
-        const PAGE_SIZE: i64 = 4096;
-
-        // Small-frame path requires ALL immediates to fit in 12 bits:
-        // -total_alloc (sp adjust), and frame_size (s0 setup).
-        if Self::fits_imm12(-total_alloc) && Self::fits_imm12(total_alloc) {
-            // Small frame: all offsets fit in 12-bit immediates
-            self.state.emit_fmt(format_args!("    addi sp, sp, -{}", total_alloc));
-            // ra and s0 are saved relative to s0, which is sp + frame_size
-            // (NOT sp + total_alloc for variadic functions!)
-            self.state.emit_fmt(format_args!("    sd ra, {}(sp)", frame_size - 8));
-            self.state.emit_fmt(format_args!("    sd s0, {}(sp)", frame_size - 16));
-            self.state.emit_fmt(format_args!("    addi s0, sp, {}", frame_size));
-        } else if total_alloc > PAGE_SIZE {
-            // Stack probing: for large frames, touch each page so the kernel
-            // can grow the stack mapping. Without this, a single large sub
-            // can skip guard pages and cause a segfault.
-            let probe_label = self.state.fresh_label("stack_probe");
-            self.state.emit_fmt(format_args!("    li t1, {}", total_alloc));
-            self.state.emit_fmt(format_args!("    li t2, {}", PAGE_SIZE));
-            self.state.emit_fmt(format_args!("{}:", probe_label));
-            self.state.emit("    sub sp, sp, t2");
-            self.state.emit("    sd zero, 0(sp)");
-            self.state.emit("    sub t1, t1, t2");
-            self.state.emit_fmt(format_args!("    bgt t1, t2, {}", probe_label));
-            self.state.emit("    sub sp, sp, t1");
-            self.state.emit("    sd zero, 0(sp)");
-            // Compute s0 = sp + frame_size (NOT total_alloc)
-            self.state.emit_fmt(format_args!("    li t0, {}", frame_size));
-            self.state.emit("    add t0, sp, t0");
-            // Save ra and old s0 at s0-8, s0-16
-            self.state.emit("    sd ra, -8(t0)");
-            self.state.emit("    sd s0, -16(t0)");
-            self.state.emit("    mv s0, t0");
-        } else {
-            // Large frame: use t0 for offsets
-            self.state.emit_fmt(format_args!("    li t0, {}", total_alloc));
-            self.state.emit("    sub sp, sp, t0");
-            // Compute s0 = sp + frame_size (NOT total_alloc)
-            self.state.emit_fmt(format_args!("    li t0, {}", frame_size));
-            self.state.emit("    add t0, sp, t0");
-            // Save ra and old s0 at s0-8, s0-16
-            self.state.emit("    sd ra, -8(t0)");
-            self.state.emit("    sd s0, -16(t0)");
-            self.state.emit("    mv s0, t0");
-        }
-    }
-
-    /// Emit epilogue: restore ra/s0 and deallocate stack.
-    fn emit_epilogue_riscv(&mut self, frame_size: i64) {
-        let total_alloc = if self.is_variadic { frame_size + 64 } else { frame_size };
-        // When DynAlloca is used, SP was modified at runtime, so we must restore
-        // from s0 (frame pointer) rather than using SP-relative offsets.
-        if !self.state.has_dyn_alloca && Self::fits_imm12(-total_alloc) && Self::fits_imm12(total_alloc) {
-            // Small frame: restore from known sp offsets
-            // ra/s0 saved at sp + frame_size - 8/16 (relative to current sp)
-            self.state.emit_fmt(format_args!("    ld ra, {}(sp)", frame_size - 8));
-            self.state.emit_fmt(format_args!("    ld s0, {}(sp)", frame_size - 16));
-            self.state.emit_fmt(format_args!("    addi sp, sp, {}", total_alloc));
-        } else {
-            // Large frame or DynAlloca: restore from s0-relative offsets (always fit in imm12).
-            self.state.emit("    ld ra, -8(s0)");
-            self.state.emit("    ld t0, -16(s0)");
-            // For variadic functions, s0 + 64 = old_sp, so sp = s0 + 64
-            if self.is_variadic {
-                self.state.emit("    addi sp, s0, 64");
-            } else {
-                self.state.emit("    mv sp, s0");
-            }
-            self.state.emit("    mv s0, t0");
-        }
-    }
-
-    /// Load an operand into t0.
-    pub(super) fn operand_to_t0(&mut self, op: &Operand) {
-        match op {
-            Operand::Const(c) => {
-                self.state.reg_cache.invalidate_acc();
-                match c {
-                    IrConst::I8(v) => self.state.emit_fmt(format_args!("    li t0, {}", v)),
-                    IrConst::I16(v) => self.state.emit_fmt(format_args!("    li t0, {}", v)),
-                    IrConst::I32(v) => self.state.emit_fmt(format_args!("    li t0, {}", v)),
-                    IrConst::I64(v) => self.state.emit_fmt(format_args!("    li t0, {}", v)),
-                    IrConst::F32(v) => {
-                        let bits = v.to_bits() as u64;
-                        self.state.emit_fmt(format_args!("    li t0, {}", bits as i64));
-                    }
-                    IrConst::F64(v) => {
-                        let bits = v.to_bits();
-                        self.state.emit_fmt(format_args!("    li t0, {}", bits as i64));
-                    }
-                    // LongDouble at computation level is treated as F64
-                    IrConst::LongDouble(v, _) => {
-                        let bits = v.to_bits();
-                        self.state.emit_fmt(format_args!("    li t0, {}", bits as i64));
-                    }
-                    IrConst::I128(v) => self.state.emit_fmt(format_args!("    li t0, {}", *v as i64)), // truncate
-                    IrConst::Zero => self.state.emit("    li t0, 0"),
-                }
-            }
-            Operand::Value(v) => {
-                let is_alloca = self.state.is_alloca(v.0);
-                if self.state.reg_cache.acc_has(v.0, is_alloca) {
-                    return; // Cache hit — t0 already holds this value.
-                }
-                // Check if this value is register-allocated.
-                if let Some(&reg) = self.reg_assignments.get(&v.0) {
-                    let reg_name = callee_saved_name(reg);
-                    self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
-                    self.state.reg_cache.set_acc(v.0, false);
-                } else if let Some(slot) = self.state.get_slot(v.0) {
-                    if is_alloca {
-                        if let Some(align) = self.state.alloca_over_align(v.0) {
-                            // Over-aligned alloca: compute aligned address.
-                            // t0 = (slot_addr + align-1) & -align
-                            self.emit_addi_s0("t0", slot.0);
-                            self.state.emit_fmt(format_args!("    li t6, {}", align - 1));
-                            self.state.emit("    add t0, t0, t6");
-                            self.state.emit_fmt(format_args!("    li t6, -{}", align));
-                            self.state.emit("    and t0, t0, t6");
-                        } else {
-                            self.emit_addi_s0("t0", slot.0);
-                        }
-                    } else {
-                        self.emit_load_from_s0("t0", slot.0, "ld");
-                    }
-                    self.state.reg_cache.set_acc(v.0, is_alloca);
-                } else if self.state.reg_cache.acc_has(v.0, false) || self.state.reg_cache.acc_has(v.0, true) {
-                    // Value has no slot or register but is in the accumulator cache
-                    // (skip-slot optimization: immediately-consumed values stay in t0).
-                    return;
-                } else {
-                    self.state.emit("    li t0, 0");
-                    self.state.reg_cache.invalidate_acc();
-                }
-            }
-        }
-    }
-
-    /// Store t0 to a value's location (register or stack slot).
-    /// Register-only strategy: if the value has a callee-saved register assignment,
-    /// store ONLY to the register (skip the stack write). This eliminates redundant
-    /// memory stores for register-allocated values.
-    pub(super) fn store_t0_to(&mut self, dest: &Value) {
-        if let Some(&reg) = self.reg_assignments.get(&dest.0) {
-            // Value has a callee-saved register: store only to register, skip stack.
-            let reg_name = callee_saved_name(reg);
-            self.state.emit_fmt(format_args!("    mv {}, t0", reg_name));
-        } else if let Some(slot) = self.state.get_slot(dest.0) {
-            // No register: store to stack slot.
-            self.emit_store_to_s0("t0", slot.0, "sd");
-        }
-        self.state.reg_cache.set_acc(dest.0, false);
-    }
 
     // --- 128-bit integer helpers ---
     // Convention: 128-bit values use t0 (low 64 bits) and t1 (high 64 bits).
     // Stack slots for 128-bit values are 16 bytes: slot(s0) = low, slot+8(s0) = high.
 
-    /// Load a 128-bit operand into t0 (low) : t1 (high).
-    fn operand_to_t0_t1(&mut self, op: &Operand) {
-        match op {
-            Operand::Const(c) => {
-                match c {
-                    IrConst::I128(v) => {
-                        let low = *v as u64 as i64;
-                        let high = (*v >> 64) as u64 as i64;
-                        self.state.emit_fmt(format_args!("    li t0, {}", low));
-                        self.state.emit_fmt(format_args!("    li t1, {}", high));
-                    }
-                    IrConst::Zero => {
-                        self.state.emit("    li t0, 0");
-                        self.state.emit("    li t1, 0");
-                    }
-                    _ => {
-                        self.operand_to_t0(op);
-                        self.state.emit("    li t1, 0");
-                    }
-                }
-            }
-            Operand::Value(v) => {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    if self.state.is_alloca(v.0) {
-                        self.emit_addi_s0("t0", slot.0);
-                        self.state.emit("    li t1, 0");
-                    } else if self.state.is_i128_value(v.0) {
-                        // 128-bit value in 16-byte stack slot
-                        self.emit_load_from_s0("t0", slot.0, "ld");
-                        self.emit_load_from_s0("t1", slot.0 + 8, "ld");
-                    } else {
-                        // Non-i128 value (e.g. shift amount): load 8 bytes, zero high
-                        // Check register allocation first, since register-allocated values
-                        // may not have their stack slot written.
-                        if let Some(&reg) = self.reg_assignments.get(&v.0) {
-                            let reg_name = callee_saved_name(reg);
-                            self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
-                        } else {
-                            self.emit_load_from_s0("t0", slot.0, "ld");
-                        }
-                        self.state.emit("    li t1, 0");
-                    }
-                } else {
-                    // No stack slot: check register allocation
-                    if let Some(&reg) = self.reg_assignments.get(&v.0) {
-                        let reg_name = callee_saved_name(reg);
-                        self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
-                        self.state.emit("    li t1, 0");
-                    } else {
-                        self.state.emit("    li t0, 0");
-                        self.state.emit("    li t1, 0");
-                    }
-                }
-            }
-        }
-    }
-
-    /// Store t0 (low) : t1 (high) to a 128-bit value's stack slot.
-    fn store_t0_t1_to(&mut self, dest: &Value) {
-        if let Some(slot) = self.state.get_slot(dest.0) {
-            self.emit_store_to_s0("t0", slot.0, "sd");
-            self.emit_store_to_s0("t1", slot.0 + 8, "sd");
-        }
-    }
-
-    /// Prepare a 128-bit binary operation: load lhs into t3:t4, rhs into t5:t6.
-    fn prep_i128_binop(&mut self, lhs: &Operand, rhs: &Operand) {
-        self.operand_to_t0_t1(lhs);
-        self.state.emit("    mv t3, t0");
-        self.state.emit("    mv t4, t1");
-        self.operand_to_t0_t1(rhs);
-        self.state.emit("    mv t5, t0");
-        self.state.emit("    mv t6, t1");
-    }
-
     // emit_i128_binop and emit_i128_cmp use the shared default implementations
     // via ArchCodegen trait defaults, with per-op primitives defined in the trait impl above.
 
-    fn store_for_type(ty: IrType) -> &'static str {
-        match ty {
-            IrType::I8 | IrType::U8 => "sb",
-            IrType::I16 | IrType::U16 => "sh",
-            IrType::I32 | IrType::U32 | IrType::F32 => "sw",
-            _ => "sd",
-        }
-    }
-
-    fn load_for_type(ty: IrType) -> &'static str {
-        match ty {
-            IrType::I8 => "lb",
-            IrType::U8 => "lbu",
-            IrType::I16 => "lh",
-            IrType::U16 => "lhu",
-            IrType::I32 => "lw",
-            IrType::U32 | IrType::F32 => "lwu",
-            _ => "ld",
-        }
-    }
-
     // --- Intrinsic helpers (scalar emulation) ---
-
-    /// Load the address of a pointer Value into the given register.
-    pub(super) fn load_ptr_to_reg_rv(&mut self, ptr: &Value, reg: &str) {
-        if let Some(slot) = self.state.get_slot(ptr.0) {
-            if self.state.is_alloca(ptr.0) {
-                self.emit_addi_s0(reg, slot.0);
-            } else {
-                self.emit_load_from_s0(reg, slot.0, "ld");
-            }
-        }
-    }
 
 }
 
 const RISCV_ARG_REGS: [&str; 8] = ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"];
 
 impl ArchCodegen for RiscvCodegen {
+
+    // ==================== Core accessors ====================
     fn state(&mut self) -> &mut CodegenState { &mut self.state }
     fn state_ref(&self) -> &CodegenState { &self.state }
     fn ptr_directive(&self) -> PtrDirective { PtrDirective::Dword }
@@ -672,6 +250,8 @@ impl ArchCodegen for RiscvCodegen {
     /// `bnez` has +-4KB range which is easily exceeded in large functions.
     /// We use `beqz t0, .Lskip; jump target, t6; .Lskip:` instead,
     /// where `jump` has +-2GB range.
+
+    // ==================== Control flow ====================
     fn emit_branch_nonzero(&mut self, label: &str) {
         let skip = self.state.fresh_label("skip");
         self.state.emit_fmt(format_args!("    beqz t0, {}", skip));
@@ -749,6 +329,8 @@ impl ArchCodegen for RiscvCodegen {
         self.state.reg_cache.invalidate_all();
     }
 
+
+    // ==================== Stack frame ====================
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
         // For variadic functions, count the actual GP registers used by named
         // parameters. A struct that occupies 2 GP regs counts as 2, not 1.
@@ -1200,6 +782,8 @@ impl ArchCodegen for RiscvCodegen {
         }
     }
 
+
+    // ==================== Load/store/copy ====================
     fn emit_load_operand(&mut self, op: &Operand) {
         self.operand_to_t0(op);
     }
@@ -1256,6 +840,8 @@ impl ArchCodegen for RiscvCodegen {
 
     // ---- Primitives for shared default implementations ----
 
+
+    // ==================== i128 pair operations ====================
     fn emit_load_acc_pair(&mut self, op: &Operand) {
         self.operand_to_t0_t1(op);
     }
@@ -1329,6 +915,8 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    call __extenddftf2");
     }
 
+
+    // ==================== Return ====================
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {
         if let Some(val) = val {
             let ret_ty = self.current_return_type();
@@ -1370,6 +958,8 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    ret");
     }
 
+
+    // ==================== Memory operations ====================
     fn store_instr_for_type(&self, ty: IrType) -> &'static str {
         Self::store_for_type(ty)
     }
@@ -1660,6 +1250,8 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit_fmt(format_args!("{}:", done_label));
     }
 
+
+    // ==================== Unary operations ====================
     fn emit_float_neg(&mut self, ty: IrType) {
         if ty == IrType::F64 {
             self.state.emit("    fmv.d.x ft0, t0");
@@ -1702,6 +1294,8 @@ impl ArchCodegen for RiscvCodegen {
 
     // emit_float_binop uses the shared default implementation
 
+
+    // ==================== Integer ALU ====================
     fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         // Note: i128 dispatch is handled by the shared emit_binop default in traits.rs.
         self.operand_to_t0(lhs);
@@ -1756,6 +1350,8 @@ impl ArchCodegen for RiscvCodegen {
         self.store_t0_to(dest);
     }
 
+
+    // ==================== Comparisons ====================
     fn emit_f128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand) {
         crate::backend::f128_softfloat::f128_cmp(self, dest, op, lhs, rhs);
     }
@@ -1801,6 +1397,8 @@ impl ArchCodegen for RiscvCodegen {
     /// RISC-V B-type branches (beq/bne/blt/bge/bltu/bgeu) have +-4KB range,
     /// which is easily exceeded in large functions (e.g., oniguruma's match_at).
     /// We invert the condition to skip over a long-range `jump` pseudo.
+
+    // ==================== Fused compare-branch ====================
     fn emit_fused_cmp_branch(
         &mut self,
         op: IrCmpOp,
@@ -1849,6 +1447,8 @@ impl ArchCodegen for RiscvCodegen {
     ///   4. Load true_val into t0
     ///      skip:
     ///   5. Store t0 to dest
+
+    // ==================== Select ====================
     fn emit_select(&mut self, dest: &Value, cond: &Operand, true_val: &Operand, false_val: &Operand, _ty: IrType) {
         let label_id = self.state.next_label_id();
         let skip_label = format!(".Lsel_skip_{}", label_id);
@@ -1878,6 +1478,8 @@ impl ArchCodegen for RiscvCodegen {
 
     // emit_call: uses shared default from ArchCodegen trait (traits.rs)
 
+
+    // ==================== Calls ====================
     fn call_abi_config(&self) -> CallAbiConfig {
         CallAbiConfig {
             max_int_regs: 8, max_float_regs: 8,
@@ -2386,6 +1988,8 @@ impl ArchCodegen for RiscvCodegen {
         self.state.emit("    fmv.x.d t0, fa0");
     }
 
+
+    // ==================== Globals ====================
     fn emit_global_addr(&mut self, dest: &Value, name: &str) {
         if self.state.needs_got(name) {
             // PIC mode, external symbol: use `la` which expands to GOT-indirect
@@ -2419,6 +2023,8 @@ impl ArchCodegen for RiscvCodegen {
         self.store_t0_to(dest);
     }
 
+
+    // ==================== Casts ====================
     fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
         match classify_cast(from_ty, to_ty) {
             CastKind::Noop => {}
@@ -2625,6 +2231,8 @@ impl ArchCodegen for RiscvCodegen {
         crate::backend::traits::emit_cast_default(self, dest, src, from_ty, to_ty);
     }
 
+
+    // ==================== Variadic ====================
     fn emit_va_arg(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType) {
         // RISC-V LP64D: va_list is just a void* (pointer to the next arg on stack).
         // Load va_list pointer address into t1.
@@ -2756,6 +2364,8 @@ impl ArchCodegen for RiscvCodegen {
 
     // emit_label_addr: overridden above (near emit_global_addr) for local label addressing
 
+
+    // ==================== Multi-return values ====================
     fn emit_get_return_f64_second(&mut self, dest: &Value) {
         // After a function call, the second F64 return value is in fa1.
         // Store it to the dest stack slot, handling large offsets.
@@ -2822,6 +2432,8 @@ impl ArchCodegen for RiscvCodegen {
         // This should not be reached. If it is, do nothing.
     }
 
+
+    // ==================== Atomics ====================
     fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, ordering: AtomicOrdering) {
         // Load ptr into t1, val into t2
         self.operand_to_t0(ptr);
@@ -2993,10 +2605,14 @@ impl ArchCodegen for RiscvCodegen {
         }
     }
 
+
+    // ==================== Inline assembly & intrinsics ====================
     fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], clobbers: &[String], operand_types: &[IrType], goto_labels: &[(String, BlockId)], input_symbols: &[Option<String>]) {
         emit_inline_asm_common(self, template, outputs, inputs, clobbers, operand_types, goto_labels, input_symbols);
     }
 
+
+    // ==================== i128 copy ====================
     fn emit_copy_i128(&mut self, dest: &Value, src: &Operand) {
         self.operand_to_t0_t1(src);
         self.store_t0_t1_to(dest);
@@ -3049,6 +2665,8 @@ impl ArchCodegen for RiscvCodegen {
 
     // ---- i128 binop primitives ----
 
+
+    // ==================== i128 arithmetic ====================
     fn emit_i128_prep_binop(&mut self, lhs: &Operand, rhs: &Operand) {
         self.prep_i128_binop(lhs, rhs);
     }

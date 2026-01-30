@@ -38,31 +38,31 @@ use crate::{emit};
 /// Uses cdecl calling convention with no register allocation (accumulator-based).
 pub struct I686Codegen {
     pub(crate) state: CodegenState,
-    current_return_type: IrType,
+    pub(super) current_return_type: IrType,
     /// Whether the current function is variadic
-    is_variadic: bool,
+    pub(super) is_variadic: bool,
     /// Register allocation results (callee-saved registers: ebx, esi, edi)
-    reg_assignments: FxHashMap<u32, PhysReg>,
+    pub(super) reg_assignments: FxHashMap<u32, PhysReg>,
     /// Which callee-saved registers are used and need save/restore
-    used_callee_saved: Vec<PhysReg>,
+    pub(super) used_callee_saved: Vec<PhysReg>,
     /// Total stack bytes consumed by named parameters (for va_start computation).
     /// On i686 cdecl, all parameters are stack-passed, so this equals the total
     /// bytes of all named parameters including F64/I64 which take 8 bytes each.
-    va_named_stack_bytes: usize,
+    pub(super) va_named_stack_bytes: usize,
     /// Scratch register allocation index for inline asm GP registers.
     pub(super) asm_scratch_idx: usize,
     /// Scratch register allocation index for inline asm XMM registers.
     pub(super) asm_xmm_scratch_idx: usize,
     /// Whether the current function uses the fastcall calling convention.
     /// When true, the first two DWORD integer/pointer args are passed in ecx/edx.
-    is_fastcall: bool,
+    pub(super) is_fastcall: bool,
     /// For fastcall functions, the number of bytes of stack args the callee must pop on return.
-    fastcall_stack_cleanup: usize,
+    pub(super) fastcall_stack_cleanup: usize,
     /// For fastcall functions, how many leading params are passed in registers (0, 1, or 2).
-    fastcall_reg_param_count: usize,
+    pub(super) fastcall_reg_param_count: usize,
     /// Whether the __x86.get_pc_thunk.bx helper needs to be emitted.
     /// Set to true when any function uses PIC mode and references globals.
-    needs_pc_thunk_bx: bool,
+    pub(super) needs_pc_thunk_bx: bool,
 }
 
 // Callee-saved physical register indices for i686
@@ -71,7 +71,7 @@ const I686_CALLEE_SAVED: &[PhysReg] = &[PhysReg(0), PhysReg(1), PhysReg(2)];
 // No caller-saved registers available for allocation (eax/ecx/edx are scratch)
 const I686_CALLER_SAVED: &[PhysReg] = &[];
 
-fn phys_reg_name(reg: PhysReg) -> &'static str {
+pub(super) fn phys_reg_name(reg: PhysReg) -> &'static str {
     match reg.0 {
         0 => "ebx",
         1 => "esi",
@@ -81,7 +81,7 @@ fn phys_reg_name(reg: PhysReg) -> &'static str {
 }
 
 /// Map inline asm constraint register names to callee-saved PhysReg indices.
-fn i686_constraint_to_phys(constraint: &str) -> Option<PhysReg> {
+pub(super) fn i686_constraint_to_phys(constraint: &str) -> Option<PhysReg> {
     match constraint {
         "b" | "{ebx}" | "ebx" => Some(PhysReg(0)),
         "S" | "{esi}" | "esi" => Some(PhysReg(1)),
@@ -91,7 +91,7 @@ fn i686_constraint_to_phys(constraint: &str) -> Option<PhysReg> {
 }
 
 /// Map inline asm clobber register names to callee-saved PhysReg indices.
-fn i686_clobber_to_phys(clobber: &str) -> Option<PhysReg> {
+pub(super) fn i686_clobber_to_phys(clobber: &str) -> Option<PhysReg> {
     match clobber {
         "ebx" | "~{ebx}" => Some(PhysReg(0)),
         "esi" | "~{esi}" => Some(PhysReg(1)),
@@ -134,818 +134,16 @@ impl I686Codegen {
 
     // --- i686 helper methods ---
 
-    fn dest_reg(&self, dest: &Value) -> Option<PhysReg> {
+    pub(super) fn dest_reg(&self, dest: &Value) -> Option<PhysReg> {
         self.reg_assignments.get(&dest.0).copied()
-    }
-
-    /// Load the address of va_list storage into %edx.
-    ///
-    /// va_list_ptr is an IR value that holds a pointer to the va_list storage.
-    /// - If va_list_ptr is an alloca (local va_list variable), we LEA the slot
-    ///   address into %edx (the alloca IS the va_list storage).
-    /// - If va_list_ptr is a regular value (e.g., loaded pointer from va_list*),
-    ///   we load its value into %edx (the value IS the address of va_list storage).
-    fn load_va_list_addr_to_edx(&mut self, va_list_ptr: &Value) {
-        let is_alloca = self.state.is_alloca(va_list_ptr.0);
-        if let Some(phys) = self.reg_assignments.get(&va_list_ptr.0).copied() {
-            // Value is in a callee-saved register (non-alloca pointer value)
-            let reg = phys_reg_name(phys);
-            emit!(self.state, "    movl %{}, %edx", reg);
-        } else if let Some(slot) = self.state.get_slot(va_list_ptr.0) {
-            if is_alloca {
-                // Alloca: the slot IS the va_list; get the address of the slot
-                emit!(self.state, "    leal {}(%ebp), %edx", slot.0);
-            } else {
-                // Regular value: the slot holds a pointer to the va_list storage
-                emit!(self.state, "    movl {}(%ebp), %edx", slot.0);
-            }
-        }
-    }
-
-    /// Load an operand into %eax.
-    pub(super) fn operand_to_eax(&mut self, op: &Operand) {
-        // Check register cache - skip load if value is already in eax
-        if let Operand::Value(v) = op {
-            let is_alloca = self.state.is_alloca(v.0);
-            if self.state.reg_cache.acc_has(v.0, is_alloca) {
-                return;
-            }
-        }
-
-        match op {
-            Operand::Const(c) => {
-                match c {
-                    IrConst::I8(v) => emit!(self.state, "    movl ${}, %eax", *v as i32),
-                    IrConst::I16(v) => emit!(self.state, "    movl ${}, %eax", *v as i32),
-                    IrConst::I32(v) => {
-                        if *v == 0 {
-                            self.state.emit("    xorl %eax, %eax");
-                        } else {
-                            emit!(self.state, "    movl ${}, %eax", v);
-                        }
-                    }
-                    IrConst::I64(v) => {
-                        // On i686, we can only hold 32 bits in eax
-                        // Truncate to low 32 bits
-                        let low = *v as i32;
-                        if low == 0 {
-                            self.state.emit("    xorl %eax, %eax");
-                        } else {
-                            emit!(self.state, "    movl ${}, %eax", low);
-                        }
-                    }
-                    IrConst::I128(v) => {
-                        let low = *v as i32;
-                        emit!(self.state, "    movl ${}, %eax", low);
-                    }
-                    IrConst::F32(fval) => emit!(self.state, "    movl ${}, %eax", fval.to_bits() as i32),
-                    IrConst::F64(fval) => {
-                        // Store low 32 bits of the f64 bit pattern
-                        let low = fval.to_bits() as i32;
-                        emit!(self.state, "    movl ${}, %eax", low);
-                    }
-                    IrConst::LongDouble(_, bytes) => {
-                        // Load first 4 bytes of long double
-                        let low = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                        emit!(self.state, "    movl ${}, %eax", low);
-                    }
-                    IrConst::Zero => {
-                        self.state.emit("    xorl %eax, %eax");
-                    }
-                }
-                self.state.reg_cache.invalidate_acc();
-            }
-            Operand::Value(v) => {
-                let is_alloca = self.state.is_alloca(v.0);
-                // Check if value is in a callee-saved register (allocas are never register-allocated)
-                if let Some(phys) = self.reg_assignments.get(&v.0).copied() {
-                    let reg = phys_reg_name(phys);
-                    emit!(self.state, "    movl %{}, %eax", reg);
-                    self.state.reg_cache.set_acc(v.0, false);
-                } else if let Some(slot) = self.state.get_slot(v.0) {
-                    if is_alloca {
-                        // Alloca: the slot IS the data; load the address of the slot
-                        if let Some(align) = self.state.alloca_over_align(v.0) {
-                            // Over-aligned alloca: compute aligned address
-                            emit!(self.state, "    leal {}(%ebp), %eax", slot.0);
-                            emit!(self.state, "    addl ${}, %eax", align - 1);
-                            emit!(self.state, "    andl ${}, %eax", -(align as i32));
-                        } else {
-                            emit!(self.state, "    leal {}(%ebp), %eax", slot.0);
-                        }
-                    } else {
-                        // Regular value: load the value from the slot
-                        emit!(self.state, "    movl {}(%ebp), %eax", slot.0);
-                    }
-                    self.state.reg_cache.set_acc(v.0, is_alloca);
-                }
-            }
-        }
-    }
-
-    /// Load a 64-bit value's slot into %eax by OR'ing both 32-bit halves.
-    /// Used for truthiness testing of I64/U64/F64 values on i686, where a value
-    /// is nonzero iff either half is nonzero.
-    fn emit_wide_value_to_eax_ored(&mut self, value_id: u32) {
-        if let Some(slot) = self.state.get_slot(value_id) {
-            emit!(self.state, "    movl {}(%ebp), %eax", slot.0);
-            emit!(self.state, "    orl {}(%ebp), %eax", slot.0 + 4);
-        } else {
-            // Wide values (I64/F64) on i686 should always have stack slots since
-            // they can't fit in a single 32-bit register. Fall back to loading
-            // the low 32 bits only as a last resort.
-            self.operand_to_eax(&Operand::Value(Value(value_id)));
-        }
-    }
-
-    /// Load an operand into %ecx.
-    pub(super) fn operand_to_ecx(&mut self, op: &Operand) {
-        match op {
-            Operand::Const(c) => {
-                match c {
-                    IrConst::I8(v) => emit!(self.state, "    movl ${}, %ecx", *v as i32),
-                    IrConst::I16(v) => emit!(self.state, "    movl ${}, %ecx", *v as i32),
-                    IrConst::I32(v) => {
-                        if *v == 0 {
-                            self.state.emit("    xorl %ecx, %ecx");
-                        } else {
-                            emit!(self.state, "    movl ${}, %ecx", v);
-                        }
-                    }
-                    IrConst::I64(v) => {
-                        let low = *v as i32;
-                        if low == 0 {
-                            self.state.emit("    xorl %ecx, %ecx");
-                        } else {
-                            emit!(self.state, "    movl ${}, %ecx", low);
-                        }
-                    }
-                    IrConst::I128(v) => {
-                        let low = *v as i32;
-                        emit!(self.state, "    movl ${}, %ecx", low);
-                    }
-                    IrConst::F32(fval) => emit!(self.state, "    movl ${}, %ecx", fval.to_bits() as i32),
-                    IrConst::F64(fval) => {
-                        let low = fval.to_bits() as i32;
-                        emit!(self.state, "    movl ${}, %ecx", low);
-                    }
-                    IrConst::LongDouble(_, bytes) => {
-                        let low = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                        emit!(self.state, "    movl ${}, %ecx", low);
-                    }
-                    IrConst::Zero => {
-                        self.state.emit("    xorl %ecx, %ecx");
-                    }
-                }
-            }
-            Operand::Value(v) => {
-                let is_alloca = self.state.is_alloca(v.0);
-                if let Some(phys) = self.reg_assignments.get(&v.0).copied() {
-                    let reg = phys_reg_name(phys);
-                    emit!(self.state, "    movl %{}, %ecx", reg);
-                } else if let Some(slot) = self.state.get_slot(v.0) {
-                    if is_alloca {
-                        // Alloca: load the address of the slot
-                        if let Some(align) = self.state.alloca_over_align(v.0) {
-                            emit!(self.state, "    leal {}(%ebp), %ecx", slot.0);
-                            emit!(self.state, "    addl ${}, %ecx", align - 1);
-                            emit!(self.state, "    andl ${}, %ecx", -(align as i32));
-                        } else {
-                            emit!(self.state, "    leal {}(%ebp), %ecx", slot.0);
-                        }
-                    } else {
-                        emit!(self.state, "    movl {}(%ebp), %ecx", slot.0);
-                    }
-                } else if self.state.reg_cache.acc_has(v.0, false) || self.state.reg_cache.acc_has(v.0, true) {
-                    // Value is in accumulator (no stack slot) — move eax to ecx.
-                    self.state.emit("    movl %eax, %ecx");
-                } else {
-                    self.state.emit("    xorl %ecx, %ecx");
-                }
-            }
-        }
-    }
-
-    /// Store %eax to a value's destination (callee-saved register or stack slot).
-    pub(super) fn store_eax_to(&mut self, dest: &Value) {
-        if let Some(phys) = self.dest_reg(dest) {
-            let reg = phys_reg_name(phys);
-            emit!(self.state, "    movl %eax, %{}", reg);
-            self.state.reg_cache.invalidate_acc();
-        } else if let Some(slot) = self.state.get_slot(dest.0) {
-            emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
-            // If this dest is a wide value (I64/U64/F64), zero the upper 4 bytes.
-            // Wide values occupy 8-byte slots, and other paths (e.g. Copy from
-            // IrConst::I64) may write all 8 bytes. If we only write the low 4,
-            // the upper half retains stack garbage, which corrupts truthiness
-            // checks that OR both halves (emit_wide_value_to_eax_ored).
-            if self.state.wide_values.contains(&dest.0) {
-                emit!(self.state, "    movl $0, {}(%ebp)", slot.0 + 4);
-            }
-            self.state.reg_cache.set_acc(dest.0, false);
-        }
-    }
-
-    /// Return the store mnemonic for a given type.
-    fn mov_store_for_type(&self, ty: IrType) -> &'static str {
-        match ty {
-            IrType::I8 | IrType::U8 => "movb",
-            IrType::I16 | IrType::U16 => "movw",
-            // On i686, pointer-sized types use movl (32-bit)
-            _ => "movl",
-        }
-    }
-
-    /// Return the load mnemonic for a given type.
-    fn mov_load_for_type(&self, ty: IrType) -> &'static str {
-        match ty {
-            IrType::I8 => "movsbl",    // sign-extend byte to 32-bit
-            IrType::U8 => "movzbl",    // zero-extend byte to 32-bit
-            IrType::I16 => "movswl",   // sign-extend word to 32-bit
-            IrType::U16 => "movzwl",   // zero-extend word to 32-bit
-            // Everything 32-bit or larger uses movl
-            _ => "movl",
-        }
-    }
-
-    /// Return the type suffix for an operation.
-    fn type_suffix(&self, ty: IrType) -> &'static str {
-        match ty {
-            IrType::I8 | IrType::U8 => "b",
-            IrType::I16 | IrType::U16 => "w",
-            // On i686, the default (pointer-sized) is "l" (32-bit)
-            _ => "l",
-        }
-    }
-
-    /// Return the register name for eax sub-register based on type size.
-    fn eax_for_type(&self, ty: IrType) -> &'static str {
-        match ty {
-            IrType::I8 | IrType::U8 => "%al",
-            IrType::I16 | IrType::U16 => "%ax",
-            _ => "%eax",
-        }
-    }
-
-    /// Return the register name for ecx sub-register based on type size.
-    fn ecx_for_type(&self, ty: IrType) -> &'static str {
-        match ty {
-            IrType::I8 | IrType::U8 => "%cl",
-            IrType::I16 | IrType::U16 => "%cx",
-            _ => "%ecx",
-        }
-    }
-
-    /// Return the register name for edx sub-register based on type size.
-    fn edx_for_type(&self, ty: IrType) -> &'static str {
-        match ty {
-            IrType::I8 | IrType::U8 => "%dl",
-            IrType::I16 | IrType::U16 => "%dx",
-            _ => "%edx",
-        }
-    }
-
-    /// Check if a param type is eligible for fastcall register passing.
-    /// Only DWORD-sized or smaller integer/pointer types qualify.
-    fn is_fastcall_reg_eligible(&self, ty: IrType) -> bool {
-        matches!(ty, IrType::I8 | IrType::U8 | IrType::I16 | IrType::U16 |
-                     IrType::I32 | IrType::U32 | IrType::Ptr)
-    }
-
-    /// Count how many leading params are passed in registers for fastcall (max 2).
-    fn count_fastcall_reg_params(&self, func: &IrFunction) -> usize {
-        let mut count = 0;
-        for param in &func.params {
-            if count >= 2 { break; }
-            let ty = param.ty;
-            if self.is_fastcall_reg_eligible(ty) {
-                count += 1;
-            } else {
-                break; // non-eligible param stops register assignment
-            }
-        }
-        count
-    }
-
-    /// Check if an operand is a constant that fits in an i32 immediate.
-    fn const_as_imm32(op: &Operand) -> Option<i64> {
-        match op {
-            Operand::Const(c) => {
-                match c {
-                    IrConst::I8(v) => Some(*v as i64),
-                    IrConst::I16(v) => Some(*v as i64),
-                    IrConst::I32(v) => Some(*v as i64),
-                    IrConst::I64(v) => {
-                        // On i686, check if the value fits in 32 bits
-                        if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
-                            Some(*v)
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// Extract an immediate integer value from an operand.
-    /// Used for SSE/AES instructions that require compile-time immediate operands.
-    pub(super) fn operand_to_imm_i64(op: &Operand) -> i64 {
-        match op {
-            Operand::Const(c) => match c {
-                IrConst::I8(v) => *v as i64,
-                IrConst::I16(v) => *v as i64,
-                IrConst::I32(v) => *v as i64,
-                IrConst::I64(v) => *v,
-                _ => 0,
-            },
-            Operand::Value(_) => 0,
-        }
-    }
-
-    /// Load an F128 (long double) operand onto the x87 FPU stack.
-    pub(super) fn emit_f128_load_to_x87(&mut self, op: &Operand) {
-        match op {
-            Operand::Value(v) => {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    emit!(self.state, "    fldt {}(%ebp)", slot.0);
-                }
-            }
-            Operand::Const(IrConst::LongDouble(_, bytes)) => {
-                // Convert f128 (IEEE binary128) bytes to x87 80-bit format for fldt
-                let x87 = crate::common::long_double::f128_bytes_to_x87_bytes(bytes);
-                let dword0 = i32::from_le_bytes([x87[0], x87[1], x87[2], x87[3]]);
-                let dword1 = i32::from_le_bytes([x87[4], x87[5], x87[6], x87[7]]);
-                let word2 = i16::from_le_bytes([x87[8], x87[9]]) as i32;
-                self.state.emit("    subl $12, %esp");
-                emit!(self.state, "    movl ${}, (%esp)", dword0);
-                emit!(self.state, "    movl ${}, 4(%esp)", dword1);
-                emit!(self.state, "    movw ${}, 8(%esp)", word2);
-                self.state.emit("    fldt (%esp)");
-                self.state.emit("    addl $12, %esp");
-            }
-            Operand::Const(IrConst::F64(fval)) => {
-                // Convert f64 to x87: push to stack as f64, fld, convert
-                let bits = fval.to_bits();
-                let low = (bits & 0xFFFFFFFF) as i32;
-                let high = ((bits >> 32) & 0xFFFFFFFF) as i32;
-                self.state.emit("    subl $8, %esp");
-                emit!(self.state, "    movl ${}, (%esp)", low);
-                emit!(self.state, "    movl ${}, 4(%esp)", high);
-                self.state.emit("    fldl (%esp)");
-                self.state.emit("    addl $8, %esp");
-            }
-            Operand::Const(IrConst::F32(fval)) => {
-                emit!(self.state, "    movl ${}, %eax", fval.to_bits() as i32);
-                self.state.emit("    pushl %eax");
-                self.state.emit("    flds (%esp)");
-                self.state.emit("    addl $4, %esp");
-            }
-            _ => {
-                self.operand_to_eax(op);
-                // Fallback: treat as integer, push to stack
-                self.state.emit("    pushl %eax");
-                self.state.emit("    flds (%esp)");
-                self.state.emit("    addl $4, %esp");
-            }
-        }
-    }
-
-    /// Load an F64 (double) operand onto the x87 FPU stack.
-    /// F64 values occupy 8-byte stack slots on i686, so we use fldl to load
-    /// them directly from memory rather than going through the 32-bit accumulator.
-    pub(super) fn emit_f64_load_to_x87(&mut self, op: &Operand) {
-        match op {
-            Operand::Value(v) => {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    emit!(self.state, "    fldl {}(%ebp)", slot.0);
-                }
-            }
-            Operand::Const(IrConst::F64(fval)) => {
-                let bits = fval.to_bits();
-                let low = (bits & 0xFFFFFFFF) as i32;
-                let high = ((bits >> 32) & 0xFFFFFFFF) as i32;
-                self.state.emit("    subl $8, %esp");
-                emit!(self.state, "    movl ${}, (%esp)", low);
-                emit!(self.state, "    movl ${}, 4(%esp)", high);
-                self.state.emit("    fldl (%esp)");
-                self.state.emit("    addl $8, %esp");
-            }
-            Operand::Const(IrConst::F32(fval)) => {
-                emit!(self.state, "    movl ${}, %eax", fval.to_bits() as i32);
-                self.state.emit("    pushl %eax");
-                self.state.emit("    flds (%esp)");
-                self.state.emit("    addl $4, %esp");
-            }
-            Operand::Const(IrConst::Zero) => {
-                self.state.emit("    fldz");
-            }
-            _ => {
-                // Fallback: load integer bits and convert
-                self.operand_to_eax(op);
-                self.state.emit("    pushl %eax");
-                self.state.emit("    fildl (%esp)");
-                self.state.emit("    addl $4, %esp");
-            }
-        }
-    }
-
-    /// Store the x87 st(0) value as F64 into a destination stack slot.
-    /// Pops st(0).
-    pub(super) fn emit_f64_store_from_x87(&mut self, dest: &Value) {
-        if let Some(slot) = self.state.get_slot(dest.0) {
-            emit!(self.state, "    fstpl {}(%ebp)", slot.0);
-        } else {
-            // No slot available, pop x87 stack to discard
-            self.state.emit("    fstp %st(0)");
-        }
     }
 
     // --- 64-bit atomic helpers using cmpxchg8b (for I64/U64/F64 on i686) ---
 
-    /// Check if a type requires 64-bit atomic handling on i686 (needs cmpxchg8b).
-    fn is_atomic_wide(&self, ty: IrType) -> bool {
-        matches!(ty, IrType::I64 | IrType::U64 | IrType::F64)
-    }
-
-    /// 64-bit atomic RMW using lock cmpxchg8b loop.
-    ///
-    /// cmpxchg8b compares edx:eax with 8 bytes at memory location.
-    /// If equal, stores ecx:ebx to memory. If not, loads memory into edx:eax.
-    /// We use a loop: load old value, compute new value, try cmpxchg8b.
-    ///
-    /// Register plan:
-    ///   esi = pointer to atomic variable (saved/restored)
-    ///   edx:eax = old (expected) value
-    ///   ecx:ebx = new (desired) value
-    ///   Stack: saved operand value (8 bytes)
-    fn emit_atomic_rmw_wide(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand,
-                            val: &Operand) {
-        // Save callee-saved registers we need to clobber
-        self.state.emit("    pushl %ebx");
-        self.state.emit("    pushl %esi");
-
-        // Load pointer into esi
-        self.operand_to_eax(ptr);
-        self.state.emit("    movl %eax, %esi");
-
-        // Load 64-bit operand value onto stack (8 bytes)
-        self.emit_load_acc_pair(val);
-        self.state.emit("    pushl %edx");  // high word at 4(%esp)
-        self.state.emit("    pushl %eax");  // low word at (%esp)
-
-        // Load current value from memory into edx:eax
-        self.state.emit("    movl (%esi), %eax");
-        self.state.emit("    movl 4(%esi), %edx");
-
-        match op {
-            AtomicRmwOp::Xchg => {
-                // For exchange, the desired value is the operand (constant across retries)
-                self.state.emit("    movl (%esp), %ebx");
-                self.state.emit("    movl 4(%esp), %ecx");
-                let loop_label = format!(".Latomic_{}", self.state.next_label_id());
-                emit!(self.state, "{}:", loop_label);
-                self.state.emit("    lock cmpxchg8b (%esi)");
-                emit!(self.state, "    jne {}", loop_label);
-            }
-            AtomicRmwOp::Add => {
-                let loop_label = format!(".Latomic_{}", self.state.next_label_id());
-                emit!(self.state, "{}:", loop_label);
-                self.state.emit("    movl %eax, %ebx");
-                self.state.emit("    movl %edx, %ecx");
-                self.state.emit("    addl (%esp), %ebx");
-                self.state.emit("    adcl 4(%esp), %ecx");
-                self.state.emit("    lock cmpxchg8b (%esi)");
-                emit!(self.state, "    jne {}", loop_label);
-            }
-            AtomicRmwOp::Sub => {
-                let loop_label = format!(".Latomic_{}", self.state.next_label_id());
-                emit!(self.state, "{}:", loop_label);
-                self.state.emit("    movl %eax, %ebx");
-                self.state.emit("    movl %edx, %ecx");
-                self.state.emit("    subl (%esp), %ebx");
-                self.state.emit("    sbbl 4(%esp), %ecx");
-                self.state.emit("    lock cmpxchg8b (%esi)");
-                emit!(self.state, "    jne {}", loop_label);
-            }
-            AtomicRmwOp::And => {
-                let loop_label = format!(".Latomic_{}", self.state.next_label_id());
-                emit!(self.state, "{}:", loop_label);
-                self.state.emit("    movl %eax, %ebx");
-                self.state.emit("    movl %edx, %ecx");
-                self.state.emit("    andl (%esp), %ebx");
-                self.state.emit("    andl 4(%esp), %ecx");
-                self.state.emit("    lock cmpxchg8b (%esi)");
-                emit!(self.state, "    jne {}", loop_label);
-            }
-            AtomicRmwOp::Or => {
-                let loop_label = format!(".Latomic_{}", self.state.next_label_id());
-                emit!(self.state, "{}:", loop_label);
-                self.state.emit("    movl %eax, %ebx");
-                self.state.emit("    movl %edx, %ecx");
-                self.state.emit("    orl (%esp), %ebx");
-                self.state.emit("    orl 4(%esp), %ecx");
-                self.state.emit("    lock cmpxchg8b (%esi)");
-                emit!(self.state, "    jne {}", loop_label);
-            }
-            AtomicRmwOp::Xor => {
-                let loop_label = format!(".Latomic_{}", self.state.next_label_id());
-                emit!(self.state, "{}:", loop_label);
-                self.state.emit("    movl %eax, %ebx");
-                self.state.emit("    movl %edx, %ecx");
-                self.state.emit("    xorl (%esp), %ebx");
-                self.state.emit("    xorl 4(%esp), %ecx");
-                self.state.emit("    lock cmpxchg8b (%esi)");
-                emit!(self.state, "    jne {}", loop_label);
-            }
-            AtomicRmwOp::Nand => {
-                let loop_label = format!(".Latomic_{}", self.state.next_label_id());
-                emit!(self.state, "{}:", loop_label);
-                self.state.emit("    movl %eax, %ebx");
-                self.state.emit("    movl %edx, %ecx");
-                self.state.emit("    andl (%esp), %ebx");
-                self.state.emit("    andl 4(%esp), %ecx");
-                self.state.emit("    notl %ebx");
-                self.state.emit("    notl %ecx");
-                self.state.emit("    lock cmpxchg8b (%esi)");
-                emit!(self.state, "    jne {}", loop_label);
-            }
-            AtomicRmwOp::TestAndSet => {
-                // For 64-bit test-and-set, set the low byte to 1, rest to 0
-                self.state.emit("    movl $1, %ebx");
-                self.state.emit("    xorl %ecx, %ecx");
-                let loop_label = format!(".Latomic_{}", self.state.next_label_id());
-                emit!(self.state, "{}:", loop_label);
-                self.state.emit("    lock cmpxchg8b (%esi)");
-                emit!(self.state, "    jne {}", loop_label);
-            }
-        }
-
-        // Clean up stack (remove 8-byte operand value)
-        self.state.emit("    addl $8, %esp");
-        // Restore callee-saved registers
-        self.state.emit("    popl %esi");
-        self.state.emit("    popl %ebx");
-
-        // Result (old value) is in edx:eax — store to dest's 64-bit stack slot
-        self.state.reg_cache.invalidate_acc();
-        self.emit_store_acc_pair(dest);
-    }
-
-    /// 64-bit atomic compare-exchange using lock cmpxchg8b.
-    ///
-    /// cmpxchg8b: compares edx:eax with 8 bytes at memory.
-    /// If equal, stores ecx:ebx to memory and sets ZF.
-    /// If not equal, loads memory into edx:eax and clears ZF.
-    fn emit_atomic_cmpxchg_wide(&mut self, dest: &Value, ptr: &Operand, expected: &Operand,
-                                desired: &Operand, returns_bool: bool) {
-        // Save callee-saved registers
-        self.state.emit("    pushl %ebx");
-        self.state.emit("    pushl %esi");
-
-        // Load pointer into esi
-        self.operand_to_eax(ptr);
-        self.state.emit("    movl %eax, %esi");
-
-        // Load expected into edx:eax, save on stack temporarily
-        self.emit_load_acc_pair(expected);
-        self.state.emit("    pushl %edx");
-        self.state.emit("    pushl %eax");
-
-        // Load desired into ecx:ebx
-        self.emit_load_acc_pair(desired);
-        self.state.emit("    movl %eax, %ebx");
-        self.state.emit("    movl %edx, %ecx");
-
-        // Restore expected into edx:eax
-        self.state.emit("    popl %eax");
-        self.state.emit("    popl %edx");
-
-        // Execute cmpxchg8b
-        self.state.emit("    lock cmpxchg8b (%esi)");
-
-        if returns_bool {
-            self.state.emit("    sete %al");
-            self.state.emit("    movzbl %al, %eax");
-            // Restore callee-saved registers
-            self.state.emit("    popl %esi");
-            self.state.emit("    popl %ebx");
-            self.state.reg_cache.invalidate_acc();
-            self.store_eax_to(dest);
-        } else {
-            // Result (old value) is in edx:eax
-            // Restore callee-saved registers
-            self.state.emit("    popl %esi");
-            self.state.emit("    popl %ebx");
-            self.state.reg_cache.invalidate_acc();
-            self.emit_store_acc_pair(dest);
-        }
-    }
-
-    /// 64-bit atomic load using cmpxchg8b with expected == desired == 0.
-    ///
-    /// cmpxchg8b always loads the current memory value into edx:eax on failure,
-    /// so we set edx:eax = ecx:ebx = 0 and execute cmpxchg8b. If the memory
-    /// happens to be 0, the exchange writes 0 (no change). If non-zero,
-    /// we get the current value in edx:eax without modifying memory.
-    fn emit_atomic_load_wide(&mut self, dest: &Value, ptr: &Operand) {
-        self.state.emit("    pushl %ebx");
-        self.state.emit("    pushl %esi");
-
-        self.operand_to_eax(ptr);
-        self.state.emit("    movl %eax, %esi");
-
-        // Set all registers to zero: edx:eax = ecx:ebx = 0
-        self.state.emit("    xorl %eax, %eax");
-        self.state.emit("    xorl %edx, %edx");
-        self.state.emit("    xorl %ebx, %ebx");
-        self.state.emit("    xorl %ecx, %ecx");
-        // lock cmpxchg8b: if (%esi) == 0 -> store 0 (no change), else load into edx:eax
-        self.state.emit("    lock cmpxchg8b (%esi)");
-
-        self.state.emit("    popl %esi");
-        self.state.emit("    popl %ebx");
-
-        self.state.reg_cache.invalidate_acc();
-        self.emit_store_acc_pair(dest);
-    }
-
-    /// 64-bit atomic store using a cmpxchg8b loop.
-    ///
-    /// There is no single instruction for atomic 64-bit stores on i686, so we
-    /// use a cmpxchg8b loop: read current value, try to replace with desired.
-    fn emit_atomic_store_wide(&mut self, ptr: &Operand, val: &Operand) {
-        self.state.emit("    pushl %ebx");
-        self.state.emit("    pushl %esi");
-
-        // Load pointer into esi
-        self.operand_to_eax(ptr);
-        self.state.emit("    movl %eax, %esi");
-
-        // Load desired value into ecx:ebx
-        self.emit_load_acc_pair(val);
-        self.state.emit("    movl %eax, %ebx");
-        self.state.emit("    movl %edx, %ecx");
-
-        // Load current value from memory into edx:eax (initial guess for cmpxchg8b)
-        self.state.emit("    movl (%esi), %eax");
-        self.state.emit("    movl 4(%esi), %edx");
-
-        let loop_label = format!(".Latomic_{}", self.state.next_label_id());
-        emit!(self.state, "{}:", loop_label);
-        self.state.emit("    lock cmpxchg8b (%esi)");
-        emit!(self.state, "    jne {}", loop_label);
-
-        self.state.emit("    popl %esi");
-        self.state.emit("    popl %ebx");
-        self.state.reg_cache.invalidate_acc();
-    }
-
-    /// Emit comments for callee-saved registers clobbered by inline asm.
-    fn emit_callee_saved_clobber_annotations(&mut self, clobbers: &[String]) {
-        for clobber in clobbers {
-            let reg_name = match clobber.as_str() {
-                "ebx" | "bx" | "bl" | "bh" => Some("%ebx"),
-                "esi" | "si" => Some("%esi"),
-                "edi" | "di" => Some("%edi"),
-                _ => None,
-            };
-            if let Some(reg) = reg_name {
-                self.state.emit_fmt(format_args!("    # asm clobber {}", reg));
-            }
-        }
-    }
-
-    /// Emit a fastcall function call on i686.
-    /// First two DWORD (int/ptr) args go in ECX, EDX.
-    /// Remaining args go on the stack (right-to-left push order).
-    /// The callee pops stack args, so caller does NOT adjust ESP after call.
-    fn emit_fastcall(&mut self, args: &[Operand], arg_types: &[IrType],
-                     direct_name: Option<&str>, func_ptr: Option<&Operand>,
-                     dest: Option<Value>, return_type: IrType) {
-        let indirect = func_ptr.is_some() && direct_name.is_none();
-
-        // Determine which args go in registers vs stack.
-        let mut reg_count = 0usize;
-        for ty in arg_types.iter() {
-            if reg_count >= 2 { break; }
-            if self.is_fastcall_reg_eligible(*ty) {
-                reg_count += 1;
-            } else {
-                break;
-            }
-        }
-
-        // Compute stack space for overflow args (args beyond the register ones).
-        let mut stack_bytes = 0usize;
-        for i in reg_count..args.len() {
-            let ty = if i < arg_types.len() { arg_types[i] } else { IrType::I32 };
-            match ty {
-                IrType::F64 | IrType::I64 | IrType::U64 => stack_bytes += 8,
-                IrType::F128 => stack_bytes += 12,
-                _ if is_i128_type(ty) => stack_bytes += 16,
-                _ => stack_bytes += 4,
-            }
-        }
-        // Align to 16 bytes
-        let stack_arg_space = (stack_bytes + 15) & !15;
-
-        // Spill indirect function pointer before stack manipulation.
-        if indirect {
-            self.emit_call_spill_fptr(func_ptr.expect("indirect call requires func_ptr"));
-        }
-
-        // Phase 1: Allocate stack space and write stack args.
-        if stack_arg_space > 0 {
-            emit!(self.state, "    subl ${}, %esp", stack_arg_space);
-        }
-
-        // Write stack args (skipping register args).
-        let mut offset = 0i64;
-        for i in reg_count..args.len() {
-            let ty = if i < arg_types.len() { arg_types[i] } else { IrType::I32 };
-            let arg = &args[i];
-
-            match ty {
-                IrType::I64 | IrType::U64 | IrType::F64 => {
-                    self.emit_load_acc_pair(arg);
-                    emit!(self.state, "    movl %eax, {}(%esp)", offset);
-                    emit!(self.state, "    movl %edx, {}(%esp)", offset + 4);
-                    offset += 8;
-                }
-                IrType::F128 => {
-                    // Load F128 value to x87 and store to stack
-                    self.emit_f128_load_to_x87(arg);
-                    emit!(self.state, "    fstpt {}(%esp)", offset);
-                    offset += 12;
-                }
-                _ if is_i128_type(ty) => {
-                    // Copy 16 bytes
-                    if let Operand::Value(v) = arg {
-                        if let Some(slot) = self.state.get_slot(v.0) {
-                            for j in (0..16).step_by(4) {
-                                emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + j as i64);
-                                emit!(self.state, "    movl %eax, {}(%esp)", offset + j as i64);
-                            }
-                        }
-                    }
-                    offset += 16;
-                }
-                _ => {
-                    self.emit_load_operand(arg);
-                    emit!(self.state, "    movl %eax, {}(%esp)", offset);
-                    offset += 4;
-                }
-            }
-        }
-
-        // Phase 2: Load register args into ECX and EDX.
-        // Load EDX first (arg 1) then ECX (arg 0), because loading arg 0
-        // may clobber EDX if it involves function calls.
-        if reg_count >= 2 {
-            self.emit_load_operand(&args[1]);
-            self.state.emit("    movl %eax, %edx");
-        }
-        if reg_count >= 1 {
-            self.emit_load_operand(&args[0]);
-            self.state.emit("    movl %eax, %ecx");
-        }
-
-        // Phase 3: Emit the call.
-        if indirect {
-            // Reload function pointer from spill slot
-            let fptr_offset = stack_arg_space as i64;
-            emit!(self.state, "    movl {}(%esp), %eax", fptr_offset);
-            self.state.emit("    call *%eax");
-        } else if let Some(name) = direct_name {
-            emit!(self.state, "    call {}", name);
-        }
-
-        // Phase 4: For indirect calls, pop the spilled function pointer.
-        // Note: callee already cleaned up the stack args, so we only need
-        // to handle the fptr spill and alignment padding.
-        if indirect {
-            self.state.emit("    addl $4, %esp"); // pop fptr spill
-        }
-        // Clean up alignment padding (the difference between actual stack bytes and aligned)
-        let padding = stack_arg_space - stack_bytes;
-        if padding > 0 {
-            emit!(self.state, "    addl ${}, %esp", padding);
-        }
-
-        // Phase 5: Store return value.
-        if let Some(dest) = dest {
-            self.emit_call_store_result(&dest, return_type);
-        }
-
-        self.state.reg_cache.invalidate_acc();
-    }
 }
 
 // Helper functions for ALU mnemonics
-fn alu_mnemonic(op: IrBinOp) -> &'static str {
+pub(super) fn alu_mnemonic(op: IrBinOp) -> &'static str {
     match op {
         IrBinOp::Add => "add",
         IrBinOp::Sub => "sub",
@@ -956,7 +154,7 @@ fn alu_mnemonic(op: IrBinOp) -> &'static str {
     }
 }
 
-fn shift_mnemonic(op: IrBinOp) -> &'static str {
+pub(super) fn shift_mnemonic(op: IrBinOp) -> &'static str {
     match op {
         IrBinOp::Shl => "shll",
         IrBinOp::AShr => "sarl",
@@ -970,214 +168,13 @@ fn shift_mnemonic(op: IrBinOp) -> &'static str {
 // The result of clz/ctz/popcount is a small integer (0-64) that fits in eax,
 // so we zero edx to produce a proper I64 result.
 impl I686Codegen {
-    /// clzll(x): Count leading zeros of 64-bit value in eax:edx.
-    /// If high half (edx) != 0, result = lzcnt(edx).
-    /// Otherwise, result = 32 + lzcnt(eax).
-    fn emit_i64_clz(&mut self) {
-        let done = self.state.fresh_label("clz64_done");
-        let hi_zero = self.state.fresh_label("clz64_hi_zero");
-        // Test high half
-        self.state.emit("    testl %edx, %edx");
-        emit!(self.state, "    je {}", hi_zero);
-        // High half is non-zero: result = lzcnt(edx)
-        self.state.emit("    lzcntl %edx, %eax");
-        self.state.emit("    xorl %edx, %edx");
-        emit!(self.state, "    jmp {}", done);
-        // High half is zero: result = 32 + lzcnt(eax)
-        emit!(self.state, "{}:", hi_zero);
-        self.state.emit("    lzcntl %eax, %eax");
-        self.state.emit("    addl $32, %eax");
-        self.state.emit("    xorl %edx, %edx");
-        emit!(self.state, "{}:", done);
-    }
-
-    /// ctzll(x): Count trailing zeros of 64-bit value in eax:edx.
-    /// If low half (eax) != 0, result = tzcnt(eax).
-    /// Otherwise, result = 32 + tzcnt(edx).
-    fn emit_i64_ctz(&mut self) {
-        let done = self.state.fresh_label("ctz64_done");
-        let lo_zero = self.state.fresh_label("ctz64_lo_zero");
-        // Test low half
-        self.state.emit("    testl %eax, %eax");
-        emit!(self.state, "    je {}", lo_zero);
-        // Low half is non-zero: result = tzcnt(eax)
-        self.state.emit("    tzcntl %eax, %eax");
-        self.state.emit("    xorl %edx, %edx");
-        emit!(self.state, "    jmp {}", done);
-        // Low half is zero: result = 32 + tzcnt(edx)
-        emit!(self.state, "{}:", lo_zero);
-        self.state.emit("    tzcntl %edx, %eax");
-        self.state.emit("    addl $32, %eax");
-        self.state.emit("    xorl %edx, %edx");
-        emit!(self.state, "{}:", done);
-    }
-
-    /// popcountll(x): Population count of 64-bit value in eax:edx.
-    /// result = popcount(eax) + popcount(edx)
-    fn emit_i64_popcount(&mut self) {
-        self.state.emit("    popcntl %edx, %ecx");
-        self.state.emit("    popcntl %eax, %eax");
-        self.state.emit("    addl %ecx, %eax");
-        self.state.emit("    xorl %edx, %edx");
-    }
-
-    /// bswap64(x): Byte-swap 64-bit value in eax:edx.
-    /// result_lo = bswap(high), result_hi = bswap(low)
-    fn emit_i64_bswap(&mut self) {
-        // eax=low, edx=high
-        // bswap each half, then swap: new_eax = bswap(edx), new_edx = bswap(eax)
-        self.state.emit("    bswapl %eax");
-        self.state.emit("    bswapl %edx");
-        self.state.emit("    xchgl %eax, %edx");
-    }
-
-    /// Copy `n_bytes` from stack slot to call stack area, 4 bytes at a time.
-    fn emit_copy_slot_to_stack(&mut self, slot_offset: i64, stack_offset: usize, n_bytes: usize) {
-        let mut copied = 0usize;
-        while copied + 4 <= n_bytes {
-            emit!(self.state, "    movl {}(%ebp), %eax", slot_offset + copied as i64);
-            emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + copied);
-            copied += 4;
-        }
-        while copied < n_bytes {
-            emit!(self.state, "    movb {}(%ebp), %al", slot_offset + copied as i64);
-            emit!(self.state, "    movb %al, {}(%esp)", stack_offset + copied);
-            copied += 1;
-        }
-        self.state.reg_cache.invalidate_acc();
-    }
-
-    /// Fallback: store eax to stack, zero-fill remaining bytes.
-    fn emit_eax_to_stack_zeroed(&mut self, arg: &Operand, stack_offset: usize, total_bytes: usize) {
-        self.operand_to_eax(arg);
-        emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
-        for j in (4..total_bytes).step_by(4) {
-            emit!(self.state, "    movl $0, {}(%esp)", stack_offset + j);
-        }
-    }
-
-    /// Emit I128 argument to call stack (16 bytes).
-    fn emit_call_i128_stack_arg(&mut self, arg: &Operand, stack_offset: usize) {
-        if let Operand::Value(v) = arg {
-            if let Some(slot) = self.state.get_slot(v.0) {
-                self.emit_copy_slot_to_stack(slot.0, stack_offset, 16);
-            } else {
-                self.emit_eax_to_stack_zeroed(arg, stack_offset, 16);
-            }
-        }
-    }
-
-    /// Emit F128 (long double) argument to call stack (12 bytes).
-    fn emit_call_f128_stack_arg(&mut self, arg: &Operand, stack_offset: usize) {
-        match arg {
-            Operand::Value(v) => {
-                if self.state.f128_direct_slots.contains(&v.0) {
-                    if let Some(slot) = self.state.get_slot(v.0) {
-                        emit!(self.state, "    fldt {}(%ebp)", slot.0);
-                        emit!(self.state, "    fstpt {}(%esp)", stack_offset);
-                    }
-                } else if let Some(slot) = self.state.get_slot(v.0) {
-                    self.emit_copy_slot_to_stack(slot.0, stack_offset, 12);
-                } else {
-                    self.emit_eax_to_stack_zeroed(arg, stack_offset, 12);
-                }
-            }
-            Operand::Const(IrConst::LongDouble(_, bytes)) => {
-                let x87 = crate::common::long_double::f128_bytes_to_x87_bytes(bytes);
-                let dword0 = i32::from_le_bytes([x87[0], x87[1], x87[2], x87[3]]);
-                let dword1 = i32::from_le_bytes([x87[4], x87[5], x87[6], x87[7]]);
-                let word2 = i16::from_le_bytes([x87[8], x87[9]]) as i32;
-                emit!(self.state, "    movl ${}, {}(%esp)", dword0, stack_offset);
-                emit!(self.state, "    movl ${}, {}(%esp)", dword1, stack_offset + 4);
-                emit!(self.state, "    movw ${}, {}(%esp)", word2, stack_offset + 8);
-            }
-            Operand::Const(IrConst::F64(fval)) => {
-                let bits = fval.to_bits();
-                let low = (bits & 0xFFFFFFFF) as i32;
-                let high = ((bits >> 32) & 0xFFFFFFFF) as i32;
-                self.state.emit("    subl $8, %esp");
-                emit!(self.state, "    movl ${}, (%esp)", low);
-                emit!(self.state, "    movl ${}, 4(%esp)", high);
-                self.state.emit("    fldl (%esp)");
-                self.state.emit("    addl $8, %esp");
-                emit!(self.state, "    fstpt {}(%esp)", stack_offset);
-            }
-            _ => {
-                self.emit_eax_to_stack_zeroed(arg, stack_offset, 12);
-            }
-        }
-    }
-
-    /// Emit struct-by-value argument to call stack.
-    fn emit_call_struct_stack_arg(&mut self, arg: &Operand, stack_offset: usize, size: usize) {
-        if let Operand::Value(v) = arg {
-            if self.state.is_alloca(v.0) {
-                if let Some(slot) = self.state.get_slot(v.0) {
-                    self.emit_copy_slot_to_stack(slot.0, stack_offset, size);
-                }
-            } else {
-                // Non-alloca: value is a pointer to struct data.
-                self.operand_to_eax(arg);
-                self.state.emit("    movl %eax, %ecx");
-                let mut copied = 0usize;
-                while copied + 4 <= size {
-                    emit!(self.state, "    movl {}(%ecx), %eax", copied);
-                    emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + copied);
-                    copied += 4;
-                }
-                while copied < size {
-                    emit!(self.state, "    movb {}(%ecx), %al", copied);
-                    emit!(self.state, "    movb %al, {}(%esp)", stack_offset + copied);
-                    copied += 1;
-                }
-                self.state.reg_cache.invalidate_acc();
-            }
-        }
-    }
-
-    /// Emit 8-byte scalar (F64/I64/U64) to call stack.
-    fn emit_call_8byte_stack_arg(&mut self, arg: &Operand, ty: IrType, stack_offset: usize) {
-        if let Operand::Value(v) = arg {
-            if let Some(slot) = self.state.get_slot(v.0) {
-                emit!(self.state, "    movl {}(%ebp), %eax", slot.0);
-                emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
-                emit!(self.state, "    movl {}(%ebp), %eax", slot.0 + 4);
-                emit!(self.state, "    movl %eax, {}(%esp)", stack_offset + 4);
-                self.state.reg_cache.invalidate_acc();
-            } else {
-                self.operand_to_eax(arg);
-                emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
-                emit!(self.state, "    movl $0, {}(%esp)", stack_offset + 4);
-            }
-        } else if ty == IrType::F64 {
-            if let Operand::Const(IrConst::F64(f)) = arg {
-                let bits = f.to_bits();
-                let lo = (bits & 0xFFFF_FFFF) as u32;
-                let hi = (bits >> 32) as u32;
-                emit!(self.state, "    movl ${}, {}(%esp)", lo as i32, stack_offset);
-                emit!(self.state, "    movl ${}, {}(%esp)", hi as i32, stack_offset + 4);
-            } else {
-                self.operand_to_eax(arg);
-                emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
-                emit!(self.state, "    movl $0, {}(%esp)", stack_offset + 4);
-            }
-        } else {
-            // I64/U64 constant
-            self.operand_to_eax(arg);
-            emit!(self.state, "    movl %eax, {}(%esp)", stack_offset);
-            if let Operand::Const(IrConst::I64(v)) = arg {
-                let hi = ((*v as u64) >> 32) as i32;
-                emit!(self.state, "    movl ${}, {}(%esp)", hi, stack_offset + 4);
-            } else {
-                emit!(self.state, "    movl $0, {}(%esp)", stack_offset + 4);
-            }
-        }
-    }
 }
 
 // ─── ArchCodegen trait implementation ────────────────────────────────────────
 
 impl ArchCodegen for I686Codegen {
+
+    // ==================== Core accessors ====================
     fn state(&mut self) -> &mut CodegenState { &mut self.state }
     fn state_ref(&self) -> &CodegenState { &self.state }
 
@@ -1202,6 +199,8 @@ impl ArchCodegen for I686Codegen {
         phys_reg_name(reg)
     }
 
+
+    // ==================== Stack frame ====================
     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 {
         self.is_variadic = func.is_variadic;
         self.is_fastcall = func.is_fastcall;
@@ -1639,6 +638,8 @@ impl ArchCodegen for I686Codegen {
         }
     }
 
+
+    // ==================== Load/store/copy ====================
     fn emit_load_operand(&mut self, op: &Operand) {
         self.operand_to_eax(op);
     }
@@ -1697,6 +698,8 @@ impl ArchCodegen for I686Codegen {
         self.emit_int_binop(dest, op, lhs, rhs, ty);
     }
 
+
+    // ==================== Integer ALU ====================
     fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, _ty: IrType) {
         // On i686, only I32/U32 (and smaller) BinOps reach here now.
         // I64/U64 are intercepted by emit_binop above and routed to
@@ -1843,6 +846,8 @@ impl ArchCodegen for I686Codegen {
     ///
     /// For F32 (SSE), the emit_float_binop_impl uses swapped xmm registers
     /// to compensate, so these mnemonics are only correct for x87 paths.
+
+    // ==================== Float operations ====================
     fn emit_float_binop_mnemonic(&self, op: crate::backend::cast::FloatOp) -> &'static str {
         match op {
             crate::backend::cast::FloatOp::Add => "add",
@@ -1955,12 +960,16 @@ impl ArchCodegen for I686Codegen {
         self.emit_cast_impl(dest, src, from_ty, to_ty);
     }
 
+
+    // ==================== Casts ====================
     fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) {
         self.emit_cast_instrs_impl(from_ty, to_ty);
     }
 
     // --- Global address ---
 
+
+    // ==================== Globals ====================
     fn emit_global_addr(&mut self, dest: &Value, name: &str) {
         if self.state.pic_mode {
             if self.state.needs_got(name) {
@@ -2013,6 +1022,8 @@ impl ArchCodegen for I686Codegen {
     fn jump_mnemonic(&self) -> &'static str { "jmp" }
     fn trap_instruction(&self) -> &'static str { "ud2" }
 
+
+    // ==================== Control flow ====================
     fn emit_branch_nonzero(&mut self, label: &str) {
         self.state.emit("    testl %eax, %eax");
         emit!(self.state, "    jne {}", label);
@@ -2067,6 +1078,8 @@ impl ArchCodegen for I686Codegen {
     /// On i686, selects with 64-bit conditions or results need special handling.
     /// Uses emit_copy_value (which handles wide values) instead of the default
     /// emit_load_operand/emit_store_result path that only handles 32 bits.
+
+    // ==================== Select ====================
     fn emit_select(&mut self, dest: &Value, cond: &Operand, true_val: &Operand, false_val: &Operand, ty: IrType) {
         // Constant-fold wide conditions at compile time
         match cond {
@@ -2312,6 +1325,8 @@ impl ArchCodegen for I686Codegen {
         self.store_eax_to(dest);
     }
 
+
+    // ==================== Comparisons ====================
     fn emit_f128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand) {
         // x87 comparison using fucomip
         let swap = matches!(op, IrCmpOp::Slt | IrCmpOp::Ult | IrCmpOp::Sle | IrCmpOp::Ule);
@@ -2393,6 +1408,8 @@ impl ArchCodegen for I686Codegen {
         self.store_eax_to(dest);
     }
 
+
+    // ==================== Fused compare-branch ====================
     fn emit_fused_cmp_branch(
         &mut self,
         op: IrCmpOp,
@@ -2472,6 +1489,8 @@ impl ArchCodegen for I686Codegen {
         self.state.reg_cache.invalidate_acc();
     }
 
+
+    // ==================== Unary operations ====================
     fn emit_float_neg(&mut self, ty: IrType) {
         if ty == IrType::F32 {
             self.state.emit("    movd %eax, %xmm0");
@@ -2527,6 +1546,8 @@ impl ArchCodegen for I686Codegen {
 
     // --- Call ---
 
+
+    // ==================== Calls ====================
     fn call_abi_config(&self) -> call_abi::CallAbiConfig {
         call_abi::CallAbiConfig {
             max_int_regs: 0,  // cdecl: no register args
@@ -2764,6 +1785,8 @@ impl ArchCodegen for I686Codegen {
 
     fn current_return_type(&self) -> IrType { self.current_return_type }
 
+
+    // ==================== Return ====================
     fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) {
         if let Some(val) = val {
             let ret_ty = self.current_return_type;
@@ -3152,6 +2175,8 @@ impl ArchCodegen for I686Codegen {
         }
     }
 
+
+    // ==================== Memory operations ====================
     fn store_instr_for_type(&self, ty: IrType) -> &'static str {
         self.mov_store_for_type(ty)
     }
@@ -3355,6 +2380,8 @@ impl ArchCodegen for I686Codegen {
 
     // --- va_arg ---
 
+
+    // ==================== Variadic ====================
     fn emit_va_arg(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType) {
         // i686 cdecl: va_list is just a char* pointer to the stack.
         // va_list_ptr is a pointer to the memory location holding the va_list value.
@@ -3443,6 +2470,8 @@ impl ArchCodegen for I686Codegen {
 
     // --- Atomics ---
 
+
+    // ==================== Atomics ====================
     fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand,
                        ty: IrType, _ordering: AtomicOrdering) {
         if self.is_atomic_wide(ty) {
@@ -3597,6 +2626,8 @@ impl ArchCodegen for I686Codegen {
 
     // --- Inline asm ---
 
+
+    // ==================== Inline assembly & intrinsics ====================
     fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)],
                        inputs: &[(String, Operand, Option<String>)], clobbers: &[String],
                        operand_types: &[IrType], goto_labels: &[(String, BlockId)],
@@ -3623,6 +2654,8 @@ impl ArchCodegen for I686Codegen {
         self.state.emit("    xorl %edx, %edx");
     }
 
+
+    // ==================== i128 pair operations ====================
     fn emit_load_acc_pair(&mut self, op: &Operand) {
         match op {
             Operand::Value(v) => {
@@ -3810,6 +2843,8 @@ impl ArchCodegen for I686Codegen {
         self.state.emit("    addl $8, %esp");
     }
 
+
+    // ==================== i128 arithmetic ====================
     fn emit_i128_prep_binop(&mut self, lhs: &Operand, rhs: &Operand) {
         // Load lhs into eax:edx, rhs onto stack
         self.emit_load_acc_pair(rhs);
@@ -4107,6 +3142,8 @@ impl ArchCodegen for I686Codegen {
 
     // --- Second return value (F64/F32/F128) ---
 
+
+    // ==================== Multi-return values ====================
     fn emit_get_return_f64_second(&mut self, dest: &Value) {
         // TODO: handle second F64 return from x87
         self.store_eax_to(dest);
