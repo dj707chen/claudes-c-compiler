@@ -1,0 +1,27 @@
+Task: Add conditional branch inversion for fall-through optimization
+Status: in_progress
+Started: 2026-01-30
+
+Description:
+Add a peephole optimization pass to all backends (x86, ARM, RISC-V) that
+inverts conditional branches when the true target is the next (fall-through)
+label.
+
+Currently the codegen emits:
+    jCC .Ltrue
+    jmp .Lfalse
+.Ltrue:
+
+This can be optimized to:
+    j!CC .Lfalse
+.Ltrue:
+
+This saves one instruction per conditional branch where the true target
+immediately follows. This is extremely common in loop headers and if-else
+chains, and will reduce code size and improve performance (fewer jumps,
+better branch prediction for fall-through paths).
+
+Key files:
+- src/backend/x86/codegen/peephole/passes.rs
+- src/backend/arm/codegen/peephole.rs
+- src/backend/riscv/codegen/peephole.rs
