@@ -196,6 +196,168 @@ impl Token {
     }
 }
 
+impl std::fmt::Display for TokenKind {
+    /// Display tokens in GCC-style human-readable format for diagnostics.
+    ///
+    /// Punctuation and operators are shown as quoted symbols: `';'`, `')'`
+    /// Keywords are shown as quoted keyword text: `'int'`, `'return'`
+    /// Identifiers include the name: `'foo'`
+    /// Literals are described generically: `integer constant`, `string literal`
+    /// EOF is shown as: `end of input`
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Literals - described generically like GCC
+            TokenKind::IntLiteral(_) | TokenKind::UIntLiteral(_) |
+            TokenKind::LongLiteral(_) | TokenKind::ULongLiteral(_) |
+            TokenKind::LongLongLiteral(_) | TokenKind::ULongLongLiteral(_) =>
+                write!(f, "integer constant"),
+            TokenKind::FloatLiteral(_) | TokenKind::FloatLiteralF32(_) |
+            TokenKind::FloatLiteralLongDouble(_, _) =>
+                write!(f, "floating constant"),
+            TokenKind::ImaginaryLiteral(_) | TokenKind::ImaginaryLiteralF32(_) |
+            TokenKind::ImaginaryLiteralLongDouble(_, _) =>
+                write!(f, "imaginary constant"),
+            TokenKind::StringLiteral(_) => write!(f, "string literal"),
+            TokenKind::WideStringLiteral(_) => write!(f, "wide string literal"),
+            TokenKind::Char16StringLiteral(_) => write!(f, "char16_t string literal"),
+            TokenKind::CharLiteral(_) => write!(f, "character constant"),
+
+            // Identifiers
+            TokenKind::Identifier(name) => write!(f, "'{}'", name),
+
+            // Keywords - shown as quoted keyword text
+            TokenKind::Auto => write!(f, "'auto'"),
+            TokenKind::Break => write!(f, "'break'"),
+            TokenKind::Case => write!(f, "'case'"),
+            TokenKind::Char => write!(f, "'char'"),
+            TokenKind::Const => write!(f, "'const'"),
+            TokenKind::Continue => write!(f, "'continue'"),
+            TokenKind::Default => write!(f, "'default'"),
+            TokenKind::Do => write!(f, "'do'"),
+            TokenKind::Double => write!(f, "'double'"),
+            TokenKind::Else => write!(f, "'else'"),
+            TokenKind::Enum => write!(f, "'enum'"),
+            TokenKind::Extern => write!(f, "'extern'"),
+            TokenKind::Float => write!(f, "'float'"),
+            TokenKind::For => write!(f, "'for'"),
+            TokenKind::Goto => write!(f, "'goto'"),
+            TokenKind::If => write!(f, "'if'"),
+            TokenKind::Inline => write!(f, "'inline'"),
+            TokenKind::Int => write!(f, "'int'"),
+            TokenKind::Long => write!(f, "'long'"),
+            TokenKind::Register => write!(f, "'register'"),
+            TokenKind::Restrict => write!(f, "'restrict'"),
+            TokenKind::Return => write!(f, "'return'"),
+            TokenKind::Short => write!(f, "'short'"),
+            TokenKind::Signed => write!(f, "'signed'"),
+            TokenKind::Sizeof => write!(f, "'sizeof'"),
+            TokenKind::Static => write!(f, "'static'"),
+            TokenKind::Struct => write!(f, "'struct'"),
+            TokenKind::Switch => write!(f, "'switch'"),
+            TokenKind::Typedef => write!(f, "'typedef'"),
+            TokenKind::Union => write!(f, "'union'"),
+            TokenKind::Unsigned => write!(f, "'unsigned'"),
+            TokenKind::Void => write!(f, "'void'"),
+            TokenKind::Volatile => write!(f, "'volatile'"),
+            TokenKind::While => write!(f, "'while'"),
+
+            // C11 keywords
+            TokenKind::Alignas => write!(f, "'_Alignas'"),
+            TokenKind::Alignof => write!(f, "'_Alignof'"),
+            TokenKind::Atomic => write!(f, "'_Atomic'"),
+            TokenKind::Bool => write!(f, "'_Bool'"),
+            TokenKind::Complex => write!(f, "'_Complex'"),
+            TokenKind::Generic => write!(f, "'_Generic'"),
+            TokenKind::Imaginary => write!(f, "'_Imaginary'"),
+            TokenKind::Noreturn => write!(f, "'_Noreturn'"),
+            TokenKind::StaticAssert => write!(f, "'_Static_assert'"),
+            TokenKind::ThreadLocal => write!(f, "'_Thread_local'"),
+
+            // GCC extensions
+            TokenKind::Typeof => write!(f, "'typeof'"),
+            TokenKind::Asm => write!(f, "'asm'"),
+            TokenKind::Attribute => write!(f, "'__attribute__'"),
+            TokenKind::Extension => write!(f, "'__extension__'"),
+            TokenKind::Builtin => write!(f, "'__builtin_va_list'"),
+            TokenKind::BuiltinVaArg => write!(f, "'__builtin_va_arg'"),
+            TokenKind::BuiltinTypesCompatibleP => write!(f, "'__builtin_types_compatible_p'"),
+            TokenKind::Int128 => write!(f, "'__int128'"),
+            TokenKind::UInt128 => write!(f, "'__uint128_t'"),
+            TokenKind::RealPart => write!(f, "'__real__'"),
+            TokenKind::ImagPart => write!(f, "'__imag__'"),
+            TokenKind::AutoType => write!(f, "'__auto_type'"),
+            TokenKind::GnuAlignof => write!(f, "'__alignof__'"),
+            TokenKind::GnuLabel => write!(f, "'__label__'"),
+            TokenKind::SegGs => write!(f, "'__seg_gs'"),
+            TokenKind::SegFs => write!(f, "'__seg_fs'"),
+
+            // Pragma tokens
+            TokenKind::PragmaPackSet(_) | TokenKind::PragmaPackPush(_) |
+            TokenKind::PragmaPackPushOnly | TokenKind::PragmaPackPop |
+            TokenKind::PragmaPackReset => write!(f, "'#pragma pack'"),
+            TokenKind::PragmaVisibilityPush(_) | TokenKind::PragmaVisibilityPop =>
+                write!(f, "'#pragma GCC visibility'"),
+
+            // Punctuation - shown as quoted symbols
+            TokenKind::LParen => write!(f, "'('"),
+            TokenKind::RParen => write!(f, "')'"),
+            TokenKind::LBrace => write!(f, "'{{'"),
+            TokenKind::RBrace => write!(f, "'}}'"),
+            TokenKind::LBracket => write!(f, "'['"),
+            TokenKind::RBracket => write!(f, "']'"),
+            TokenKind::Semicolon => write!(f, "';'"),
+            TokenKind::Comma => write!(f, "','"),
+            TokenKind::Dot => write!(f, "'.'"),
+            TokenKind::Arrow => write!(f, "'->'"),
+            TokenKind::Ellipsis => write!(f, "'...'"),
+
+            // Operators
+            TokenKind::Plus => write!(f, "'+'"),
+            TokenKind::Minus => write!(f, "'-'"),
+            TokenKind::Star => write!(f, "'*'"),
+            TokenKind::Slash => write!(f, "'/'"),
+            TokenKind::Percent => write!(f, "'%'"),
+            TokenKind::Amp => write!(f, "'&'"),
+            TokenKind::Pipe => write!(f, "'|'"),
+            TokenKind::Caret => write!(f, "'^'"),
+            TokenKind::Tilde => write!(f, "'~'"),
+            TokenKind::Bang => write!(f, "'!'"),
+            TokenKind::Assign => write!(f, "'='"),
+            TokenKind::Less => write!(f, "'<'"),
+            TokenKind::Greater => write!(f, "'>'"),
+            TokenKind::Question => write!(f, "'?'"),
+            TokenKind::Colon => write!(f, "':'"),
+
+            // Compound operators
+            TokenKind::PlusPlus => write!(f, "'++'"),
+            TokenKind::MinusMinus => write!(f, "'--'"),
+            TokenKind::PlusAssign => write!(f, "'+='"),
+            TokenKind::MinusAssign => write!(f, "'-='"),
+            TokenKind::StarAssign => write!(f, "'*='"),
+            TokenKind::SlashAssign => write!(f, "'/='"),
+            TokenKind::PercentAssign => write!(f, "'%='"),
+            TokenKind::AmpAssign => write!(f, "'&='"),
+            TokenKind::PipeAssign => write!(f, "'|='"),
+            TokenKind::CaretAssign => write!(f, "'^='"),
+            TokenKind::LessLess => write!(f, "'<<'"),
+            TokenKind::GreaterGreater => write!(f, "'>>'"),
+            TokenKind::LessLessAssign => write!(f, "'<<='"),
+            TokenKind::GreaterGreaterAssign => write!(f, "'>>='"),
+            TokenKind::EqualEqual => write!(f, "'=='"),
+            TokenKind::BangEqual => write!(f, "'!='"),
+            TokenKind::LessEqual => write!(f, "'<='"),
+            TokenKind::GreaterEqual => write!(f, "'>='"),
+            TokenKind::AmpAmp => write!(f, "'&&'"),
+            TokenKind::PipePipe => write!(f, "'||'"),
+            TokenKind::Hash => write!(f, "'#'"),
+            TokenKind::HashHash => write!(f, "'##'"),
+
+            // Special
+            TokenKind::Eof => write!(f, "end of input"),
+        }
+    }
+}
+
 impl TokenKind {
     /// Convert a keyword string to its token kind.
     /// When `gnu_extensions` is false (strict C standard mode, e.g. -std=c99),

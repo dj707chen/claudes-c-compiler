@@ -617,7 +617,7 @@ impl Parser {
             }
             _ => {
                 let span = self.peek_span();
-                self.emit_error(format!("unexpected token {:?} in expression", self.peek()), span);
+                self.emit_error(format!("expected expression before {}", self.peek()), span);
                 self.advance();
                 Expr::IntLiteral(0, span)
             }

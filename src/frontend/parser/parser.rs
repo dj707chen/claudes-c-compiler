@@ -369,7 +369,7 @@ impl Parser {
                 // Report error for unrecognized token at top level
                 if !matches!(self.peek(), TokenKind::Semicolon | TokenKind::Eof) {
                     let span = self.peek_span();
-                    self.emit_error(format!("expected declaration, got {:?}", self.peek()), span);
+                    self.emit_error(format!("expected declaration before {}", self.peek()), span);
                 }
                 self.advance();
             }
@@ -416,7 +416,7 @@ impl Parser {
             span
         } else {
             let span = self.peek_span();
-            self.emit_error(format!("expected {:?}, got {:?}", expected, self.peek()), span);
+            self.emit_error(format!("expected {} before {}", expected, self.peek()), span);
             span
         }
     }
