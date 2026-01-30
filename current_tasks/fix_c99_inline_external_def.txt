@@ -1,9 +1,0 @@
-Task: Fix C99 inline external definition when prior non-inline declaration exists
-Status: in_progress
-Description: Per C99 6.7.4p7, a function is an inline definition only if ALL
-file-scope declarations include the inline specifier. When a header declares
-`int foo(void);` (no inline) and the .c file defines `inline int foo(void) { ... }`,
-the definition should provide an external definition (not just an inline-only def).
-Our compiler incorrectly treats this as a C99 inline definition, making it static/weak,
-which causes linker errors (undefined reference) in jq's tsd_dtoa_context_get.
-Fix: Track non-inline declarations and use that info in is_c99_inline_def check.
