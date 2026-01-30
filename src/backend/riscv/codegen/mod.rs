@@ -1,4 +1,5 @@
 pub(crate) mod codegen;
+pub(crate) mod peephole;
 mod asm_emitter;
 mod atomics;
 mod f128;
