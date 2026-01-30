@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 pub(crate) mod common;
 pub(crate) mod frontend;
 pub(crate) mod ir;

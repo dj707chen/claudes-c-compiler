@@ -9,6 +9,59 @@
 //! backend overrides with 1-4 line arch-specific implementations. This design lets
 //! the shared framework express the algorithm once while backends only provide the
 //! instruction-level differences.
+//!
+//! ## `delegate_to_impl!` macro
+//!
+//! Most backend `impl ArchCodegen for XxxCodegen` blocks consist of one-liner
+//! delegations: `fn foo(&mut self, x: T) { self.foo_impl(x) }`. The
+//! `delegate_to_impl!` macro eliminates this boilerplate. Each backend lists
+//! the method signatures it delegates, and the macro generates the forwarding
+//! body by appending `_impl` to the method name.
+
+/// Generates `ArchCodegen` trait method implementations that delegate to a
+/// corresponding `_impl` method on `self`. This eliminates the repetitive
+/// one-liner delegation pattern in every backend's `impl ArchCodegen` block.
+///
+/// Each line maps a trait method to its `_impl` counterpart. The macro handles
+/// both `&self` and `&mut self` receivers and optional return types.
+///
+/// # Usage
+/// ```ignore
+/// delegate_to_impl! {
+///     fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 => calculate_stack_space_impl;
+///     fn emit_prologue(&mut self, func: &IrFunction, frame_size: i64) => emit_prologue_impl;
+///     fn store_instr_for_type(&self, ty: IrType) -> &'static str => store_instr_for_type_impl;
+/// }
+/// ```
+#[macro_export]
+macro_rules! delegate_to_impl {
+    // Entry point: parse one delegation at a time and recurse
+    () => {};
+
+    // &mut self method with return type
+    (fn $name:ident(&mut self $(, $pname:ident : $pty:ty)*) -> $ret:ty => $impl_name:ident; $($rest:tt)*) => {
+        fn $name(&mut self $(, $pname : $pty)*) -> $ret { self.$impl_name($($pname),*) }
+        delegate_to_impl!{ $($rest)* }
+    };
+
+    // &mut self method without return type
+    (fn $name:ident(&mut self $(, $pname:ident : $pty:ty)*) => $impl_name:ident; $($rest:tt)*) => {
+        fn $name(&mut self $(, $pname : $pty)*) { self.$impl_name($($pname),*) }
+        delegate_to_impl!{ $($rest)* }
+    };
+
+    // &self method with return type
+    (fn $name:ident(&self $(, $pname:ident : $pty:ty)*) -> $ret:ty => $impl_name:ident; $($rest:tt)*) => {
+        fn $name(&self $(, $pname : $pty)*) -> $ret { self.$impl_name($($pname),*) }
+        delegate_to_impl!{ $($rest)* }
+    };
+
+    // &self method without return type
+    (fn $name:ident(&self $(, $pname:ident : $pty:ty)*) => $impl_name:ident; $($rest:tt)*) => {
+        fn $name(&self $(, $pname : $pty)*) { self.$impl_name($($pname),*) }
+        delegate_to_impl!{ $($rest)* }
+    };
+}
 
 use crate::ir::ir::{
     AtomicOrdering,

@@ -8,6 +8,7 @@
 //! - No register-based argument passing (unlike x86-64 SysV ABI)
 //! - Stack aligned to 16 bytes at call sites (modern i386 ABI)
 
+use crate::delegate_to_impl;
 use crate::backend::traits::ArchCodegen;
 use crate::backend::common::PtrDirective;
 use crate::backend::state::{CodegenState, StackSlot};
@@ -1181,59 +1182,20 @@ impl ArchCodegen for I686Codegen {
         phys_reg_name(reg)
     }
 
-    // ---- Prologue/Epilogue (delegated to prologue.rs) ----
-
-    fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 { self.calculate_stack_space_impl(func) }
-    fn aligned_frame_size(&self, raw_space: i64) -> i64 { self.aligned_frame_size_impl(raw_space) }
-    fn emit_prologue(&mut self, func: &IrFunction, frame_size: i64) { self.emit_prologue_impl(func, frame_size) }
-    fn emit_epilogue(&mut self, frame_size: i64) { self.emit_epilogue_impl(frame_size) }
-    fn emit_store_params(&mut self, func: &IrFunction) { self.emit_store_params_impl(func) }
-    fn emit_param_ref(&mut self, dest: &Value, param_idx: usize, ty: IrType) { self.emit_param_ref_impl(dest, param_idx, ty) }
-    fn emit_epilogue_and_ret(&mut self, frame_size: i64) { self.emit_epilogue_and_ret_impl(frame_size) }
-    fn store_instr_for_type(&self, ty: IrType) -> &'static str { self.store_instr_for_type_impl(ty) }
-    fn load_instr_for_type(&self, ty: IrType) -> &'static str { self.load_instr_for_type_impl(ty) }
-
-    // ---- Load/Store operand ----
-
+    // ---- Standard trait methods (kept inline - arch-specific) ----
     fn emit_load_operand(&mut self, op: &Operand) { self.operand_to_eax(op); }
     fn emit_store_result(&mut self, dest: &Value) { self.store_eax_to(dest); }
-
-    // ---- Memory operations (delegated to memory.rs) ----
-
-    fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) { self.emit_store_impl(val, ptr, ty) }
-    fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) { self.emit_load_impl(dest, ptr, ty) }
-    fn emit_store_with_const_offset(&mut self, val: &Operand, base: &Value, offset: i64, ty: IrType) { self.emit_store_with_const_offset_impl(val, base, offset, ty) }
-    fn emit_load_with_const_offset(&mut self, dest: &Value, base: &Value, offset: i64, ty: IrType) { self.emit_load_with_const_offset_impl(dest, base, offset, ty) }
-    fn emit_typed_store_to_slot(&mut self, instr: &'static str, ty: IrType, slot: StackSlot) { self.emit_typed_store_to_slot_impl(instr, ty, slot) }
-    fn emit_typed_load_from_slot(&mut self, instr: &'static str, slot: StackSlot) { self.emit_typed_load_from_slot_impl(instr, slot) }
     fn emit_save_acc(&mut self) { self.state.emit("    movl %eax, %edx"); }
-    fn emit_load_ptr_from_slot(&mut self, slot: StackSlot, val_id: u32) { self.emit_load_ptr_from_slot_impl(slot, val_id) }
-    fn emit_typed_store_indirect(&mut self, instr: &'static str, ty: IrType) { self.emit_typed_store_indirect_impl(instr, ty) }
-    fn emit_typed_load_indirect(&mut self, instr: &'static str) { self.emit_typed_load_indirect_impl(instr) }
-    fn emit_add_offset_to_addr_reg(&mut self, offset: i64) { self.emit_add_offset_to_addr_reg_impl(offset) }
-    fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) { self.emit_slot_addr_to_secondary_impl(slot, is_alloca, val_id) }
     fn emit_add_secondary_to_acc(&mut self) { self.state.emit("    addl %ecx, %eax"); }
-    fn emit_gep_direct_const(&mut self, slot: StackSlot, offset: i64) { self.emit_gep_direct_const_impl(slot, offset) }
-    fn emit_gep_indirect_const(&mut self, slot: StackSlot, offset: i64, val_id: u32) { self.emit_gep_indirect_const_impl(slot, offset, val_id) }
+    fn emit_acc_to_secondary(&mut self) { self.state.emit("    movl %eax, %ecx"); }
+    fn emit_memcpy_store_dest_from_acc(&mut self) { self.state.emit("    movl %eax, %edi"); }
+    fn emit_memcpy_store_src_from_acc(&mut self) { self.state.emit("    movl %eax, %esi"); }
+    fn current_return_type(&self) -> IrType { self.current_return_type }
     fn emit_gep_add_const_to_acc(&mut self, offset: i64) {
         if offset != 0 {
             emit!(self.state, "    addl ${}, %eax", offset as i32);
         }
     }
-    fn emit_add_imm_to_acc(&mut self, imm: i64) { self.emit_add_imm_to_acc_impl(imm) }
-    fn emit_round_up_acc_to_16(&mut self) { self.emit_round_up_acc_to_16_impl() }
-    fn emit_sub_sp_by_acc(&mut self) { self.emit_sub_sp_by_acc_impl() }
-    fn emit_mov_sp_to_acc(&mut self) { self.emit_mov_sp_to_acc_impl() }
-    fn emit_mov_acc_to_sp(&mut self) { self.emit_mov_acc_to_sp_impl() }
-    fn emit_align_acc(&mut self, align: usize) { self.emit_align_acc_impl(align) }
-    fn emit_alloca_aligned_addr(&mut self, slot: StackSlot, val_id: u32) { self.emit_alloca_aligned_addr_impl(slot, val_id) }
-    fn emit_alloca_aligned_addr_to_acc(&mut self, slot: StackSlot, val_id: u32) { self.emit_alloca_aligned_addr_to_acc_impl(slot, val_id) }
-    fn emit_acc_to_secondary(&mut self) { self.state.emit("    movl %eax, %ecx"); }
-    fn emit_memcpy_load_dest_addr(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) { self.emit_memcpy_load_dest_addr_impl(slot, is_alloca, val_id) }
-    fn emit_memcpy_load_src_addr(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) { self.emit_memcpy_load_src_addr_impl(slot, is_alloca, val_id) }
-    fn emit_memcpy_store_dest_from_acc(&mut self) { self.state.emit("    movl %eax, %edi"); }
-    fn emit_memcpy_store_src_from_acc(&mut self) { self.state.emit("    movl %eax, %esi"); }
-    fn emit_memcpy_impl(&mut self, size: usize) { self.emit_memcpy_impl_impl(size) }
 
     /// Override emit_memcpy for i686: uses rep movsb with esi/edi.
     fn emit_memcpy(&mut self, dest: &Value, src: &Value, size: usize) {
@@ -1276,17 +1238,6 @@ impl ArchCodegen for I686Codegen {
         self.state.emit("    popl %esi");
     }
 
-    // ---- ALU operations (delegated to alu.rs) ----
-
-    fn emit_float_neg(&mut self, ty: IrType) { self.emit_float_neg_impl(ty) }
-    fn emit_int_neg(&mut self, ty: IrType) { self.emit_int_neg_impl(ty) }
-    fn emit_int_not(&mut self, ty: IrType) { self.emit_int_not_impl(ty) }
-    fn emit_int_clz(&mut self, ty: IrType) { self.emit_int_clz_impl(ty) }
-    fn emit_int_ctz(&mut self, ty: IrType) { self.emit_int_ctz_impl(ty) }
-    fn emit_int_bswap(&mut self, ty: IrType) { self.emit_int_bswap_impl(ty) }
-    fn emit_int_popcount(&mut self, ty: IrType) { self.emit_int_popcount_impl(ty) }
-    fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) { self.emit_int_binop_impl(dest, op, lhs, rhs, ty) }
-
     /// Override emit_binop to route I64/U64 through register-pair (eax:edx) arithmetic.
     fn emit_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         if matches!(ty, IrType::I64 | IrType::U64) {
@@ -1307,17 +1258,6 @@ impl ArchCodegen for I686Codegen {
         self.emit_int_binop(dest, op, lhs, rhs, ty);
     }
 
-    // ---- Comparison (delegated to comparison.rs) ----
-
-    fn emit_float_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) { self.emit_float_cmp_impl(dest, op, lhs, rhs, ty) }
-    fn emit_f128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand) { self.emit_f128_cmp_impl(dest, op, lhs, rhs) }
-    fn emit_int_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) { self.emit_int_cmp_impl(dest, op, lhs, rhs, ty) }
-    fn emit_fused_cmp_branch(
-        &mut self, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType,
-        true_label: &str, false_label: &str,
-    ) { self.emit_fused_cmp_branch_impl(op, lhs, rhs, ty, true_label, false_label) }
-    fn emit_select(&mut self, dest: &Value, cond: &Operand, true_val: &Operand, false_val: &Operand, ty: IrType) { self.emit_select_impl(dest, cond, true_val, false_val, ty) }
-
     /// Override emit_cmp to route F64 and I64/U64 comparisons correctly on i686.
     fn emit_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         if ty == IrType::F128 {
@@ -1335,8 +1275,6 @@ impl ArchCodegen for I686Codegen {
         self.emit_int_cmp(dest, op, lhs, rhs, ty);
     }
 
-    // ---- Unary operations ----
-
     fn emit_unaryop(&mut self, dest: &Value, op: IrUnaryOp, src: &Operand, ty: IrType) {
         if op == IrUnaryOp::IsConstant {
             self.emit_load_operand(&Operand::Const(IrConst::I32(0)));
@@ -1348,7 +1286,6 @@ impl ArchCodegen for I686Codegen {
             return;
         }
         if ty == IrType::F64 && op == IrUnaryOp::Neg {
-            // F64 negation: load onto x87, negate, store back
             self.emit_f64_load_to_x87(src);
             self.state.emit("    fchs");
             self.emit_f64_store_from_x87(dest);
@@ -1370,7 +1307,6 @@ impl ArchCodegen for I686Codegen {
             self.state.reg_cache.invalidate_all();
             return;
         }
-        // Default path (32-bit and smaller)
         self.operand_to_eax(src);
         match op {
             IrUnaryOp::Neg => {
@@ -1387,12 +1323,6 @@ impl ArchCodegen for I686Codegen {
         self.store_eax_to(dest);
     }
 
-    fn emit_f128_neg(&mut self, dest: &Value, src: &Operand) { self.emit_f128_neg_impl(dest, src) }
-
-    // ---- Calls (delegated to calls.rs) ----
-
-    fn call_abi_config(&self) -> call_abi::CallAbiConfig { self.call_abi_config_impl() }
-
     /// Override emit_call to handle fastcall calling convention.
     fn emit_call(&mut self, args: &[Operand], arg_types: &[IrType], direct_name: Option<&str>,
                  func_ptr: Option<&Operand>, dest: Option<Value>, return_type: IrType,
@@ -1407,7 +1337,6 @@ impl ArchCodegen for I686Codegen {
             self.emit_fastcall(args, arg_types, direct_name, func_ptr, dest, return_type);
             return;
         }
-        // Non-fastcall: delegate to the default trait implementation for cdecl calls.
         use crate::backend::call_abi::*;
         let config = self.call_abi_config();
         let arg_classes_vec = classify_call_args(args, arg_types, struct_arg_sizes, struct_arg_aligns, struct_arg_classes, struct_arg_riscv_float_classes, is_variadic, &config);
@@ -1433,39 +1362,9 @@ impl ArchCodegen for I686Codegen {
         }
     }
 
-    fn emit_call_f128_pre_convert(&mut self, args: &[Operand], arg_classes: &[call_abi::CallArgClass], arg_types: &[IrType], stack_arg_space: usize) -> usize { self.emit_call_f128_pre_convert_impl(args, arg_classes, arg_types, stack_arg_space) }
-    fn emit_call_compute_stack_space(&self, arg_classes: &[call_abi::CallArgClass], arg_types: &[IrType]) -> usize { self.emit_call_compute_stack_space_impl(arg_classes, arg_types) }
-    fn emit_call_stack_args(&mut self, args: &[Operand], arg_classes: &[call_abi::CallArgClass],
-                            arg_types: &[IrType], stack_arg_space: usize,
-                            fptr_spill: usize, f128_temp_space: usize) -> i64 { self.emit_call_stack_args_impl(args, arg_classes, arg_types, stack_arg_space, fptr_spill, f128_temp_space) }
-    fn emit_call_reg_args(&mut self, args: &[Operand], arg_classes: &[call_abi::CallArgClass],
-                          arg_types: &[IrType], total_sp_adjust: i64,
-                          f128_temp_space: usize, stack_arg_space: usize,
-                          struct_arg_riscv_float_classes: &[Option<crate::common::types::RiscvFloatClass>]) { self.emit_call_reg_args_impl(args, arg_classes, arg_types, total_sp_adjust, f128_temp_space, stack_arg_space, struct_arg_riscv_float_classes) }
-    fn emit_call_instruction(&mut self, direct_name: Option<&str>, func_ptr: Option<&Operand>,
-                             indirect: bool, stack_arg_space: usize) { self.emit_call_instruction_impl(direct_name, func_ptr, indirect, stack_arg_space) }
-    fn emit_call_cleanup(&mut self, stack_arg_space: usize, f128_temp_space: usize, indirect: bool) { self.emit_call_cleanup_impl(stack_arg_space, f128_temp_space, indirect) }
-    fn emit_call_store_result(&mut self, dest: &Value, return_type: IrType) { self.emit_call_store_result_impl(dest, return_type) }
-    fn emit_call_store_i128_result(&mut self, dest: &Value) { self.emit_call_store_i128_result_impl(dest) }
-    fn emit_call_store_f128_result(&mut self, dest: &Value) { self.emit_call_store_f128_result_impl(dest) }
-    fn emit_call_move_f32_to_acc(&mut self) { self.emit_call_move_f32_to_acc_impl() }
-    fn emit_call_move_f64_to_acc(&mut self) { self.emit_call_move_f64_to_acc_impl() }
-
     fn callee_pops_bytes_for_sret(&self, is_sret: bool) -> usize {
-        // i686 SysV: callee pops the hidden sret pointer (4 bytes).
         if is_sret { 4 } else { 0 }
     }
-
-    // ---- Globals (delegated to globals.rs) ----
-
-    fn emit_global_addr(&mut self, dest: &Value, name: &str) { self.emit_global_addr_impl(dest, name) }
-    fn emit_label_addr(&mut self, dest: &Value, label: &str) { self.emit_label_addr_impl(dest, label) }
-    fn emit_tls_global_addr(&mut self, dest: &Value, name: &str) { self.emit_tls_global_addr_impl(dest, name) }
-
-    // ---- Cast (delegated to casts.rs) ----
-
-    fn emit_cast(&mut self, dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType) { self.emit_cast_impl(dest, src, from_ty, to_ty) }
-    fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) { self.emit_cast_instrs_impl(from_ty, to_ty) }
 
     // ---- Control flow ----
 
@@ -1627,8 +1526,6 @@ impl ArchCodegen for I686Codegen {
         self.state.reg_cache.invalidate_all();
     }
 
-    // ---- Float binop (delegated to float_ops.rs) ----
-
     fn emit_float_binop(&mut self, dest: &Value, op: crate::backend::cast::FloatOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
         if ty == IrType::F64 {
             let mnemonic = self.emit_float_binop_mnemonic(op);
@@ -1651,7 +1548,6 @@ impl ArchCodegen for I686Codegen {
             self.state.reg_cache.invalidate_acc();
             return;
         }
-        // F32: use SSE
         let mnemonic = match op {
             crate::backend::cast::FloatOp::Add => "add",
             crate::backend::cast::FloatOp::Sub => "sub",
@@ -1686,9 +1582,6 @@ impl ArchCodegen for I686Codegen {
 
     /// emit_copy_value: handles F128, wide (F64/I64/U64), and 32-bit copies.
     fn emit_copy_value(&mut self, dest: &Value, src: &Operand) {
-        // For LongDouble constants, load via x87 and store to dest slot.
-        // This handles the case where inlining propagates a LongDouble constant
-        // as the source of a Copy instruction (e.g., inlined `return 1.0L`).
         if let Operand::Const(IrConst::LongDouble(..)) = src {
             if let Some(dest_slot) = self.state.get_slot(dest.0) {
                 self.emit_f128_load_to_x87(src);
@@ -1698,7 +1591,6 @@ impl ArchCodegen for I686Codegen {
             }
         }
 
-        // For F128 values with full x87 data in their slots, copy via fldt/fstpt
         if let Operand::Value(v) = src {
             if self.state.f128_direct_slots.contains(&v.0) {
                 if let (Some(src_slot), Some(dest_slot)) = (self.state.get_slot(v.0), self.state.get_slot(dest.0)) {
@@ -1761,39 +1653,6 @@ impl ArchCodegen for I686Codegen {
         self.emit_store_result(dest);
     }
 
-    // ---- Variadic (delegated to variadic.rs) ----
-
-    fn emit_va_arg(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType) { self.emit_va_arg_impl(dest, va_list_ptr, result_ty) }
-    fn emit_va_start(&mut self, va_list_ptr: &Value) { self.emit_va_start_impl(va_list_ptr) }
-    fn emit_va_copy(&mut self, dest_ptr: &Value, src_ptr: &Value) { self.emit_va_copy_impl(dest_ptr, src_ptr) }
-    fn emit_va_arg_struct(&mut self, dest_ptr: &Value, va_list_ptr: &Value, size: usize) { self.emit_va_arg_struct_impl(dest_ptr, va_list_ptr, size) }
-
-    // ---- Returns (delegated to returns.rs) ----
-
-    fn current_return_type(&self) -> IrType { self.current_return_type }
-    fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) { self.emit_return_impl(val, frame_size) }
-    fn emit_return_i128_to_regs(&mut self) { self.emit_return_i128_to_regs_impl() }
-    fn emit_return_f128_to_reg(&mut self) { self.emit_return_f128_to_reg_impl() }
-    fn emit_return_f32_to_reg(&mut self) { self.emit_return_f32_to_reg_impl() }
-    fn emit_return_f64_to_reg(&mut self) { self.emit_return_f64_to_reg_impl() }
-    fn emit_return_int_to_reg(&mut self) { self.emit_return_int_to_reg_impl() }
-    fn emit_get_return_f64_second(&mut self, dest: &Value) { self.emit_get_return_f64_second_impl(dest) }
-    fn emit_set_return_f64_second(&mut self, src: &Operand) { self.emit_set_return_f64_second_impl(src) }
-    fn emit_get_return_f32_second(&mut self, dest: &Value) { self.emit_get_return_f32_second_impl(dest) }
-    fn emit_set_return_f32_second(&mut self, src: &Operand) { self.emit_set_return_f32_second_impl(src) }
-    fn emit_get_return_f128_second(&mut self, dest: &Value) { self.emit_get_return_f128_second_impl(dest) }
-    fn emit_set_return_f128_second(&mut self, src: &Operand) { self.emit_set_return_f128_second_impl(src) }
-
-    // ---- Atomics (delegated to atomics.rs) ----
-
-    fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, ordering: AtomicOrdering) { self.emit_atomic_rmw_impl(dest, op, ptr, val, ty, ordering) }
-    fn emit_atomic_cmpxchg(&mut self, dest: &Value, ptr: &Operand, expected: &Operand, desired: &Operand, ty: IrType, success: AtomicOrdering, failure: AtomicOrdering, returns_bool: bool) { self.emit_atomic_cmpxchg_impl(dest, ptr, expected, desired, ty, success, failure, returns_bool) }
-    fn emit_atomic_load(&mut self, dest: &Value, ptr: &Operand, ty: IrType, ordering: AtomicOrdering) { self.emit_atomic_load_impl(dest, ptr, ty, ordering) }
-    fn emit_atomic_store(&mut self, ptr: &Operand, val: &Operand, ty: IrType, ordering: AtomicOrdering) { self.emit_atomic_store_impl(ptr, val, ty, ordering) }
-    fn emit_fence(&mut self, ordering: AtomicOrdering) { self.emit_fence_impl(ordering) }
-
-    // ---- Inline ASM ----
-
     fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)],
                        inputs: &[(String, Operand, Option<String>)], clobbers: &[String],
                        operand_types: &[IrType], goto_labels: &[(String, BlockId)],
@@ -1801,46 +1660,142 @@ impl ArchCodegen for I686Codegen {
         crate::backend::inline_asm::emit_inline_asm_common(self, template, outputs, inputs, clobbers, operand_types, goto_labels, input_symbols);
     }
 
-    // ---- Intrinsics ----
-
     fn emit_intrinsic(&mut self, dest: &Option<Value>, op: &IntrinsicOp, dest_ptr: &Option<Value>, args: &[Operand]) {
         self.emit_intrinsic_impl(dest, op, dest_ptr, args);
     }
 
-    // ---- i128 ops (delegated to i128_ops.rs) ----
+    // ---- Delegated methods (via macro) ----
 
-    fn emit_sign_extend_acc_high(&mut self) { self.emit_sign_extend_acc_high_impl() }
-    fn emit_zero_acc_high(&mut self) { self.emit_zero_acc_high_impl() }
-    fn emit_load_acc_pair(&mut self, op: &Operand) { self.emit_load_acc_pair_impl(op) }
-    fn emit_store_acc_pair(&mut self, dest: &Value) { self.emit_store_acc_pair_impl(dest) }
-    fn emit_store_pair_to_slot(&mut self, slot: StackSlot) { self.emit_store_pair_to_slot_impl(slot) }
-    fn emit_load_pair_from_slot(&mut self, slot: StackSlot) { self.emit_load_pair_from_slot_impl(slot) }
-    fn emit_save_acc_pair(&mut self) { self.emit_save_acc_pair_impl() }
-    fn emit_store_pair_indirect(&mut self) { self.emit_store_pair_indirect_impl() }
-    fn emit_load_pair_indirect(&mut self) { self.emit_load_pair_indirect_impl() }
-    fn emit_i128_neg(&mut self) { self.emit_i128_neg_impl() }
-    fn emit_i128_not(&mut self) { self.emit_i128_not_impl() }
-    fn emit_i128_to_float_call(&mut self, src: &Operand, from_signed: bool, to_ty: IrType) { self.emit_i128_to_float_call_impl(src, from_signed, to_ty) }
-    fn emit_float_to_i128_call(&mut self, src: &Operand, to_signed: bool, from_ty: IrType) { self.emit_float_to_i128_call_impl(src, to_signed, from_ty) }
-    fn emit_i128_prep_binop(&mut self, lhs: &Operand, rhs: &Operand) { self.emit_i128_prep_binop_impl(lhs, rhs) }
-    fn emit_i128_prep_shift_lhs(&mut self, lhs: &Operand) { self.emit_i128_prep_shift_lhs_impl(lhs) }
-    fn emit_i128_add(&mut self) { self.emit_i128_add_impl() }
-    fn emit_i128_sub(&mut self) { self.emit_i128_sub_impl() }
-    fn emit_i128_mul(&mut self) { self.emit_i128_mul_impl() }
-    fn emit_i128_and(&mut self) { self.emit_i128_and_impl() }
-    fn emit_i128_or(&mut self) { self.emit_i128_or_impl() }
-    fn emit_i128_xor(&mut self) { self.emit_i128_xor_impl() }
-    fn emit_i128_shl(&mut self) { self.emit_i128_shl_impl() }
-    fn emit_i128_lshr(&mut self) { self.emit_i128_lshr_impl() }
-    fn emit_i128_ashr(&mut self) { self.emit_i128_ashr_impl() }
-    fn emit_i128_shl_const(&mut self, amount: u32) { self.emit_i128_shl_const_impl(amount) }
-    fn emit_i128_lshr_const(&mut self, amount: u32) { self.emit_i128_lshr_const_impl(amount) }
-    fn emit_i128_ashr_const(&mut self, amount: u32) { self.emit_i128_ashr_const_impl(amount) }
-    fn emit_i128_divrem_call(&mut self, func_name: &str, lhs: &Operand, rhs: &Operand) { self.emit_i128_divrem_call_impl(func_name, lhs, rhs) }
-    fn emit_i128_store_result(&mut self, dest: &Value) { self.emit_i128_store_result_impl(dest) }
-    fn emit_i128_cmp_eq(&mut self, is_ne: bool) { self.emit_i128_cmp_eq_impl(is_ne) }
-    fn emit_i128_cmp_ordered(&mut self, op: IrCmpOp) { self.emit_i128_cmp_ordered_impl(op) }
-    fn emit_i128_cmp_store_result(&mut self, dest: &Value) { self.emit_i128_cmp_store_result_impl(dest) }
+    delegate_to_impl! {
+        // prologue
+        fn calculate_stack_space(&mut self, func: &IrFunction) -> i64 => calculate_stack_space_impl;
+        fn aligned_frame_size(&self, raw_space: i64) -> i64 => aligned_frame_size_impl;
+        fn emit_prologue(&mut self, func: &IrFunction, frame_size: i64) => emit_prologue_impl;
+        fn emit_epilogue(&mut self, frame_size: i64) => emit_epilogue_impl;
+        fn emit_store_params(&mut self, func: &IrFunction) => emit_store_params_impl;
+        fn emit_param_ref(&mut self, dest: &Value, param_idx: usize, ty: IrType) => emit_param_ref_impl;
+        fn emit_epilogue_and_ret(&mut self, frame_size: i64) => emit_epilogue_and_ret_impl;
+        fn store_instr_for_type(&self, ty: IrType) -> &'static str => store_instr_for_type_impl;
+        fn load_instr_for_type(&self, ty: IrType) -> &'static str => load_instr_for_type_impl;
+        // memory
+        fn emit_store(&mut self, val: &Operand, ptr: &Value, ty: IrType) => emit_store_impl;
+        fn emit_load(&mut self, dest: &Value, ptr: &Value, ty: IrType) => emit_load_impl;
+        fn emit_store_with_const_offset(&mut self, val: &Operand, base: &Value, offset: i64, ty: IrType) => emit_store_with_const_offset_impl;
+        fn emit_load_with_const_offset(&mut self, dest: &Value, base: &Value, offset: i64, ty: IrType) => emit_load_with_const_offset_impl;
+        fn emit_typed_store_to_slot(&mut self, instr: &'static str, ty: IrType, slot: StackSlot) => emit_typed_store_to_slot_impl;
+        fn emit_typed_load_from_slot(&mut self, instr: &'static str, slot: StackSlot) => emit_typed_load_from_slot_impl;
+        fn emit_load_ptr_from_slot(&mut self, slot: StackSlot, val_id: u32) => emit_load_ptr_from_slot_impl;
+        fn emit_typed_store_indirect(&mut self, instr: &'static str, ty: IrType) => emit_typed_store_indirect_impl;
+        fn emit_typed_load_indirect(&mut self, instr: &'static str) => emit_typed_load_indirect_impl;
+        fn emit_add_offset_to_addr_reg(&mut self, offset: i64) => emit_add_offset_to_addr_reg_impl;
+        fn emit_slot_addr_to_secondary(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) => emit_slot_addr_to_secondary_impl;
+        fn emit_gep_direct_const(&mut self, slot: StackSlot, offset: i64) => emit_gep_direct_const_impl;
+        fn emit_gep_indirect_const(&mut self, slot: StackSlot, offset: i64, val_id: u32) => emit_gep_indirect_const_impl;
+        fn emit_add_imm_to_acc(&mut self, imm: i64) => emit_add_imm_to_acc_impl;
+        fn emit_round_up_acc_to_16(&mut self) => emit_round_up_acc_to_16_impl;
+        fn emit_sub_sp_by_acc(&mut self) => emit_sub_sp_by_acc_impl;
+        fn emit_mov_sp_to_acc(&mut self) => emit_mov_sp_to_acc_impl;
+        fn emit_mov_acc_to_sp(&mut self) => emit_mov_acc_to_sp_impl;
+        fn emit_align_acc(&mut self, align: usize) => emit_align_acc_impl;
+        fn emit_alloca_aligned_addr(&mut self, slot: StackSlot, val_id: u32) => emit_alloca_aligned_addr_impl;
+        fn emit_alloca_aligned_addr_to_acc(&mut self, slot: StackSlot, val_id: u32) => emit_alloca_aligned_addr_to_acc_impl;
+        fn emit_memcpy_load_dest_addr(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) => emit_memcpy_load_dest_addr_impl;
+        fn emit_memcpy_load_src_addr(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) => emit_memcpy_load_src_addr_impl;
+        fn emit_memcpy_impl(&mut self, size: usize) => emit_memcpy_impl_impl;
+        // alu
+        fn emit_float_neg(&mut self, ty: IrType) => emit_float_neg_impl;
+        fn emit_int_neg(&mut self, ty: IrType) => emit_int_neg_impl;
+        fn emit_int_not(&mut self, ty: IrType) => emit_int_not_impl;
+        fn emit_int_clz(&mut self, ty: IrType) => emit_int_clz_impl;
+        fn emit_int_ctz(&mut self, ty: IrType) => emit_int_ctz_impl;
+        fn emit_int_bswap(&mut self, ty: IrType) => emit_int_bswap_impl;
+        fn emit_int_popcount(&mut self, ty: IrType) => emit_int_popcount_impl;
+        fn emit_int_binop(&mut self, dest: &Value, op: IrBinOp, lhs: &Operand, rhs: &Operand, ty: IrType) => emit_int_binop_impl;
+        // comparison
+        fn emit_float_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) => emit_float_cmp_impl;
+        fn emit_f128_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand) => emit_f128_cmp_impl;
+        fn emit_int_cmp(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) => emit_int_cmp_impl;
+        fn emit_fused_cmp_branch(&mut self, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType, true_label: &str, false_label: &str) => emit_fused_cmp_branch_impl;
+        fn emit_select(&mut self, dest: &Value, cond: &Operand, true_val: &Operand, false_val: &Operand, ty: IrType) => emit_select_impl;
+        fn emit_f128_neg(&mut self, dest: &Value, src: &Operand) => emit_f128_neg_impl;
+        // calls
+        fn call_abi_config(&self) -> call_abi::CallAbiConfig => call_abi_config_impl;
+        fn emit_call_f128_pre_convert(&mut self, args: &[Operand], arg_classes: &[call_abi::CallArgClass], arg_types: &[IrType], stack_arg_space: usize) -> usize => emit_call_f128_pre_convert_impl;
+        fn emit_call_compute_stack_space(&self, arg_classes: &[call_abi::CallArgClass], arg_types: &[IrType]) -> usize => emit_call_compute_stack_space_impl;
+        fn emit_call_stack_args(&mut self, args: &[Operand], arg_classes: &[call_abi::CallArgClass], arg_types: &[IrType], stack_arg_space: usize, fptr_spill: usize, f128_temp_space: usize) -> i64 => emit_call_stack_args_impl;
+        fn emit_call_reg_args(&mut self, args: &[Operand], arg_classes: &[call_abi::CallArgClass], arg_types: &[IrType], total_sp_adjust: i64, f128_temp_space: usize, stack_arg_space: usize, struct_arg_riscv_float_classes: &[Option<crate::common::types::RiscvFloatClass>]) => emit_call_reg_args_impl;
+        fn emit_call_instruction(&mut self, direct_name: Option<&str>, func_ptr: Option<&Operand>, indirect: bool, stack_arg_space: usize) => emit_call_instruction_impl;
+        fn emit_call_cleanup(&mut self, stack_arg_space: usize, f128_temp_space: usize, indirect: bool) => emit_call_cleanup_impl;
+        fn emit_call_store_result(&mut self, dest: &Value, return_type: IrType) => emit_call_store_result_impl;
+        fn emit_call_store_i128_result(&mut self, dest: &Value) => emit_call_store_i128_result_impl;
+        fn emit_call_store_f128_result(&mut self, dest: &Value) => emit_call_store_f128_result_impl;
+        fn emit_call_move_f32_to_acc(&mut self) => emit_call_move_f32_to_acc_impl;
+        fn emit_call_move_f64_to_acc(&mut self) => emit_call_move_f64_to_acc_impl;
+        // globals
+        fn emit_global_addr(&mut self, dest: &Value, name: &str) => emit_global_addr_impl;
+        fn emit_label_addr(&mut self, dest: &Value, label: &str) => emit_label_addr_impl;
+        fn emit_tls_global_addr(&mut self, dest: &Value, name: &str) => emit_tls_global_addr_impl;
+        // cast
+        fn emit_cast(&mut self, dest: &Value, src: &Operand, from_ty: IrType, to_ty: IrType) => emit_cast_impl;
+        fn emit_cast_instrs(&mut self, from_ty: IrType, to_ty: IrType) => emit_cast_instrs_impl;
+        // variadic
+        fn emit_va_arg(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType) => emit_va_arg_impl;
+        fn emit_va_start(&mut self, va_list_ptr: &Value) => emit_va_start_impl;
+        fn emit_va_copy(&mut self, dest_ptr: &Value, src_ptr: &Value) => emit_va_copy_impl;
+        fn emit_va_arg_struct(&mut self, dest_ptr: &Value, va_list_ptr: &Value, size: usize) => emit_va_arg_struct_impl;
+        // returns
+        fn emit_return(&mut self, val: Option<&Operand>, frame_size: i64) => emit_return_impl;
+        fn emit_return_i128_to_regs(&mut self) => emit_return_i128_to_regs_impl;
+        fn emit_return_f128_to_reg(&mut self) => emit_return_f128_to_reg_impl;
+        fn emit_return_f32_to_reg(&mut self) => emit_return_f32_to_reg_impl;
+        fn emit_return_f64_to_reg(&mut self) => emit_return_f64_to_reg_impl;
+        fn emit_return_int_to_reg(&mut self) => emit_return_int_to_reg_impl;
+        fn emit_get_return_f64_second(&mut self, dest: &Value) => emit_get_return_f64_second_impl;
+        fn emit_set_return_f64_second(&mut self, src: &Operand) => emit_set_return_f64_second_impl;
+        fn emit_get_return_f32_second(&mut self, dest: &Value) => emit_get_return_f32_second_impl;
+        fn emit_set_return_f32_second(&mut self, src: &Operand) => emit_set_return_f32_second_impl;
+        fn emit_get_return_f128_second(&mut self, dest: &Value) => emit_get_return_f128_second_impl;
+        fn emit_set_return_f128_second(&mut self, src: &Operand) => emit_set_return_f128_second_impl;
+        // atomics
+        fn emit_atomic_rmw(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, ordering: AtomicOrdering) => emit_atomic_rmw_impl;
+        fn emit_atomic_cmpxchg(&mut self, dest: &Value, ptr: &Operand, expected: &Operand, desired: &Operand, ty: IrType, success_ordering: AtomicOrdering, failure_ordering: AtomicOrdering, returns_bool: bool) => emit_atomic_cmpxchg_impl;
+        fn emit_atomic_load(&mut self, dest: &Value, ptr: &Operand, ty: IrType, ordering: AtomicOrdering) => emit_atomic_load_impl;
+        fn emit_atomic_store(&mut self, ptr: &Operand, val: &Operand, ty: IrType, ordering: AtomicOrdering) => emit_atomic_store_impl;
+        fn emit_fence(&mut self, ordering: AtomicOrdering) => emit_fence_impl;
+        // i128 ops
+        fn emit_sign_extend_acc_high(&mut self) => emit_sign_extend_acc_high_impl;
+        fn emit_zero_acc_high(&mut self) => emit_zero_acc_high_impl;
+        fn emit_load_acc_pair(&mut self, op: &Operand) => emit_load_acc_pair_impl;
+        fn emit_store_acc_pair(&mut self, dest: &Value) => emit_store_acc_pair_impl;
+        fn emit_store_pair_to_slot(&mut self, slot: StackSlot) => emit_store_pair_to_slot_impl;
+        fn emit_load_pair_from_slot(&mut self, slot: StackSlot) => emit_load_pair_from_slot_impl;
+        fn emit_save_acc_pair(&mut self) => emit_save_acc_pair_impl;
+        fn emit_store_pair_indirect(&mut self) => emit_store_pair_indirect_impl;
+        fn emit_load_pair_indirect(&mut self) => emit_load_pair_indirect_impl;
+        fn emit_i128_neg(&mut self) => emit_i128_neg_impl;
+        fn emit_i128_not(&mut self) => emit_i128_not_impl;
+        fn emit_i128_to_float_call(&mut self, src: &Operand, from_signed: bool, to_ty: IrType) => emit_i128_to_float_call_impl;
+        fn emit_float_to_i128_call(&mut self, src: &Operand, to_signed: bool, from_ty: IrType) => emit_float_to_i128_call_impl;
+        fn emit_i128_prep_binop(&mut self, lhs: &Operand, rhs: &Operand) => emit_i128_prep_binop_impl;
+        fn emit_i128_prep_shift_lhs(&mut self, lhs: &Operand) => emit_i128_prep_shift_lhs_impl;
+        fn emit_i128_add(&mut self) => emit_i128_add_impl;
+        fn emit_i128_sub(&mut self) => emit_i128_sub_impl;
+        fn emit_i128_mul(&mut self) => emit_i128_mul_impl;
+        fn emit_i128_and(&mut self) => emit_i128_and_impl;
+        fn emit_i128_or(&mut self) => emit_i128_or_impl;
+        fn emit_i128_xor(&mut self) => emit_i128_xor_impl;
+        fn emit_i128_shl(&mut self) => emit_i128_shl_impl;
+        fn emit_i128_lshr(&mut self) => emit_i128_lshr_impl;
+        fn emit_i128_ashr(&mut self) => emit_i128_ashr_impl;
+        fn emit_i128_shl_const(&mut self, amount: u32) => emit_i128_shl_const_impl;
+        fn emit_i128_lshr_const(&mut self, amount: u32) => emit_i128_lshr_const_impl;
+        fn emit_i128_ashr_const(&mut self, amount: u32) => emit_i128_ashr_const_impl;
+        fn emit_i128_divrem_call(&mut self, func_name: &str, lhs: &Operand, rhs: &Operand) => emit_i128_divrem_call_impl;
+        fn emit_i128_store_result(&mut self, dest: &Value) => emit_i128_store_result_impl;
+        fn emit_i128_cmp_eq(&mut self, is_ne: bool) => emit_i128_cmp_eq_impl;
+        fn emit_i128_cmp_ordered(&mut self, op: IrCmpOp) => emit_i128_cmp_ordered_impl;
+        fn emit_i128_cmp_store_result(&mut self, dest: &Value) => emit_i128_cmp_store_result_impl;
+    }
 
     // ---- Segment overrides (x86-specific) ----
 
