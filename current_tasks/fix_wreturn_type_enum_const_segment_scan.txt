@@ -1,0 +1,25 @@
+Fix -Wreturn-type: enum constant eval in while(true) and segment scanning past null statements
+
+Two remaining -Wreturn-type false positives blocking the Linux kernel build:
+
+1. Enum constant evaluation in try_eval_constant_bool()
+   - Linux kernel defines true/false as enum constants: enum { false = 0, true = 1 };
+   - while(true) is not recognized as an infinite loop because try_eval_constant_bool
+     only handles integer literals, not enum constant identifiers
+   - Fix: Look up Expr::Identifier names in the enum_constants table
+   - Affected files: interval_tree.c (4 errors), xz_dec_stream.c (1 error)
+
+2. Switch segment outcome scanning past trailing null statements
+   - Macros like RETURN_ERROR(...) expand to: do { return ...; } while(0);
+   - When used as the last case in a switch, the trailing semicollon after while(0)
+     creates an empty/null statement: do { return ...; } while(0);;
+   - segment_outcome() only checks the LAST BlockItem in a segment
+   - The last BlockItem is the null statement (falls through), not the do-while (returns)
+   - Fix: scan backwards past Stmt::Expr(None) and similar empty statements
+   - Affected files: zstd_decompress.c, zstd_decompress_block.c (3 errors)
+
+Together these fix 8 of the 9 remaining -Wreturn-type errors (the 9th is workqueue.c
+which needs investigation into -DKBUILD_MODNAME interaction).
+
+Status: in_progress
+Started: 2026-01-30
