@@ -895,7 +895,7 @@ fn global_store_forwarding(lines: &mut [String], kinds: &mut [LineKind], n: usiz
         return false;
     }
 
-    let jump_targets = collect_jump_targets(lines, kinds, n);
+    let _jump_targets = collect_jump_targets(lines, kinds, n);
 
     // Slot tracking: Vec of (offset, SlotMapping)
     let mut slots: Vec<(i32, SlotMapping)> = Vec::new();
@@ -909,7 +909,7 @@ fn global_store_forwarding(lines: &mut [String], kinds: &mut [LineKind], n: usiz
             continue;
         }
 
-        let was_uncond = prev_was_uncond;
+        let _was_uncond = prev_was_uncond;
         prev_was_uncond = false;
 
         match kinds[i] {

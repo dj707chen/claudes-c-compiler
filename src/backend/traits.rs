@@ -190,6 +190,7 @@ pub trait ArchCodegen {
     }
 
     /// Get the assembly name for a physical register.
+    #[allow(dead_code)]
     fn phys_reg_name(&self, _reg: PhysReg) -> &'static str {
         panic!("backend must implement phys_reg_name when using register allocation");
     }
@@ -1374,6 +1375,7 @@ pub fn build_jump_table(cases: &[(i64, BlockId)], default: &BlockId) -> (Vec<Blo
 ///
 /// Each entry is a pointer-sized absolute address of the target label,
 /// using the architecture's pointer directive (.quad/.xword/.dword).
+#[allow(dead_code)]
 pub fn emit_jump_table_rodata(cg: &mut (impl ArchCodegen + ?Sized), table_label: &str, table: &[BlockId]) {
     let ptr_dir = cg.ptr_directive();
     // x86: .align 8 (byte alignment), ARM/RISC-V: .align 3 (2^3 = 8-byte alignment)

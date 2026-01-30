@@ -68,6 +68,7 @@ struct DerivedExpr {
 }
 
 /// Run IVSR on a single function.
+#[allow(dead_code)]
 pub(crate) fn ivsr_function(func: &mut IrFunction) -> usize {
     let num_blocks = func.blocks.len();
     if num_blocks < 2 {

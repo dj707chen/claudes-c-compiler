@@ -615,12 +615,14 @@ impl StructLayout {
     }
 
     /// Convenience wrapper: compute layout with default (no packing).
+    #[allow(dead_code)]
     pub fn for_struct(fields: &[StructField], ctx: &dyn StructLayoutProvider) -> Self {
         Self::for_struct_with_packing(fields, None, ctx)
     }
 
     /// Compute the layout for a union (all fields at offset 0, size = max field size).
     /// Convenience wrapper with no packing.
+    #[allow(dead_code)]
     pub fn for_union(fields: &[StructField], ctx: &dyn StructLayoutProvider) -> Self {
         Self::for_union_with_packing(fields, None, ctx)
     }
@@ -1398,6 +1400,7 @@ impl CType {
 
     /// Alignment in bytes for non-struct/union types. For struct/union, returns 1.
     /// Use align_ctx() when you need accurate struct/union alignment.
+    #[allow(dead_code)]
     pub fn align(&self) -> usize {
         match self {
             CType::Struct(_) | CType::Union(_) => 1,
@@ -1409,6 +1412,7 @@ impl CType {
     }
 
     /// Get the struct/union layout key if this is a CType::Struct or CType::Union.
+    #[allow(dead_code)]
     pub fn struct_key(&self) -> Option<&str> {
         match self {
             CType::Struct(key) | CType::Union(key) => Some(key),
@@ -1486,6 +1490,7 @@ impl CType {
     }
 
     /// Get the complex type for a given real component type.
+    #[allow(dead_code)]
     pub fn to_complex(&self) -> CType {
         match self {
             CType::Float => CType::ComplexFloat,
@@ -1671,6 +1676,7 @@ impl CType {
     }
 
     /// Get the pointee type if this is a Pointer.
+    #[allow(dead_code)]
     pub fn pointee(&self) -> Option<&CType> {
         match self {
             CType::Pointer(inner, _) => Some(inner),
@@ -1679,6 +1685,7 @@ impl CType {
     }
 
     /// Get the array element type if this is an Array.
+    #[allow(dead_code)]
     pub fn array_element(&self) -> Option<&CType> {
         match self {
             CType::Array(elem, _) => Some(elem),
@@ -1687,6 +1694,7 @@ impl CType {
     }
 
     /// Get the array length if this is a sized Array.
+    #[allow(dead_code)]
     pub fn array_len(&self) -> Option<usize> {
         match self {
             CType::Array(_, Some(n)) => Some(*n),
@@ -1721,11 +1729,13 @@ impl CType {
     }
 
     /// Whether this is a struct type.
+    #[allow(dead_code)]
     pub fn is_struct(&self) -> bool {
         matches!(self, CType::Struct(_))
     }
 
     /// Whether this is a union type.
+    #[allow(dead_code)]
     pub fn is_union(&self) -> bool {
         matches!(self, CType::Union(_))
     }
@@ -1868,6 +1878,7 @@ impl IrType {
     }
 
     /// Get the signed counterpart of this type.
+    #[allow(dead_code)]
     pub fn to_signed(&self) -> Self {
         match self {
             IrType::U8 => IrType::I8,

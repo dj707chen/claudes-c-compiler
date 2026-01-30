@@ -1186,6 +1186,7 @@ impl ArmCodegen {
 
     /// Add an immediate offset to x17. Used by F128 load/store paths that
     /// use x17 as the address register instead of x9 (which emit_add_offset_to_addr_reg uses).
+    #[allow(dead_code)]
     fn emit_add_imm_to_x17(&mut self, offset: i64) {
         if (0..=4095).contains(&offset) {
             self.state.emit_fmt(format_args!("    add x17, x17, #{}", offset));

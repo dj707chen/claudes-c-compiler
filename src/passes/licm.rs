@@ -334,7 +334,7 @@ struct LoopMemoryInfo {
 fn analyze_loop_memory(
     func: &IrFunction,
     loop_body: &FxHashSet<usize>,
-    alloca_info: &AllocaAnalysis,
+    _alloca_info: &AllocaAnalysis,
     global_addr_values: &FxHashSet<u32>,
 ) -> LoopMemoryInfo {
     let mut stored_allocas = FxHashSet::default();

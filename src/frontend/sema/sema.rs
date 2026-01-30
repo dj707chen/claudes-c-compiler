@@ -71,6 +71,7 @@ pub type ExprTypeMap = FxHashMap<ExprId, CType>;
 
 /// Information about a function collected during semantic analysis.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FunctionInfo {
     pub name: String,
     pub return_type: CType,
@@ -190,6 +191,7 @@ impl SemanticAnalyzer {
     }
 
     /// Get a reference to the analysis results.
+    #[allow(dead_code)]
     pub fn result(&self) -> &SemaResult {
         &self.result
     }

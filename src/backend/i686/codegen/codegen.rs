@@ -382,6 +382,7 @@ impl I686Codegen {
     }
 
     /// Return the register name for ecx sub-register based on type size.
+    #[allow(dead_code)]
     pub(super) fn ecx_for_type(&self, ty: IrType) -> &'static str {
         match ty {
             IrType::I8 | IrType::U8 => "%cl",
@@ -391,6 +392,7 @@ impl I686Codegen {
     }
 
     /// Return the register name for edx sub-register based on type size.
+    #[allow(dead_code)]
     pub(super) fn edx_for_type(&self, ty: IrType) -> &'static str {
         match ty {
             IrType::I8 | IrType::U8 => "%dl",

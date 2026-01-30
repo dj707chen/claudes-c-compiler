@@ -15,6 +15,7 @@ impl Span {
         Self { start: 0, end: 0, file_id: 0 }
     }
 
+    #[allow(dead_code)]
     pub fn merge(self, other: Span) -> Span {
         Span {
             start: self.start.min(other.start),
@@ -137,6 +138,7 @@ impl SourceManager {
         &self.files[file_id as usize].content
     }
 
+    #[allow(dead_code)]
     pub fn get_filename(&self, file_id: u32) -> &str {
         &self.files[file_id as usize].name
     }

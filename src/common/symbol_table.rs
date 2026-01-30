@@ -4,6 +4,7 @@ use crate::common::fx_hash::FxHashMap;
 
 /// Storage class for a symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum StorageClass {
     Auto,
     Static,
@@ -14,6 +15,7 @@ pub enum StorageClass {
 
 /// Information about a declared symbol.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Symbol {
     pub name: String,
     pub ty: CType,

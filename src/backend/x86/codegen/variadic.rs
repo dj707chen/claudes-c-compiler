@@ -184,14 +184,13 @@ impl X86Codegen {
             }
         }
 
-        let mut need_gp_check = gp_needed > 0;
+        let need_gp_check = gp_needed > 0;
         let mut need_fp_check = fp_needed > 0;
 
         if need_gp_check {
             let gp_threshold = 48i64 - (gp_needed as i64 * 8);
             if gp_threshold < 0 {
                 self.state.out.emit_jmp_label(&label_mem);
-                need_gp_check = false;
                 need_fp_check = false;
             } else {
                 self.state.emit("    movl (%rcx), %eax");

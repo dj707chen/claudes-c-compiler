@@ -475,6 +475,7 @@ pub enum Designator {
 
 /// Type specifiers.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum TypeSpecifier {
     Void,
     Char,
@@ -547,6 +548,7 @@ pub struct EnumVariant {
 
 /// A compound statement (block).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CompoundStmt {
     pub items: Vec<BlockItem>,
     pub span: Span,

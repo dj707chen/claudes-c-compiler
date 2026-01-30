@@ -97,6 +97,7 @@ impl CallArgClass {
 /// kind of store logic is needed, without the backend reimplementing the ABI
 /// classification algorithm.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum ParamClass {
     /// Integer/pointer in GP register at `reg_idx`.
     IntReg { reg_idx: usize },
@@ -246,6 +247,7 @@ pub struct CallAbiConfig {
 /// Result of SysV per-eightbyte struct classification.
 /// Describes how a small struct (<=16 bytes) should be passed in registers.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum SysvStructRegClass {
     /// All eightbytes are INTEGER class -> GP registers only.
     AllInt { gp_count: usize },
@@ -310,6 +312,7 @@ pub fn classify_sysv_struct(
 /// Both the caller (`classify_call_args`) and callee (`classify_params_full`) paths
 /// construct one `ArgInfo` per argument/parameter, then pass the slice to the shared
 /// `classify_args_core` function.
+#[allow(dead_code)]
 pub(crate) struct ArgInfo<'a> {
     pub(crate) is_float: bool,
     pub(crate) is_i128: bool,

@@ -583,6 +583,7 @@ impl Preprocessor {
     }
 
     /// Get the list of includes encountered during preprocessing.
+    #[allow(dead_code)]
     pub fn includes(&self) -> &[String] {
         &self.includes
     }

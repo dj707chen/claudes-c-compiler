@@ -190,7 +190,7 @@ python3 /verify/verify_compiler.py --compiler target/release/ccc --arch x86
 
 - `src/` -- Compiler source code (Rust)
 - `include/` -- Bundled C headers (SSE/AVX intrinsic stubs)
-- `tests/` -- Test suite (~797 test directories)
+- `tests/` -- Test suite (~874 test directories)
 - `ideas/` -- Design docs and future work proposals
 - `current_tasks/` -- Active work items (lock files for coordination)
 - `completed_tasks/` -- Finished work items (for reference)

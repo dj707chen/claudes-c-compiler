@@ -266,6 +266,7 @@ pub struct Parser {
     /// Count of parse errors encountered (invalid tokens at top level, etc.)
     pub error_count: usize,
     /// Source manager for resolving spans to file:line:col in error messages.
+    #[allow(dead_code)]
     source_manager: Option<SourceManager>,
     /// Structured diagnostic engine for error/warning reporting with source snippets.
     pub(super) diagnostics: DiagnosticEngine,
@@ -304,6 +305,7 @@ impl Parser {
     /// Set the source manager for resolving spans to file:line:col in errors.
     /// Note: the driver typically sets the SM on the DiagnosticEngine instead
     /// (via set_diagnostics), so this is mainly for backward compatibility.
+    #[allow(dead_code)]
     pub fn set_source_manager(&mut self, sm: SourceManager) {
         self.source_manager = Some(sm);
     }
@@ -312,6 +314,7 @@ impl Parser {
     /// Checks the parser's own field first, then the diagnostic engine.
     /// Used by the driver to pass the source manager to the backend for
     /// debug info (.file/.loc) emission when compiling with -g.
+    #[allow(dead_code)]
     pub fn take_source_manager(&mut self) -> Option<SourceManager> {
         self.source_manager.take().or_else(|| self.diagnostics.take_source_manager())
     }
@@ -1178,6 +1181,7 @@ impl Parser {
 
     /// Compute sizeof (in bytes) for a type specifier.
     /// Used by sizeof(type) in parser-level constant evaluation.
+    #[allow(dead_code)]
     pub(super) fn sizeof_type_spec(ts: &TypeSpecifier) -> usize {
         // For types we can't compute at parse time, fall back conservatively.
         // Use try_sizeof_type_spec() when an incorrect fallback would be harmful.

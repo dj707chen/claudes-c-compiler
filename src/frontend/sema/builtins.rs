@@ -447,6 +447,7 @@ pub struct BuiltinInfo {
 
 /// The kind of builtin behavior.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum BuiltinKind {
     /// Map directly to a libc function call.
     LibcAlias(String),
@@ -642,6 +643,7 @@ pub fn resolve_builtin(name: &str) -> Option<&'static BuiltinInfo> {
 }
 
 /// Returns the libc name for a builtin, or None if it's not a simple alias.
+#[allow(dead_code)]
 pub fn builtin_to_libc_name(name: &str) -> Option<&str> {
     match resolve_builtin(name) {
         Some(info) => match &info.kind {

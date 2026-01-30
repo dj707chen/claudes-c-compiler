@@ -119,6 +119,7 @@ impl GlobalInit {
 
     /// Returns true if this initializer contains relocations (addresses of globals/labels).
     /// Used to decide between .rodata (no relocations) and .data.rel.ro (has relocations).
+    #[allow(dead_code)]
     pub fn has_relocations(&self) -> bool {
         match self {
             GlobalInit::GlobalAddr(_) | GlobalInit::GlobalAddrOffset(_, _) | GlobalInit::GlobalLabelDiff(_, _, _) => true,
@@ -169,6 +170,7 @@ impl GlobalInit {
 
 /// An IR function.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct IrFunction {
     pub name: String,
     pub return_type: IrType,
@@ -228,6 +230,7 @@ pub struct IrFunction {
 
 /// A function parameter.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct IrParam {
     pub name: String,
     pub ty: IrType,
@@ -286,6 +289,7 @@ impl Default for IrModule {
 }
 
 impl IrFunction {
+    #[allow(dead_code)]
     pub fn new(name: String, return_type: IrType, params: Vec<IrParam>, is_variadic: bool) -> Self {
         Self {
             name,

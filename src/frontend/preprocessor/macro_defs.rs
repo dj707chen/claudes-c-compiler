@@ -55,6 +55,7 @@ fn would_paste_tokens(last: u8, first: u8) -> bool {
 
 /// Represents a macro definition.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MacroDef {
     /// Name of the macro
     pub name: String,

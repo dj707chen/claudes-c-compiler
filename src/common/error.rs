@@ -223,6 +223,7 @@ impl WarningConfig {
     }
 
     /// Set global -Werror (all warnings become errors).
+    #[allow(dead_code)]
     pub fn set_werror_all(&mut self, val: bool) {
         self.werror_all = val;
     }
@@ -488,6 +489,7 @@ impl DiagnosticEngine {
     }
 
     /// Get a reference to the warning configuration.
+    #[allow(dead_code)]
     pub fn warning_config(&self) -> &WarningConfig {
         &self.warning_config
     }
@@ -503,6 +505,7 @@ impl DiagnosticEngine {
     }
 
     /// Get a reference to the source manager (if set).
+    #[allow(dead_code)]
     pub fn source_manager(&self) -> Option<&SourceManager> {
         self.source_manager.as_ref()
     }
@@ -596,6 +599,7 @@ impl DiagnosticEngine {
     }
 
     /// Emit an error with just a message (no span).
+    #[allow(dead_code)]
     pub fn error_no_span(&mut self, message: impl Into<String>) {
         let diag = Diagnostic::error(message);
         self.emit(&diag);
@@ -608,6 +612,7 @@ impl DiagnosticEngine {
     }
 
     /// Emit a warning with just a message (no span).
+    #[allow(dead_code)]
     pub fn warning_no_span(&mut self, message: impl Into<String>) {
         let diag = Diagnostic::warning(message);
         self.emit(&diag);
@@ -620,6 +625,7 @@ impl DiagnosticEngine {
     }
 
     /// Emit a categorized warning with just a message (no span).
+    #[allow(dead_code)]
     pub fn warning_with_kind_no_span(&mut self, message: impl Into<String>, kind: WarningKind) {
         let diag = Diagnostic::warning_with_kind(message, kind);
         self.emit(&diag);

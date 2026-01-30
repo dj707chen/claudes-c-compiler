@@ -39,6 +39,7 @@ pub struct LiveInterval {
 }
 
 /// Result of liveness analysis: maps value IDs to their live intervals.
+#[allow(dead_code)]
 pub struct LivenessResult {
     pub intervals: Vec<LiveInterval>,
     /// Total number of program points (for debugging/sizing).
