@@ -615,13 +615,19 @@ fn emit_extern_visibility_directives(cg: &mut dyn ArchCodegen, module: &IrModule
 }
 
 /// Emit text section, handle custom sections, and generate code for each function.
+/// When `-ffunction-sections` is enabled, each function without a custom section
+/// attribute gets its own `.text.funcname` section, enabling `--gc-sections` to
+/// discard unreferenced functions at link time.
 fn emit_functions_and_sections(
     cg: &mut dyn ArchCodegen,
     module: &IrModule,
     source_mgr: Option<&crate::common::source::SourceManager>,
     file_table: &FxHashMap<String, u32>,
 ) {
-    cg.state().emit(".section .text");
+    let function_sections = cg.state().function_sections;
+    if !function_sections {
+        cg.state().emit(".section .text");
+    }
     let mut in_custom_section = false;
     for func in &module.functions {
         if !func.is_declaration {
@@ -629,6 +635,12 @@ fn emit_functions_and_sections(
                 cg.state().emit_fmt(format_args!(".section {},\"ax\",@progbits", sect));
                 cg.state().current_text_section = sect.clone();
                 in_custom_section = true;
+            } else if function_sections {
+                // -ffunction-sections: each function gets its own section
+                let sect_name = format!(".text.{}", func.name);
+                cg.state().emit_fmt(format_args!(".section {},\"ax\",@progbits", sect_name));
+                cg.state().current_text_section = sect_name;
+                in_custom_section = false;
             } else if in_custom_section {
                 cg.state().emit(".section .text");
                 cg.state().current_text_section = ".text".to_string();
@@ -747,6 +759,20 @@ fn generate_function(cg: &mut dyn ArchCodegen, func: &IrFunction, source_mgr: Op
                 cg.state().emit("nop");
             }
         }
+    }
+
+    // Naked functions: emit only inline asm blocks, no prologue/epilogue/params.
+    if func.is_naked {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let Instruction::InlineAsm { template, .. } = inst {
+                    cg.emit_raw_inline_asm(template);
+                }
+            }
+        }
+        cg.state().emit_fmt(format_args!(".size {}, .-{}", func.name, func.name));
+        cg.state().emit("");
+        return;
     }
 
     // Pre-scan for DynAlloca/StackRestore: if present, the epilogue must restore SP from

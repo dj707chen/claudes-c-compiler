@@ -143,7 +143,7 @@ fn shift_mnemonic(op: IrBinOp) -> (&'static str, &'static str) {
 /// x86-64 code generator. Implements the ArchCodegen trait for the shared framework.
 /// Uses System V AMD64 ABI with linear scan register allocation for callee-saved registers.
 pub struct X86Codegen {
-    pub(super) state: CodegenState,
+    pub(crate) state: CodegenState,
     current_return_type: IrType,
     /// For variadic functions: number of named integer/pointer parameters (excluding long double)
     num_named_int_params: usize,

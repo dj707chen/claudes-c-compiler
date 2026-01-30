@@ -37,7 +37,7 @@ use crate::{emit};
 /// i686 code generator. Implements the ArchCodegen trait for the shared framework.
 /// Uses cdecl calling convention with no register allocation (accumulator-based).
 pub struct I686Codegen {
-    pub(super) state: CodegenState,
+    pub(crate) state: CodegenState,
     current_return_type: IrType,
     /// Whether the current function is variadic
     is_variadic: bool,

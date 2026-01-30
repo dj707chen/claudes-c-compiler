@@ -216,6 +216,8 @@ pub struct IrFunction {
     /// __attribute__((fastcall)) - i386 fastcall calling convention.
     /// First two integer/pointer args passed in ecx/edx instead of stack.
     pub is_fastcall: bool,
+    /// __attribute__((naked)) - emit no prologue/epilogue; function body is pure asm.
+    pub is_naked: bool,
     /// Set by the inlining pass when call sites were inlined into this function.
     /// Used by post-inlining passes (mem2reg re-run, symbol resolution) to know
     /// that non-entry blocks may contain allocas from inlined callees.
@@ -1847,6 +1849,7 @@ impl IrFunction {
             param_alloca_values: Vec::new(),
             uses_sret: false,
             is_fastcall: false,
+            is_naked: false,
             global_init_label_blocks: Vec::new(),
         }
     }

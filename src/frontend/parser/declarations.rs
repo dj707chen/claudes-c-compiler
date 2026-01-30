@@ -163,6 +163,7 @@ impl Parser {
         let cleanup_fn = self.attrs.parsing_cleanup_fn.take();
         let is_used = self.attrs.parsing_used();
         let is_fastcall = self.attrs.parsing_fastcall();
+        let is_naked = self.attrs.parsing_naked();
 
         // Build per-declarator attributes struct from the collected flags
         let mut decl_attrs = DeclAttributes::default();
@@ -173,6 +174,7 @@ impl Parser {
         decl_attrs.set_noreturn(is_noreturn);
         decl_attrs.set_used(is_used);
         decl_attrs.set_fastcall(is_fastcall);
+        decl_attrs.set_naked(is_naked);
         decl_attrs.alias_target = alias_target;
         decl_attrs.visibility = visibility;
         decl_attrs.section = section;
@@ -270,6 +272,7 @@ impl Parser {
                 attrs.set_weak(decl_attrs.is_weak());
                 attrs.set_used(decl_attrs.is_used());
                 attrs.set_fastcall(decl_attrs.is_fastcall());
+                attrs.set_naked(decl_attrs.is_naked());
                 attrs.section = decl_attrs.section;
                 attrs.visibility = decl_attrs.visibility;
                 attrs
@@ -504,6 +507,7 @@ impl Parser {
         self.attrs.parsing_cleanup_fn = None;
         self.attrs.set_used(false);
         self.attrs.set_fastcall(false);
+        self.attrs.set_naked(false);
         ctx.is_common = ctx.is_common || extra_common;
         if let Some(a) = extra_aligned {
             ctx.alignment = Some(ctx.alignment.map_or(a, |prev| prev.max(a)));
@@ -526,6 +530,7 @@ impl Parser {
             self.attrs.set_weak(false);
             self.attrs.set_used(false);
             self.attrs.set_fastcall(false);
+            self.attrs.set_naked(false);
             let dinit = if self.consume_if(&TokenKind::Assign) {
                 Some(self.parse_initializer())
             } else {

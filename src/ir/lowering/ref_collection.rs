@@ -29,6 +29,10 @@ impl Lowerer {
     fn is_skippable_function(func: &FunctionDef) -> bool {
         let is_gnu_inline_no_extern_def = func.attrs.is_gnu_inline() && func.attrs.is_inline()
             && func.attrs.is_extern();
+        // C99 plain `inline` (without `extern`) is NOT skippable because
+        // other translation units may reference the symbol and we don't
+        // perform cross-function inlining. Only static and gnu_inline
+        // extern functions are skippable.
         func.attrs.is_static() || is_gnu_inline_no_extern_def
     }
 

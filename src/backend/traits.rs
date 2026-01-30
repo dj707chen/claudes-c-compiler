@@ -679,6 +679,16 @@ pub trait ArchCodegen {
     /// Emit inline assembly.
     fn emit_inline_asm(&mut self, template: &str, outputs: &[(String, Value, Option<String>)], inputs: &[(String, Operand, Option<String>)], clobbers: &[String], operand_types: &[IrType], goto_labels: &[(String, BlockId)], input_symbols: &[Option<String>]);
 
+    /// Emit raw inline assembly template for naked functions (no operand substitution).
+    fn emit_raw_inline_asm(&mut self, template: &str) {
+        for line in template.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                self.state().emit_fmt(format_args!("    {}", trimmed));
+            }
+        }
+    }
+
     /// Emit inline assembly with per-operand segment overrides.
     /// Default: delegates to emit_inline_asm (ignoring segment overrides).
     /// x86 backend overrides this to apply %gs:/%fs: prefixes to memory operands.

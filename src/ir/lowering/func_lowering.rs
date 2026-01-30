@@ -520,6 +520,14 @@ impl Lowerer {
         // in GNU89 semantics, so it should be GLOBAL.
         let is_gnu_inline_no_extern_def = func.attrs.is_gnu_inline() && func.attrs.is_inline()
             && func.attrs.is_extern();
+        // C99 6.7.4p7: A plain `inline` definition (without `extern`) does not
+        // provide an external definition. Emit with weak linkage so that:
+        // - multiple TUs including the same inline header don't cause
+        //   multiple definition errors (linker deduplicates weak symbols)
+        // - the symbol is still externally visible for cross-TU references
+        //   (important since we don't perform cross-function inlining)
+        let is_c99_inline_def = func.attrs.is_inline() && !func.attrs.is_extern()
+            && !func.attrs.is_static() && !func.attrs.is_gnu_inline();
         let is_static = func.attrs.is_static() || self.static_functions.contains(&func.name)
             || is_gnu_inline_no_extern_def;
         let next_val = self.func_mut().next_value;
@@ -536,12 +544,13 @@ impl Lowerer {
             next_value_id: next_val,
             section: func.attrs.section.clone(),
             visibility: func.attrs.visibility.clone(),
-            is_weak: func.attrs.is_weak(),
+            is_weak: func.attrs.is_weak() || is_c99_inline_def,
             is_used: func.attrs.is_used(),
             has_inlined_calls: false,
             param_alloca_values: param_alloca_vals,
             uses_sret,
             is_fastcall: func.attrs.is_fastcall(),
+            is_naked: func.attrs.is_naked(),
             global_init_label_blocks: global_init_labels,
         };
         self.module.functions.push(ir_func);

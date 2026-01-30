@@ -132,7 +132,7 @@ fn arm_invert_cond_code(cc: &str) -> &'static str {
 /// AArch64 code generator. Implements the ArchCodegen trait for the shared framework.
 /// Uses AAPCS64 calling convention with stack-based allocation.
 pub struct ArmCodegen {
-    pub(super) state: CodegenState,
+    pub(crate) state: CodegenState,
     /// Frame size for the current function (needed for epilogue in terminators).
     current_frame_size: i64,
     current_return_type: IrType,

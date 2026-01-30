@@ -296,6 +296,7 @@ impl Lowerer {
     ) {
         let elem_size = self.resolve_ctype_size(elem_ty);
         if elem_size == 0 { return; }
+        let elem_is_pointer = matches!(elem_ty, CType::Pointer(_, _) | CType::Function(_));
 
         // The FAM init should be a single item with a List initializer containing sub-items
         // (one per FAM element), e.g. .numbers = { { .nr = 0, .ns = &init_pid_ns } }
@@ -305,7 +306,7 @@ impl Lowerer {
             } else {
                 // Single expression init for a FAM element
                 let init_item = inits[0];
-                self.emit_compound_field_init(elements, &init_item.init, elem_ty, elem_size, false);
+                self.emit_compound_field_init(elements, &init_item.init, elem_ty, elem_size, elem_is_pointer);
                 let emitted = elem_size;
                 if emitted < fam_data_size {
                     push_zero_bytes(elements, fam_data_size - emitted);
@@ -318,7 +319,7 @@ impl Lowerer {
             let mut emitted = 0;
             for item in inits {
                 if emitted + elem_size > fam_data_size { break; }
-                self.emit_compound_field_init(elements, &item.init, elem_ty, elem_size, false);
+                self.emit_compound_field_init(elements, &item.init, elem_ty, elem_size, elem_is_pointer);
                 emitted += elem_size;
             }
             if emitted < fam_data_size {
@@ -340,11 +341,11 @@ impl Lowerer {
                         self.emit_sub_struct_to_compound(elements, nested_items, &sub_layout, elem_size);
                     }
                     _ => {
-                        self.emit_compound_field_init(elements, &sub_item.init, elem_ty, elem_size, false);
+                        self.emit_compound_field_init(elements, &sub_item.init, elem_ty, elem_size, elem_is_pointer);
                     }
                 }
             } else {
-                self.emit_compound_field_init(elements, &sub_item.init, elem_ty, elem_size, false);
+                self.emit_compound_field_init(elements, &sub_item.init, elem_ty, elem_size, elem_is_pointer);
             }
             emitted += elem_size;
         }

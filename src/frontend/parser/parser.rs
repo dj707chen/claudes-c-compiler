@@ -93,6 +93,8 @@ pub(super) mod parsed_attr_flag {
     pub const TRANSPARENT_UNION: u32 = 1 << 16;
     /// `__attribute__((fastcall))` encountered (i386 fastcall calling convention).
     pub const FASTCALL: u32         = 1 << 17;
+    /// `__attribute__((naked))` encountered — emit no prologue/epilogue.
+    pub const NAKED: u32            = 1 << 18;
 }
 
 /// Accumulated storage-class specifiers, type qualifiers, and GCC attributes
@@ -158,6 +160,7 @@ impl ParsedDeclAttrs {
     #[inline] pub fn parsing_error_attr(&self) -> bool       { self.flags & parsed_attr_flag::ERROR_ATTR != 0 }
     #[inline] pub fn parsing_transparent_union(&self) -> bool { self.flags & parsed_attr_flag::TRANSPARENT_UNION != 0 }
     #[inline] pub fn parsing_fastcall(&self) -> bool         { self.flags & parsed_attr_flag::FASTCALL != 0 }
+    #[inline] pub fn parsing_naked(&self) -> bool            { self.flags & parsed_attr_flag::NAKED != 0 }
 
     // --- flag setters ---
 
@@ -179,6 +182,7 @@ impl ParsedDeclAttrs {
     #[inline] pub fn set_error_attr(&mut self, v: bool)       { self.set_flag(parsed_attr_flag::ERROR_ATTR, v) }
     #[inline] pub fn set_transparent_union(&mut self, v: bool) { self.set_flag(parsed_attr_flag::TRANSPARENT_UNION, v) }
     #[inline] pub fn set_fastcall(&mut self, v: bool)         { self.set_flag(parsed_attr_flag::FASTCALL, v) }
+    #[inline] pub fn set_naked(&mut self, v: bool)           { self.set_flag(parsed_attr_flag::NAKED, v) }
 
     #[inline]
     fn set_flag(&mut self, mask: u32, v: bool) {
@@ -448,8 +452,15 @@ impl Parser {
     pub(super) fn skip_cv_qualifiers(&mut self) {
         loop {
             match self.peek() {
-                TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
+                TokenKind::Const | TokenKind::Restrict => {
                     self.advance();
+                }
+                TokenKind::Volatile => {
+                    self.advance();
+                    // Propagate volatile to the declaration so that
+                    // `T *volatile p` marks `p` as volatile (preventing
+                    // mem2reg from promoting it to a register).
+                    self.attrs.set_volatile(true);
                 }
                 TokenKind::SegGs => {
                     self.advance();
@@ -627,6 +638,28 @@ impl Parser {
             "vector_size" | "__vector_size__" => { self.advance(); self.parse_vector_size_attr(); }
             "used" | "__used__" => { self.attrs.set_used(true); self.advance(); }
             "fastcall" | "__fastcall__" => { self.attrs.set_fastcall(true); self.advance(); }
+            "naked" | "__naked__" => { self.attrs.set_naked(true); self.advance(); }
+            "optimize" | "__optimize__" => {
+                self.advance();
+                // Recognize optimize("omit-frame-pointer") as equivalent to naked.
+                // GCC uses this attribute on functions like nlr_push whose inline asm
+                // assumes (%rsp) is the return address (no frame pointer push).
+                let mut found_omit_fp = false;
+                if matches!(self.peek(), TokenKind::LParen) {
+                    // Peek at the string argument inside parens without consuming
+                    if self.pos + 1 < self.tokens.len() {
+                        if let TokenKind::StringLiteral(ref s) = self.tokens[self.pos + 1].kind {
+                            if s.contains("omit-frame-pointer") {
+                                found_omit_fp = true;
+                            }
+                        }
+                    }
+                    self.skip_balanced_parens();
+                }
+                if found_omit_fp {
+                    self.attrs.set_naked(true);
+                }
+            }
             "address_space" | "__address_space__" => { self.advance(); self.parse_address_space_attr(); }
             _ => {
                 self.advance();

@@ -183,6 +183,10 @@ pub struct CodegenState {
     /// On i386 SysV ABI, such functions must use `ret $4` to pop the hidden
     /// pointer argument from the caller's stack.
     pub uses_sret: bool,
+    /// Whether to place each function in its own section (-ffunction-sections).
+    pub function_sections: bool,
+    /// Whether to place each data object in its own section (-fdata-sections).
+    pub data_sections: bool,
 }
 
 impl CodegenState {
@@ -220,6 +224,8 @@ impl CodegenState {
             func_is_variadic: false,
             param_alloca_slots: Vec::new(),
             uses_sret: false,
+            function_sections: false,
+            data_sections: false,
         }
     }
 

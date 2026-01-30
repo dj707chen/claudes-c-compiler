@@ -78,6 +78,15 @@ pub(crate) struct CodegenOptions {
     /// When true, the codegen emits DWARF line number directives based on
     /// source_spans attached to each IR instruction during lowering.
     pub(crate) debug_info: bool,
+    /// Whether to place each function in its own ELF section (-ffunction-sections).
+    /// When true, each function is emitted into `.text.funcname` instead of `.text`.
+    /// This enables the linker's `--gc-sections` to discard unreferenced functions.
+    pub(crate) function_sections: bool,
+    /// Whether to place each data object in its own ELF section (-fdata-sections).
+    /// When true, each global variable is emitted into its own section
+    /// (e.g., `.data.varname`, `.rodata.varname`, `.bss.varname`).
+    /// This enables the linker's `--gc-sections` to discard unreferenced data.
+    pub(crate) data_sections: bool,
 }
 
 /// Target architecture.
@@ -172,22 +181,30 @@ impl Target {
             Target::X86_64 => {
                 let mut cg = x86::X86Codegen::new();
                 cg.apply_options(opts);
+                cg.state.function_sections = opts.function_sections;
+                cg.state.data_sections = opts.data_sections;
                 let raw = generation::generate_module_with_debug(&mut cg, module, opts.debug_info, source_mgr);
                 x86::codegen::peephole::peephole_optimize(raw)
             }
             Target::I686 => {
                 let mut cg = i686::I686Codegen::new();
                 cg.apply_options(opts);
+                cg.state.function_sections = opts.function_sections;
+                cg.state.data_sections = opts.data_sections;
                 generation::generate_module_with_debug(&mut cg, module, opts.debug_info, source_mgr)
             }
             Target::Aarch64 => {
                 let mut cg = arm::ArmCodegen::new();
                 cg.apply_options(opts);
+                cg.state.function_sections = opts.function_sections;
+                cg.state.data_sections = opts.data_sections;
                 generation::generate_module_with_debug(&mut cg, module, opts.debug_info, source_mgr)
             }
             Target::Riscv64 => {
                 let mut cg = riscv::RiscvCodegen::new();
                 cg.apply_options(opts);
+                cg.state.function_sections = opts.function_sections;
+                cg.state.data_sections = opts.data_sections;
                 cg.emit_pre_directives();
                 generation::generate_module_with_debug(&mut cg, module, opts.debug_info, source_mgr)
             }

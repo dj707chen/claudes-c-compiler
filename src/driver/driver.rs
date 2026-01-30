@@ -146,6 +146,10 @@ pub struct Driver {
     /// When false, bare GNU keywords like `typeof` and `asm` are treated as
     /// identifiers (the __typeof__/__asm__ forms always work).
     gnu_extensions: bool,
+    /// Whether to place each function in its own section (-ffunction-sections).
+    function_sections: bool,
+    /// Whether to place each data object in its own section (-fdata-sections).
+    data_sections: bool,
 }
 
 impl Driver {
@@ -189,6 +193,8 @@ impl Driver {
             undef_macros: Vec::new(),
             warning_config: WarningConfig::new(),
             gnu_extensions: true,
+            function_sections: false,
+            data_sections: false,
         }
     }
 
@@ -469,6 +475,10 @@ impl Driver {
                     self.patchable_function_entry = Some((total, before));
                 }
                 "-fno-jump-tables" => self.no_jump_tables = true,
+                "-ffunction-sections" => self.function_sections = true,
+                "-fno-function-sections" => self.function_sections = false,
+                "-fdata-sections" => self.data_sections = true,
+                "-fno-data-sections" => self.data_sections = false,
                 arg if arg.starts_with("-f") => {}
 
                 // Linker flags
@@ -1359,6 +1369,8 @@ impl Driver {
             no_jump_tables: self.no_jump_tables,
             no_relax: self.riscv_no_relax,
             debug_info: self.debug_info,
+            function_sections: self.function_sections,
+            data_sections: self.data_sections,
         };
         let asm = self.target.generate_assembly_with_opts_and_debug(
             &module, &opts, source_manager.as_ref(),

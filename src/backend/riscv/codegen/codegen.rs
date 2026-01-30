@@ -116,7 +116,7 @@ fn constraint_to_callee_saved_riscv(constraint: &str) -> Option<PhysReg> {
 /// RISC-V 64 code generator. Implements the ArchCodegen trait for the shared framework.
 /// Uses standard RISC-V calling convention with register allocation for hot values.
 pub struct RiscvCodegen {
-    pub(super) state: CodegenState,
+    pub(crate) state: CodegenState,
     current_return_type: IrType,
     /// Number of named integer params for current variadic function.
     /// This is the effective GP register index after classification (including
