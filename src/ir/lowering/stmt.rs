@@ -194,6 +194,29 @@ impl Lowerer {
             if let Some(vs) = decl.vector_size {
                 resolved_ctype = CType::Vector(Box::new(resolved_ctype), vs);
             }
+            // Preserve sema's anonymous struct key for consistency with _Generic
+            // type matching (see corresponding fix in lower_typedef for globals).
+            if let Some(existing) = self.types.typedefs.get(&declarator.name) {
+                let is_new_anon = matches!(&resolved_ctype, CType::Struct(k) | CType::Union(k) if k.starts_with("__anon_"));
+                let is_existing_anon = matches!(existing, CType::Struct(k) | CType::Union(k) if k.starts_with("__anon_"));
+                if is_new_anon && is_existing_anon && resolved_ctype != *existing {
+                    let new_key = match &resolved_ctype {
+                        CType::Struct(k) | CType::Union(k) => k.to_string(),
+                        _ => unreachable!(),
+                    };
+                    let old_key = match existing {
+                        CType::Struct(k) | CType::Union(k) => k.to_string(),
+                        _ => unreachable!(),
+                    };
+                    let layout_copy = self.types.borrow_struct_layouts()
+                        .get(&new_key)
+                        .map(|l| l.as_ref().clone());
+                    if let Some(layout) = layout_copy {
+                        self.types.insert_struct_layout_scoped_from_ref(&old_key, layout);
+                    }
+                    resolved_ctype = existing.clone();
+                }
+            }
             self.types.insert_typedef_scoped(declarator.name.clone(), resolved_ctype);
 
             let effective_alignment = {

@@ -15,7 +15,7 @@ use crate::frontend::parser::ast::{
     TypeSpecifier,
 };
 use crate::ir::ir::{GlobalInit, IrGlobal};
-use crate::common::types::{IrType, CType};
+use crate::common::types::{IrType, CType, StructLayout};
 use super::lowering::Lowerer;
 use super::definitions::{GlobalInfo, DeclAnalysis};
 
@@ -93,6 +93,35 @@ impl Lowerer {
             let mut resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
             if let Some(vs) = decl.vector_size {
                 resolved_ctype = CType::Vector(Box::new(resolved_ctype), vs);
+            }
+            // When re-processing a typedef for an anonymous struct/union, the lowerer
+            // generates a fresh `__anon_struct_N` key that differs from sema's key.
+            // If sema already stored a typedef entry with an anonymous struct key,
+            // reuse that key so that _Generic type matching (which compares CType keys)
+            // works correctly between the controlling expression type (from sema) and
+            // the association type (resolved here in the lowerer).
+            if let Some(existing) = self.types.typedefs.get(&declarator.name) {
+                let is_new_anon = matches!(&resolved_ctype, CType::Struct(k) | CType::Union(k) if k.starts_with("__anon_"));
+                let is_existing_anon = matches!(existing, CType::Struct(k) | CType::Union(k) if k.starts_with("__anon_"));
+                if is_new_anon && is_existing_anon && resolved_ctype != *existing {
+                    // Copy the layout registered under the new key to the old key,
+                    // then use the old CType so all references are consistent.
+                    let new_key = match &resolved_ctype {
+                        CType::Struct(k) | CType::Union(k) => k.to_string(),
+                        _ => unreachable!(),
+                    };
+                    let old_key = match existing {
+                        CType::Struct(k) | CType::Union(k) => k.to_string(),
+                        _ => unreachable!(),
+                    };
+                    let layout_copy = self.types.borrow_struct_layouts()
+                        .get(&new_key)
+                        .map(|l| l.as_ref().clone());
+                    if let Some(layout) = layout_copy {
+                        self.types.insert_struct_layout_scoped_from_ref(&old_key, layout);
+                    }
+                    resolved_ctype = existing.clone();
+                }
             }
             self.types.typedefs.insert(declarator.name.clone(), resolved_ctype);
             if is_enum_type && declarator.derived.is_empty() {

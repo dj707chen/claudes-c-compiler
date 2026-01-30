@@ -562,7 +562,10 @@ impl Lowerer {
                 (CType::Array(a, _), CType::Array(b, _)) => {
                     return self.ctype_matches_generic(a, b);
                 }
-                _ => return true,
+                // For types that carry identity data (Struct, Union, Enum, Function,
+                // Vector), we must compare the full type, not just the discriminant.
+                // Primitive types (Int, Float, etc.) have no data so PartialEq works too.
+                _ => return controlling == assoc,
             }
         }
         // Array decays to pointer for _Generic matching
