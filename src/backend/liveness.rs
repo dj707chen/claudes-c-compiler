@@ -322,6 +322,18 @@ fn assign_program_points(
                         call_points.push(point);
                     }
                 }
+                // Memcpy uses rep movsb which clobbers rdi, rsi, rcx.
+                // VaArg/VaCopy/VaArgStruct clobber rdi/rsi for struct copy.
+                // VaStart is included conservatively for safety.
+                // Treat these as call points so caller-saved registers (including
+                // rdi/rsi) are not allocated across them.
+                Instruction::Memcpy { .. }
+                | Instruction::VaArg { .. }
+                | Instruction::VaStart { .. }
+                | Instruction::VaCopy { .. }
+                | Instruction::VaArgStruct { .. } => {
+                    call_points.push(point);
+                }
                 _ => {}
             }
 

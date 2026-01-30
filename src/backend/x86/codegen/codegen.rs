@@ -34,10 +34,18 @@ pub(super) const X86_CALLEE_SAVED: [PhysReg; 5] = [
 /// do NOT span function calls. These registers are destroyed by calls, so
 /// they can only hold values between calls. No prologue/epilogue save is needed.
 ///
-/// PhysReg encoding: 10=r11, 11=r10, 12=r8, 13=r9
+/// PhysReg encoding: 10=r11, 11=r10, 12=r8, 13=r9, 14=rdi, 15=rsi
 /// (IDs 10+ to avoid overlap with callee-saved 1-5)
-pub(super) const X86_CALLER_SAVED: [PhysReg; 4] = [
+///
+/// rdi and rsi are included because the SysV ABI makes them caller-saved.
+/// After the prologue stores incoming parameters from rdi/rsi to their stack
+/// slots, these registers are free for use within the function body.
+/// Memcpy (rep movsb) and VaArg operations that clobber rdi/rsi are treated
+/// as call points by the liveness analysis, so values allocated to rdi/rsi
+/// will never have live ranges spanning those operations.
+pub(super) const X86_CALLER_SAVED: [PhysReg; 6] = [
     PhysReg(10), PhysReg(11), PhysReg(12), PhysReg(13),
+    PhysReg(14), PhysReg(15),
 ];
 
 /// Convert a 64-bit register name string to its 32-bit sub-register name.
@@ -53,21 +61,23 @@ fn reg_name_to_32(name: &str) -> &'static str {
 }
 
 /// Map a PhysReg index to its x86-64 register name.
-/// Handles both callee-saved (1-5) and caller-saved (10-13) registers.
+/// Handles both callee-saved (1-5) and caller-saved (10-15) registers.
 pub(super) fn phys_reg_name(reg: PhysReg) -> &'static str {
     match reg.0 {
         1 => "rbx", 2 => "r12", 3 => "r13", 4 => "r14", 5 => "r15",
         10 => "r11", 11 => "r10", 12 => "r8", 13 => "r9",
+        14 => "rdi", 15 => "rsi",
         _ => unreachable!("invalid x86 register index {}", reg.0),
     }
 }
 
 /// Map a PhysReg index to its x86-64 32-bit sub-register name.
-/// Handles both callee-saved (1-5) and caller-saved (10-13) registers.
+/// Handles both callee-saved (1-5) and caller-saved (10-15) registers.
 pub(super) fn phys_reg_name_32(reg: PhysReg) -> &'static str {
     match reg.0 {
         1 => "ebx", 2 => "r12d", 3 => "r13d", 4 => "r14d", 5 => "r15d",
         10 => "r11d", 11 => "r10d", 12 => "r8d", 13 => "r9d",
+        14 => "edi", 15 => "esi",
         _ => unreachable!("invalid x86 register index {}", reg.0),
     }
 }

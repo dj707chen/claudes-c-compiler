@@ -1,0 +1,1 @@
+Add rdi/rsi as allocatable caller-saved registers in x86-64 backend

@@ -51,7 +51,14 @@ impl X86Codegen {
                             has_i128_ops = true;
                         }
                     }
-                    Instruction::Cmp { ty, .. } => {
+                    Instruction::Cast { from_ty, to_ty, .. } => {
+                        if matches!(from_ty, IrType::I128 | IrType::U128)
+                            || matches!(to_ty, IrType::I128 | IrType::U128) {
+                            has_i128_ops = true;
+                        }
+                    }
+                    Instruction::Cmp { ty, .. }
+                    | Instruction::Store { ty, .. } => {
                         if matches!(ty, IrType::I128 | IrType::U128) {
                             has_i128_ops = true;
                         }
@@ -65,7 +72,7 @@ impl X86Codegen {
             caller_saved_regs.retain(|r| r.0 != 11); // r10 = PhysReg(11)
         }
         if has_i128_ops {
-            caller_saved_regs.retain(|r| r.0 != 12 && r.0 != 13); // r8, r9
+            caller_saved_regs.retain(|r| r.0 != 12 && r.0 != 13 && r.0 != 14 && r.0 != 15); // r8, r9, rdi, rsi
         }
         if has_atomic_rmw {
             caller_saved_regs.retain(|r| r.0 != 12); // r8
