@@ -373,6 +373,7 @@ impl Lowerer {
                     struct_arg_riscv_float_classes: Vec::new(),
                     is_sret: false,
                     is_fastcall: false,
+                    ret_eightbyte_classes: Vec::new(),
                 },
             });
         }
@@ -820,6 +821,21 @@ impl Lowerer {
             }
         }
 
+        // Compute SysV eightbyte classification for two-register struct returns
+        let ret_eightbyte_classes = if two_reg_ret_size.is_some() && ptr_count == 0 {
+            if full_ret_ctype.is_struct_or_union() || full_ret_ctype.is_vector() {
+                if let Some(layout) = self.get_struct_layout_for_type(ret_type_spec) {
+                    layout.classify_sysv_eightbytes(&*self.types.borrow_struct_layouts())
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
         // Collect parameter types, with K&R default argument promotions.
         // Use sema's param CTypes when available to avoid re-computing from AST.
         let sema_param_ctypes = self.sema_functions.get(name)
@@ -925,6 +941,7 @@ impl Lowerer {
                 is_variadic: variadic,
                 sret_size,
                 two_reg_ret_size,
+                ret_eightbyte_classes: ret_eightbyte_classes.clone(),
                 param_struct_sizes,
                 param_struct_classes,
                 param_riscv_float_classes,
@@ -939,6 +956,7 @@ impl Lowerer {
                 is_variadic: variadic,
                 sret_size,
                 two_reg_ret_size,
+                ret_eightbyte_classes,
                 param_struct_sizes: Vec::new(),
                 param_struct_classes: Vec::new(),
                 param_riscv_float_classes: Vec::new(),

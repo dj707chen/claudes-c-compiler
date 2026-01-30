@@ -894,6 +894,7 @@ mod tests {
                         struct_arg_riscv_float_classes: Vec::new(),
                         is_sret: false,
                         is_fastcall: false,
+                        ret_eightbyte_classes: Vec::new(),
                     },
                 },
                 Instruction::Load { dest: Value(1), ptr: Value(0), ty: IrType::I32 , seg_override: AddressSpace::Default },

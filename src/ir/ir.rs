@@ -235,6 +235,11 @@ pub struct IrFunction {
     /// These blocks must be kept reachable and not merged away by CFG simplify,
     /// since their labels appear in global data (.quad .LBB3) and must resolve.
     pub global_init_label_blocks: Vec<BlockId>,
+    /// SysV AMD64 ABI eightbyte classification for the return struct (if 9-16 bytes).
+    /// Used by the x86-64 backend to determine whether each eightbyte should be
+    /// returned in a GP register (rax/rdx) or SSE register (xmm0/xmm1).
+    /// Empty for non-struct returns, sret, or non-x86-64 targets.
+    pub ret_eightbyte_classes: Vec<crate::common::types::EightbyteClass>,
 }
 
 /// A function parameter.
@@ -307,6 +312,9 @@ pub struct CallInfo {
     pub is_sret: bool,
     /// True if the callee uses the fastcall calling convention.
     pub is_fastcall: bool,
+    /// SysV ABI eightbyte classification for the return struct (if 9-16 byte two-reg return).
+    /// Used by the x86-64 backend to read SSE eightbytes from xmm0 instead of rdx.
+    pub ret_eightbyte_classes: Vec<EightbyteClass>,
 }
 
 /// An IR instruction.
@@ -1858,6 +1866,7 @@ impl IrFunction {
             is_fastcall: false,
             is_naked: false,
             global_init_label_blocks: Vec::new(),
+            ret_eightbyte_classes: Vec::new(),
         }
     }
 

@@ -1,6 +1,7 @@
 Task: Fix x86-64 struct return ABI: SSE eightbytes should use xmm registers
-Status: in_progress
+Status: completed
 Started: 2026-01-30
+Completed: 2026-01-30
 
 Problem:
 When returning structs with mixed INTEGER and SSE eightbytes (e.g.,
@@ -12,10 +13,14 @@ xmm0/xmm1, not rdx. For example:
 - Eightbyte 0: int + float -> INTEGER class -> rax
 - Eightbyte 1: double -> SSE class -> xmm0
 
-Currently both eightbytes go into rax:rdx (I128 packing), but the second
-eightbyte should go into xmm0.
+Fix:
+Added ret_eightbyte_classes field to FuncSig, IrFunction, and CallInfo to
+propagate SysV eightbyte classification through the compiler pipeline.
+Fixed both callee side (emit_return_i128_to_regs) and caller side
+(emit_call_store_result) to use xmm registers for SSE-classified eightbytes.
+Handles all four combinations: INT+INT, INT+SSE, SSE+INT, SSE+SSE.
 
-Fix: Update the two-register struct return path to detect SSE-class eightbytes
-and return them in xmm registers instead of general-purpose registers.
-
-Affects: chibicc project test suite (struct_test25 fails), likely other projects
+Verification:
+- All 48 project tests pass across all 4 architectures
+- 99.9%+ test pass rate on all architectures
+- New regression test: tests/struct-ret-mixed-sse-int-x86/

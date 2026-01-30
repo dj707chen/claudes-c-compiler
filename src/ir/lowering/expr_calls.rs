@@ -152,12 +152,17 @@ impl Lowerer {
         }
 
         // Determine sret/two-reg return convention
-        let (sret_size, two_reg_size) = if let Expr::Identifier(name, _) = stripped_func {
+        let (sret_size, two_reg_size, call_ret_classes) = if let Expr::Identifier(name, _) = stripped_func {
             if self.is_func_ptr_variable(name) {
                 // Indirect call through function pointer variable
+                // TODO: compute ret_eightbyte_classes from the function pointer's
+                // return type to support mixed SSE/INTEGER struct returns via fptrs
                 match self.get_call_return_struct_size(effective_func) {
-                    Some(size) => Self::classify_struct_return(size),
-                    None => (None, None),
+                    Some(size) => {
+                        let (s, t) = Self::classify_struct_return(size);
+                        (s, t, Vec::new())
+                    }
+                    None => (None, None, Vec::new()),
                 }
             } else {
                 // Direct function call - look up by function name
@@ -165,13 +170,19 @@ impl Lowerer {
                 (
                     sig.and_then(|s| s.sret_size),
                     sig.and_then(|s| s.two_reg_ret_size),
+                    sig.map(|s| s.ret_eightbyte_classes.clone()).unwrap_or_default(),
                 )
             }
         } else {
             // Non-identifier function expression (e.g., array[i]())
+            // TODO: compute ret_eightbyte_classes from expression return type
+            // to support mixed SSE/INTEGER struct returns via indirect calls
             match self.get_call_return_struct_size(effective_func) {
-                Some(size) => Self::classify_struct_return(size),
-                None => (None, None),
+                Some(size) => {
+                    let (s, t) = Self::classify_struct_return(size);
+                    (s, t, Vec::new())
+                }
+                None => (None, None, Vec::new()),
             }
         };
 
@@ -256,7 +267,7 @@ impl Lowerer {
         };
 
         // Dispatch: direct call, function pointer call, or indirect call
-        let call_ret_ty = self.emit_call_instruction(effective_func, dest, arg_vals, arg_types, struct_arg_sizes, struct_arg_aligns, struct_arg_classes, struct_arg_riscv_float_classes, call_variadic, num_fixed_args, two_reg_size, sret_size);
+        let call_ret_ty = self.emit_call_instruction(effective_func, dest, arg_vals, arg_types, struct_arg_sizes, struct_arg_aligns, struct_arg_classes, struct_arg_riscv_float_classes, call_variadic, num_fixed_args, two_reg_size, sret_size, call_ret_classes);
 
         // After call to noreturn function, emit unreachable and start dead block.
         // Unlike error_functions (which skip the call entirely), noreturn functions
@@ -715,6 +726,7 @@ impl Lowerer {
         num_fixed_args: usize,
         two_reg_size: Option<usize>,
         sret_size: Option<usize>,
+        call_ret_classes: Vec<crate::common::types::EightbyteClass>,
     ) -> IrType {
         let mut indirect_ret_ty = self.get_func_ptr_return_ir_type(func);
         if two_reg_size.is_some() {
@@ -736,6 +748,7 @@ impl Lowerer {
                             struct_arg_sizes, struct_arg_aligns, struct_arg_classes,
                             struct_arg_riscv_float_classes,
                             is_sret: sret_size.is_some(), is_fastcall: false,
+                            ret_eightbyte_classes: call_ret_classes,
                         },
                     });
                     indirect_ret_ty
@@ -772,6 +785,7 @@ impl Lowerer {
                             struct_arg_sizes, struct_arg_aligns, struct_arg_classes,
                             struct_arg_riscv_float_classes,
                             is_sret: sret_size.is_some(), is_fastcall: callee_is_fastcall,
+                            ret_eightbyte_classes: call_ret_classes,
                         },
                     });
                     ret_ty
@@ -804,6 +818,7 @@ impl Lowerer {
                         struct_arg_sizes: sas, struct_arg_aligns: saa, struct_arg_classes: sac,
                         struct_arg_riscv_float_classes: sarfc,
                         is_sret: sret_size.is_some(), is_fastcall: false,
+                        ret_eightbyte_classes: call_ret_classes,
                     },
                 });
                 indirect_ret_ty
@@ -866,6 +881,7 @@ impl Lowerer {
                             struct_arg_sizes: sas, struct_arg_aligns: saa, struct_arg_classes: sac,
                             struct_arg_riscv_float_classes: sarfc,
                             is_sret: sret_size.is_some(), is_fastcall: callee_is_fastcall,
+                            ret_eightbyte_classes: call_ret_classes,
                         },
                     });
                     ret_ty
@@ -878,6 +894,7 @@ impl Lowerer {
                             struct_arg_sizes: sas, struct_arg_aligns: saa, struct_arg_classes: sac,
                             struct_arg_riscv_float_classes: sarfc,
                             is_sret: sret_size.is_some(), is_fastcall: false,
+                            ret_eightbyte_classes: call_ret_classes,
                         },
                     });
                     indirect_ret_ty

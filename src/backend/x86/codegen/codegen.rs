@@ -145,6 +145,9 @@ fn shift_mnemonic(op: IrBinOp) -> (&'static str, &'static str) {
 pub struct X86Codegen {
     pub(crate) state: CodegenState,
     current_return_type: IrType,
+    /// SysV ABI eightbyte classification for the current function's return struct.
+    /// Used for mixed INTEGER/SSE returns (e.g., struct { int; float; double; }).
+    current_ret_classes: Vec<crate::common::types::EightbyteClass>,
     /// For variadic functions: number of named integer/pointer parameters (excluding long double)
     num_named_int_params: usize,
     /// For variadic functions: number of named float/double parameters (excluding long double)
@@ -175,6 +178,7 @@ impl X86Codegen {
         Self {
             state: CodegenState::new(),
             current_return_type: IrType::I64,
+            current_ret_classes: Vec::new(),
             num_named_int_params: 0,
             num_named_fp_params: 0,
             num_named_stack_bytes: 0,
@@ -1267,6 +1271,7 @@ impl ArchCodegen for X86Codegen {
 
     fn emit_prologue(&mut self, func: &IrFunction, frame_size: i64) {
         self.current_return_type = func.return_type;
+        self.current_ret_classes = func.ret_eightbyte_classes.clone();
         // Emit endbr64 for CET/IBT (-fcf-protection=branch).
         // This must be the first instruction at the function entry point.
         // When -fpatchable-function-entry=N,M is also active, the NOP padding
@@ -1571,7 +1576,30 @@ impl ArchCodegen for X86Codegen {
     }
 
     fn emit_return_i128_to_regs(&mut self) {
-        // rax:rdx already hold the i128 return value per SysV ABI — noop
+        // For pure INTEGER+INTEGER returns, rax:rdx already correct — noop.
+        // For mixed INTEGER+SSE or SSE+INTEGER returns, move the SSE eightbyte
+        // from the GP register to xmm0 per SysV AMD64 ABI.
+        use crate::common::types::EightbyteClass;
+        if self.current_ret_classes.len() == 2 {
+            let (c0, c1) = (self.current_ret_classes[0], self.current_ret_classes[1]);
+            match (c0, c1) {
+                (EightbyteClass::Integer, EightbyteClass::Sse) => {
+                    // Second eightbyte is SSE: move rdx -> xmm0
+                    self.state.emit("    movq %rdx, %xmm0");
+                }
+                (EightbyteClass::Sse, EightbyteClass::Integer) => {
+                    // First eightbyte is SSE: rax -> xmm0, rdx -> rax
+                    self.state.emit("    movq %rax, %xmm0");
+                    self.state.emit("    movq %rdx, %rax");
+                }
+                (EightbyteClass::Sse, EightbyteClass::Sse) => {
+                    // Both SSE: rax -> xmm0, rdx -> xmm1
+                    self.state.emit("    movq %rax, %xmm0");
+                    self.state.emit("    movq %rdx, %xmm1");
+                }
+                _ => {} // INTEGER+INTEGER: already correct
+            }
+        }
     }
 
     fn emit_return_f128_to_reg(&mut self) {
@@ -2799,9 +2827,52 @@ impl ArchCodegen for X86Codegen {
         }
     }
 
+    fn set_call_ret_eightbyte_classes(&mut self, classes: &[crate::common::types::EightbyteClass]) {
+        self.current_ret_classes = classes.to_vec();
+    }
+
     fn emit_call_store_result(&mut self, dest: &Value, return_type: IrType) {
         if is_i128_type(return_type) {
-            self.store_rax_rdx_to(dest);
+            use crate::common::types::EightbyteClass;
+            if self.current_ret_classes.len() == 2 {
+                let (c0, c1) = (self.current_ret_classes[0], self.current_ret_classes[1]);
+                match (c0, c1) {
+                    (EightbyteClass::Integer, EightbyteClass::Sse) => {
+                        // rax = first eightbyte (INTEGER), xmm0 = second eightbyte (SSE)
+                        if let Some(slot) = self.state.get_slot(dest.0) {
+                            self.state.out.emit_instr_reg_rbp("    movq", "rax", slot.0);
+                            self.state.emit("    movq %xmm0, %rdx");
+                            self.state.out.emit_instr_reg_rbp("    movq", "rdx", slot.0 + 8);
+                        }
+                        self.state.reg_cache.invalidate_all();
+                    }
+                    (EightbyteClass::Sse, EightbyteClass::Integer) => {
+                        // xmm0 = first eightbyte (SSE), rax = second eightbyte (INTEGER)
+                        if let Some(slot) = self.state.get_slot(dest.0) {
+                            self.state.emit("    movq %xmm0, %rdx");
+                            self.state.out.emit_instr_reg_rbp("    movq", "rdx", slot.0);
+                            self.state.out.emit_instr_reg_rbp("    movq", "rax", slot.0 + 8);
+                        }
+                        self.state.reg_cache.invalidate_all();
+                    }
+                    (EightbyteClass::Sse, EightbyteClass::Sse) => {
+                        // xmm0 = first eightbyte (SSE), xmm1 = second eightbyte (SSE)
+                        if let Some(slot) = self.state.get_slot(dest.0) {
+                            self.state.emit("    movq %xmm0, %rax");
+                            self.state.out.emit_instr_reg_rbp("    movq", "rax", slot.0);
+                            self.state.emit("    movq %xmm1, %rax");
+                            self.state.out.emit_instr_reg_rbp("    movq", "rax", slot.0 + 8);
+                        }
+                        self.state.reg_cache.invalidate_all();
+                    }
+                    _ => {
+                        // INTEGER+INTEGER: standard rax:rdx
+                        self.store_rax_rdx_to(dest);
+                    }
+                }
+            } else {
+                self.store_rax_rdx_to(dest);
+            }
         } else if return_type == IrType::F32 {
             self.state.emit("    movd %xmm0, %eax");
             self.store_rax_to(dest);

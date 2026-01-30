@@ -536,6 +536,10 @@ impl Lowerer {
         let next_val = self.func_mut().next_value;
         let param_alloca_vals = std::mem::take(&mut self.func_mut().param_alloca_values);
         let global_init_labels = std::mem::take(&mut self.func_mut().global_init_label_blocks);
+        // Get return eightbyte classes from the function's signature metadata
+        let ret_eightbyte_classes = self.func_meta.sigs.get(&func.name)
+            .map(|s| s.ret_eightbyte_classes.clone())
+            .unwrap_or_default();
         let ir_func = IrFunction {
             name: func.name.clone(), return_type, params,
             blocks: std::mem::take(&mut self.func_mut().blocks),
@@ -555,6 +559,7 @@ impl Lowerer {
             is_fastcall: func.attrs.is_fastcall(),
             is_naked: func.attrs.is_naked(),
             global_init_label_blocks: global_init_labels,
+            ret_eightbyte_classes,
         };
         self.module.functions.push(ir_func);
         self.pop_scope();

@@ -46,6 +46,7 @@ impl Lowerer {
                 struct_arg_riscv_float_classes: Vec::new(),
                 is_sret: false,
                 is_fastcall: false,
+                ret_eightbyte_classes: Vec::new(),
             },
         });
         dest

@@ -215,6 +215,22 @@ impl Lowerer {
             }
         }
 
+        // Compute SysV eightbyte classification for two-register struct returns
+        let ret_eightbyte_classes = if two_reg_ret_size.is_some() && ptr_count == 0 {
+            let ret_ct = self.type_spec_to_ctype(ret_type_spec);
+            if ret_ct.is_struct_or_union() || ret_ct.is_vector() {
+                if let Some(layout) = self.get_struct_layout_for_type(ret_type_spec) {
+                    layout.classify_sysv_eightbytes(&*self.types.borrow_struct_layouts())
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
         let param_tys: Vec<IrType> = params.iter().map(|p| {
             self.type_spec_to_ir(&p.type_spec)
         }).collect();
@@ -281,6 +297,7 @@ impl Lowerer {
                 is_variadic: variadic,
                 sret_size,
                 two_reg_ret_size,
+                ret_eightbyte_classes: ret_eightbyte_classes.clone(),
                 param_struct_sizes,
                 param_struct_classes,
                 param_riscv_float_classes,
@@ -295,6 +312,7 @@ impl Lowerer {
                 is_variadic: variadic,
                 sret_size,
                 two_reg_ret_size,
+                ret_eightbyte_classes,
                 param_struct_sizes: Vec::new(),
                 param_struct_classes: Vec::new(),
                 param_riscv_float_classes: Vec::new(),

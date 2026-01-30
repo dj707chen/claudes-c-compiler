@@ -1093,11 +1093,11 @@ fn generate_instruction(cg: &mut dyn ArchCodegen, inst: &Instruction, gep_fold_m
             cg.state().reg_cache.invalidate_all();
         }
         Instruction::Call { func, info } => {
-            cg.emit_call(&info.args, &info.arg_types, Some(func), None, info.dest, info.return_type, info.is_variadic, info.num_fixed_args, &info.struct_arg_sizes, &info.struct_arg_aligns, &info.struct_arg_classes, &info.struct_arg_riscv_float_classes, info.is_sret, info.is_fastcall);
+            cg.emit_call(&info.args, &info.arg_types, Some(func), None, info.dest, info.return_type, info.is_variadic, info.num_fixed_args, &info.struct_arg_sizes, &info.struct_arg_aligns, &info.struct_arg_classes, &info.struct_arg_riscv_float_classes, info.is_sret, info.is_fastcall, &info.ret_eightbyte_classes);
             cg.state().reg_cache.invalidate_all();
         }
         Instruction::CallIndirect { func_ptr, info } => {
-            cg.emit_call(&info.args, &info.arg_types, None, Some(func_ptr), info.dest, info.return_type, info.is_variadic, info.num_fixed_args, &info.struct_arg_sizes, &info.struct_arg_aligns, &info.struct_arg_classes, &info.struct_arg_riscv_float_classes, info.is_sret, info.is_fastcall);
+            cg.emit_call(&info.args, &info.arg_types, None, Some(func_ptr), info.dest, info.return_type, info.is_variadic, info.num_fixed_args, &info.struct_arg_sizes, &info.struct_arg_aligns, &info.struct_arg_classes, &info.struct_arg_riscv_float_classes, info.is_sret, info.is_fastcall, &info.ret_eightbyte_classes);
             cg.state().reg_cache.invalidate_all();
         }
         Instruction::Memcpy { dest, src, size } => {

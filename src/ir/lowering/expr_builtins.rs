@@ -226,6 +226,7 @@ impl Lowerer {
                         struct_arg_sizes, struct_arg_aligns: vec![], struct_arg_classes: Vec::new(),
                         struct_arg_riscv_float_classes: Vec::new(),
                         is_sret: false, is_fastcall: false,
+                        ret_eightbyte_classes: Vec::new(),
                     },
                 });
                 Some(Operand::Value(dest))

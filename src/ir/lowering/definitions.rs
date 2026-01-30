@@ -248,6 +248,10 @@ pub(super) struct FuncSig {
     pub sret_size: Option<usize>,
     /// If the function returns a struct of 9-16 bytes via two registers, the struct size.
     pub two_reg_ret_size: Option<usize>,
+    /// SysV ABI eightbyte classification for the return struct (if two_reg_ret_size is set).
+    /// Used to determine which eightbytes go in GP vs SSE registers on return.
+    /// Empty if not applicable (non-struct return, sret, or non-x86-64).
+    pub ret_eightbyte_classes: Vec<crate::common::types::EightbyteClass>,
     /// Per-parameter struct sizes for by-value struct passing ABI.
     /// Each entry is Some(size) if that parameter is a struct/union, None otherwise.
     pub param_struct_sizes: Vec<Option<usize>>,
@@ -272,6 +276,7 @@ impl FuncSig {
             is_variadic: false,
             sret_size: None,
             two_reg_ret_size: None,
+            ret_eightbyte_classes: Vec::new(),
             param_struct_sizes: Vec::new(),
             param_struct_classes: Vec::new(),
             param_riscv_float_classes: Vec::new(),

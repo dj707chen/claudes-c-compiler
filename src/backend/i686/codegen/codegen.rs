@@ -2509,7 +2509,8 @@ impl ArchCodegen for I686Codegen {
                  struct_arg_classes: &[Vec<crate::common::types::EightbyteClass>],
                  _struct_arg_riscv_float_classes: &[Option<crate::common::types::RiscvFloatClass>],
                  is_sret: bool,
-                 is_fastcall: bool) {
+                 is_fastcall: bool,
+                 _ret_eightbyte_classes: &[crate::common::types::EightbyteClass]) {
         if !is_fastcall {
             // Delegate to the default trait implementation for cdecl calls.
             // We can't call the default method directly because Rust doesn't support

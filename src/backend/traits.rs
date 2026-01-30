@@ -383,7 +383,8 @@ pub trait ArchCodegen {
                  struct_arg_classes: &[Vec<crate::common::types::EightbyteClass>],
                  struct_arg_riscv_float_classes: &[Option<crate::common::types::RiscvFloatClass>],
                  is_sret: bool,
-                 _is_fastcall: bool) {
+                 _is_fastcall: bool,
+                 ret_eightbyte_classes: &[crate::common::types::EightbyteClass]) {
         use super::call_abi::*;
         let config = self.call_abi_config();
         let arg_classes = classify_call_args(args, arg_types, struct_arg_sizes, struct_arg_aligns, struct_arg_classes, struct_arg_riscv_float_classes, is_variadic, &config);
@@ -427,6 +428,7 @@ pub trait ArchCodegen {
 
         // Phase 6: Store return value.
         if let Some(dest) = dest {
+            self.set_call_ret_eightbyte_classes(ret_eightbyte_classes);
             self.emit_call_store_result(&dest, return_type);
         }
     }
@@ -473,6 +475,11 @@ pub trait ArchCodegen {
     /// On i386 SysV, functions returning via sret do `ret $4` to pop the hidden
     /// pointer. All other architectures and non-sret calls return 0.
     fn callee_pops_bytes_for_sret(&self, _is_sret: bool) -> usize { 0 }
+
+    /// Stash the SysV eightbyte classification for the call's return struct.
+    /// x86-64 overrides this to store the classes for use in emit_call_store_result.
+    /// Other backends ignore it (default no-op).
+    fn set_call_ret_eightbyte_classes(&mut self, _classes: &[crate::common::types::EightbyteClass]) {}
 
     /// Store the function's return value from ABI registers to the destination slot.
     ///

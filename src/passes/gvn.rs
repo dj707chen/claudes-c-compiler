@@ -543,6 +543,7 @@ mod tests {
             param_alloca_values: Vec::new(),
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
+            ret_eightbyte_classes: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -617,6 +618,7 @@ mod tests {
             param_alloca_values: Vec::new(),
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
+            ret_eightbyte_classes: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -682,6 +684,7 @@ mod tests {
             param_alloca_values: Vec::new(),
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
+            ret_eightbyte_classes: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -753,6 +756,7 @@ mod tests {
             param_alloca_values: Vec::new(),
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
+            ret_eightbyte_classes: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -824,6 +828,7 @@ mod tests {
             param_alloca_values: Vec::new(),
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
+            ret_eightbyte_classes: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -900,6 +905,7 @@ mod tests {
             param_alloca_values: Vec::new(),
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
+            ret_eightbyte_classes: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -1005,6 +1011,7 @@ mod tests {
             param_alloca_values: Vec::new(),
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
+            ret_eightbyte_classes: Vec::new(),
         };
 
         let mut module = IrModule {
@@ -1060,6 +1067,7 @@ mod tests {
             param_alloca_values: Vec::new(),
             uses_sret: false,
             global_init_label_blocks: Vec::new(),
+            ret_eightbyte_classes: Vec::new(),
         }
     }
 
@@ -1176,6 +1184,7 @@ mod tests {
                         struct_arg_riscv_float_classes: Vec::new(),
                         is_sret: false,
                         is_fastcall: false,
+                        ret_eightbyte_classes: Vec::new(),
                     },
                 },
                 Instruction::Load {
