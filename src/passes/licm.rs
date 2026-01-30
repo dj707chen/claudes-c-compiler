@@ -18,8 +18,12 @@
 //!
 //! Safety: Pure (side-effect-free) instructions are always hoisted. Loads are
 //! hoisted only when we can prove the memory location is not modified inside
-//! the loop — specifically, loads from allocas that are NOT address-taken
-//! (only used by direct Load/Store) and have no stores within the loop body.
+//! the loop:
+//! - Loads from allocas that are NOT address-taken and have no stores in the loop
+//! - Loads from GlobalAddr pointers when the loop has no function calls and no
+//!   stores to any GlobalAddr target (since calls and stores to unknown pointers
+//!   could potentially modify any global variable)
+//!
 //! Address-taken allocas (used in GEP, passed to calls, etc.) are never hoisted
 //! because stores through derived pointers may not be tracked in `stored_allocas`.
 
@@ -313,14 +317,29 @@ fn for_each_hoistable_operand(inst: &Instruction, mut f: impl FnMut(u32)) {
 struct LoopMemoryInfo {
     /// Alloca value IDs that have stores targeting them within the loop.
     stored_allocas: FxHashSet<u32>,
+    /// Whether the loop body contains any function calls (Call, CallIndirect,
+    /// or InlineAsm with clobbers). Calls can modify any global variable,
+    /// so loads from globals cannot be hoisted past calls.
+    has_calls: bool,
+    /// Whether the loop body has any stores through GlobalAddr-derived
+    /// pointers, which could potentially write to other global variables.
+    /// Stores through non-GlobalAddr pointers (e.g., function parameter
+    /// pointers, alloca-derived pointers) do not modify global storage
+    /// since they point to stack or heap memory, not the data/bss sections.
+    has_global_derived_stores: bool,
 }
 
-/// Scan a loop body to determine which allocas are modified.
+/// Scan a loop body to determine which allocas are modified and what
+/// memory side effects the loop has (calls, stores to unknown pointers).
 fn analyze_loop_memory(
     func: &IrFunction,
     loop_body: &FxHashSet<usize>,
+    alloca_info: &AllocaAnalysis,
+    global_addr_values: &FxHashSet<u32>,
 ) -> LoopMemoryInfo {
     let mut stored_allocas = FxHashSet::default();
+    let mut has_calls = false;
+    let mut has_global_derived_stores = false;
 
     let collect_ptr = |op: &Operand, set: &mut FxHashSet<u32>| {
         if let Operand::Value(v) = op {
@@ -336,25 +355,61 @@ fn analyze_loop_memory(
             match inst {
                 Instruction::Store { ptr, .. } => {
                     stored_allocas.insert(ptr.0);
+                    // Only flag stores through GlobalAddr-derived pointers,
+                    // since those could write to static global storage that
+                    // other global loads read from. Stores through parameter
+                    // pointers or other non-global pointers target heap/stack
+                    // memory and cannot alias global variables.
+                    if global_addr_values.contains(&ptr.0) {
+                        has_global_derived_stores = true;
+                    }
                 }
                 Instruction::AtomicRmw { ptr, .. } => {
                     collect_ptr(ptr, &mut stored_allocas);
+                    if let Operand::Value(v) = ptr {
+                        if global_addr_values.contains(&v.0) {
+                            has_global_derived_stores = true;
+                        }
+                    }
                 }
                 Instruction::AtomicCmpxchg { ptr, .. } => {
                     collect_ptr(ptr, &mut stored_allocas);
+                    if let Operand::Value(v) = ptr {
+                        if global_addr_values.contains(&v.0) {
+                            has_global_derived_stores = true;
+                        }
+                    }
                 }
                 Instruction::AtomicStore { ptr, .. } => {
                     collect_ptr(ptr, &mut stored_allocas);
+                    if let Operand::Value(v) = ptr {
+                        if global_addr_values.contains(&v.0) {
+                            has_global_derived_stores = true;
+                        }
+                    }
                 }
                 Instruction::Memcpy { dest, .. } => {
                     stored_allocas.insert(dest.0);
+                    if global_addr_values.contains(&dest.0) {
+                        has_global_derived_stores = true;
+                    }
+                }
+                // Function calls can modify any global state.
+                Instruction::Call { .. } | Instruction::CallIndirect { .. } => {
+                    has_calls = true;
                 }
                 // InlineAsm output operands are pointers (allocas) that the backend
                 // stores results into. Track them as stores to prevent LICM from
                 // hoisting loads of those allocas out of loops with inline asm.
-                Instruction::InlineAsm { outputs, .. } => {
+                // InlineAsm with clobbers is also treated as a call-like barrier.
+                Instruction::InlineAsm { outputs, clobbers, .. } => {
                     for (_, ptr, _) in outputs {
                         stored_allocas.insert(ptr.0);
+                    }
+                    // InlineAsm with "memory" clobber or any clobbers conservatively
+                    // treated as potentially modifying globals.
+                    if !clobbers.is_empty() {
+                        has_calls = true;
                     }
                 }
                 // Vec128 intrinsics write their result through dest_ptr.
@@ -363,12 +418,13 @@ fn analyze_loop_memory(
                 Instruction::Intrinsic { dest_ptr: Some(dptr), .. } => {
                     stored_allocas.insert(dptr.0);
                 }
+                // VaStart/VaEnd/VaCopy/VaArg modify va_list state but not globals.
                 _ => {}
             }
         }
     }
 
-    LoopMemoryInfo { stored_allocas }
+    LoopMemoryInfo { stored_allocas, has_calls, has_global_derived_stores }
 }
 
 /// Check if a Load instruction is safe to hoist from a loop.
@@ -376,17 +432,17 @@ fn analyze_loop_memory(
 /// A load is safe to hoist if:
 /// 1. Its pointer operand is loop-invariant
 /// 2. The memory it reads is not modified inside the loop:
-///    a. If ptr is an alloca that IS address-taken (used in GEP, passed to
-///    calls, etc.): never hoisted, since stores through derived pointers
-///    may not be tracked in `stored_allocas`
-///    b. If ptr is an alloca that is NOT address-taken: safe to hoist if no
-///    store in the loop directly targets that alloca
+///    a. If ptr is an alloca that IS address-taken: never hoisted
+///    b. If ptr is an alloca that is NOT address-taken: safe if no store targets it
+///    c. If ptr is a GlobalAddr: safe if the loop has no calls, no unknown stores,
+///       and no store targets that specific GlobalAddr value
 fn is_load_hoistable(
     ptr: &Value,
     alloca_info: &AllocaAnalysis,
     loop_mem: &LoopMemoryInfo,
     loop_defined: &FxHashSet<u32>,
     invariant: &FxHashSet<u32>,
+    global_addr_values: &FxHashSet<u32>,
 ) -> bool {
     let ptr_id = ptr.0;
 
@@ -414,10 +470,31 @@ fn is_load_hoistable(
         return true;
     }
 
-    // For non-alloca pointers (e.g., GEP results), we need to trace back to
-    // the base to determine safety. For now, be conservative: only hoist if
-    // the pointer is defined outside the loop AND there are no stores or calls
-    // in the loop body that could alias it.
+    // Check if loading from a GlobalAddr pointer.
+    // A load from a GlobalAddr is safe to hoist if:
+    // 1. No function calls in the loop (calls could modify any global)
+    // 2. No stores to unknown pointers (could alias any global)
+    // 3. No store in the loop directly targets this GlobalAddr value
+    //
+    // This is particularly important for inner rendering loops (e.g., DOOM's
+    // R_DrawColumn) where globals like dc_source and dc_colormap are read
+    // every iteration but never written.
+    if global_addr_values.contains(&ptr_id) {
+        if loop_mem.has_calls {
+            return false;
+        }
+        if loop_mem.has_global_derived_stores {
+            return false;
+        }
+        // Check if any store in the loop directly targets this GlobalAddr.
+        if loop_mem.stored_allocas.contains(&ptr_id) {
+            return false;
+        }
+        return true;
+    }
+
+    // For other non-alloca pointers (e.g., GEP results), we cannot easily
+    // determine safety without alias analysis. Be conservative.
     // TODO: Implement alias analysis for GEP-based loads
     false
 }
@@ -461,8 +538,20 @@ fn hoist_loop_invariants(
         }
     }
 
+    // Build a set of Value IDs that are defined by GlobalAddr instructions
+    // (anywhere in the function). This is used to identify loads from globals
+    // for hoisting purposes.
+    let mut global_addr_values: FxHashSet<u32> = FxHashSet::default();
+    for block in func.blocks.iter() {
+        for inst in &block.instructions {
+            if let Instruction::GlobalAddr { dest, .. } = inst {
+                global_addr_values.insert(dest.0);
+            }
+        }
+    }
+
     // Analyze loop memory for load hoisting.
-    let loop_mem = analyze_loop_memory(func, &natural_loop.body);
+    let loop_mem = analyze_loop_memory(func, &natural_loop.body, alloca_info, &global_addr_values);
 
     // Iteratively identify loop-invariant instructions.
     // An instruction is loop-invariant if:
@@ -527,7 +616,8 @@ fn hoist_loop_invariants(
                     !ty.is_float() && !ty.is_long_double()
                         && !matches!(ty, IrType::I128 | IrType::U128)
                         && is_load_hoistable(ptr, alloca_info, &loop_mem,
-                                             &loop_defined, &invariant)
+                                             &loop_defined, &invariant,
+                                             &global_addr_values)
                 } else {
                     false
                 };

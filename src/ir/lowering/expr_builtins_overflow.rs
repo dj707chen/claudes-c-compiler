@@ -4,6 +4,10 @@
 //! __builtin_{add,sub,mul}_overflow variants. These builtins perform an
 //! arithmetic operation, store the result through a pointer, and return
 //! 1 (bool true) if the operation overflowed.
+//!
+//! Also handles __builtin_{add,sub,mul}_overflow_p(a, b, (T)0) predicate-only
+//! variants (GCC 7+) which return 1 if the operation would overflow type T,
+//! without storing the result.
 
 use crate::frontend::parser::ast::{Expr};
 use crate::ir::ir::{
@@ -103,6 +107,75 @@ impl Lowerer {
                 self.check_result_sign_bit(result, result_ir_ty)
             } else {
                 // At least one source is as wide as result: check both conditions
+                let sign_ov = self.check_result_sign_bit(result, result_ir_ty);
+                let unsigned_ov = self.compute_unsigned_overflow(
+                    op, lhs_val, rhs_val, result, result_ir_ty,
+                );
+                self.emit_binop_val(
+                    IrBinOp::Or,
+                    Operand::Value(sign_ov),
+                    Operand::Value(unsigned_ov),
+                    result_ir_ty,
+                )
+            }
+        } else {
+            self.compute_unsigned_overflow(op, lhs_val, rhs_val, result, result_ir_ty)
+        };
+
+        Some(Operand::Value(overflow))
+    }
+
+    /// Lower __builtin_{add,sub,mul}_overflow_p(a, b, (T)0) predicate-only variants.
+    ///
+    /// These return 1 if the operation would overflow type T, 0 otherwise.
+    /// The third argument is a value expression whose type determines T (the value itself is ignored).
+    pub(super) fn lower_overflow_p_builtin(&mut self, args: &[Expr], op: IrBinOp) -> Option<Operand> {
+        if args.len() < 3 {
+            return Some(Operand::Const(IrConst::I64(0)));
+        }
+
+        // The third argument determines the result type (only its type matters, not its value).
+        let result_ctype = self.expr_ctype(&args[2]);
+        let is_signed = result_ctype.is_signed();
+        let result_ir_ty = IrType::from_ctype(&result_ctype);
+
+        // Lower the two operands
+        let lhs_raw = self.lower_expr(&args[0]);
+        let rhs_raw = self.lower_expr(&args[1]);
+
+        // Lower but discard the third argument (it may have side effects, though
+        // in practice it's always a cast of 0)
+        let _ = self.lower_expr(&args[2]);
+
+        // Cast operands to the result type, respecting their original signedness
+        let lhs_src_ctype = self.expr_ctype(&args[0]);
+        let rhs_src_ctype = self.expr_ctype(&args[1]);
+        let lhs_src_ir = IrType::from_ctype(&lhs_src_ctype);
+        let rhs_src_ir = IrType::from_ctype(&rhs_src_ctype);
+        let lhs_val = if lhs_src_ir != result_ir_ty {
+            Operand::Value(self.emit_cast_val(lhs_raw, lhs_src_ir, result_ir_ty))
+        } else {
+            lhs_raw
+        };
+        let rhs_val = if rhs_src_ir != result_ir_ty {
+            Operand::Value(self.emit_cast_val(rhs_raw, rhs_src_ir, result_ir_ty))
+        } else {
+            rhs_raw
+        };
+
+        // Perform the operation in the result type
+        let result = self.emit_binop_val(op, lhs_val, rhs_val, result_ir_ty);
+
+        // Compute the overflow flag (same logic as the non-_p variant)
+        let any_source_signed = lhs_src_ctype.is_signed() || rhs_src_ctype.is_signed();
+        let overflow = if is_signed {
+            self.compute_signed_overflow(op, lhs_val, rhs_val, result, result_ir_ty)
+        } else if any_source_signed {
+            let sources_narrower = lhs_src_ir.size() < result_ir_ty.size()
+                && rhs_src_ir.size() < result_ir_ty.size();
+            if sources_narrower {
+                self.check_result_sign_bit(result, result_ir_ty)
+            } else {
                 let sign_ov = self.check_result_sign_bit(result, result_ir_ty);
                 let unsigned_ov = self.compute_unsigned_overflow(
                     op, lhs_val, rhs_val, result, result_ir_ty,

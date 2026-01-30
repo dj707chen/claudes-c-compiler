@@ -181,6 +181,13 @@ static BUILTIN_MAP: LazyLock<FxHashMap<&'static str, BuiltinInfo>> = LazyLock::n
     m.insert("__builtin_umull_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::MulOverflow));
     m.insert("__builtin_umulll_overflow", BuiltinInfo::intrinsic(BuiltinIntrinsic::MulOverflow));
 
+    // Overflow-checking predicate builtins (GCC 7+):
+    // __builtin_{add,sub,mul}_overflow_p(a, b, (T)0) -> 1 if op overflows type T
+    // These are like the non-_p variants but don't store a result.
+    m.insert("__builtin_add_overflow_p", BuiltinInfo::intrinsic(BuiltinIntrinsic::AddOverflowP));
+    m.insert("__builtin_sub_overflow_p", BuiltinInfo::intrinsic(BuiltinIntrinsic::SubOverflowP));
+    m.insert("__builtin_mul_overflow_p", BuiltinInfo::intrinsic(BuiltinIntrinsic::MulOverflowP));
+
     // Atomics (map to libc atomic helpers for now)
     m.insert("__sync_synchronize", BuiltinInfo::intrinsic(BuiltinIntrinsic::Fence));
 
@@ -490,6 +497,12 @@ pub enum BuiltinIntrinsic {
     SubOverflow,
     /// __builtin_mul_overflow(a, b, result_ptr) -> bool (1 if overflow)
     MulOverflow,
+    /// __builtin_add_overflow_p(a, b, (T)0) -> bool (1 if a+b overflows type T)
+    AddOverflowP,
+    /// __builtin_sub_overflow_p(a, b, (T)0) -> bool (1 if a-b overflows type T)
+    SubOverflowP,
+    /// __builtin_mul_overflow_p(a, b, (T)0) -> bool (1 if a*b overflows type T)
+    MulOverflowP,
     /// __builtin_frame_address(level) -> returns frame pointer
     FrameAddress,
     /// __builtin_return_address(level) -> returns return address
