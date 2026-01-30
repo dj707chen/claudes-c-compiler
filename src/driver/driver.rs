@@ -1266,10 +1266,13 @@ impl Driver {
         // Lex
         let t1 = std::time::Instant::now();
         let mut source_manager = SourceManager::new();
-        let file_id = source_manager.add_file(input_file.to_string(), preprocessed.clone());
-        // Build line map from preprocessor line markers for source location tracking
-        source_manager.build_line_map(&preprocessed);
-        let mut lexer = Lexer::new(&preprocessed, file_id);
+        // Move preprocessed output into source manager (avoids cloning the entire string).
+        // Then borrow a reference back for the lexer.
+        let file_id = source_manager.add_file(input_file.to_string(), preprocessed);
+        // Build line map from preprocessor line markers for source location tracking.
+        // Uses stored content from add_file() and reuses already-computed line offsets.
+        source_manager.build_line_map();
+        let mut lexer = Lexer::new(source_manager.get_content(file_id), file_id);
         lexer.set_gnu_extensions(self.gnu_extensions);
         let tokens = lexer.tokenize();
         if time_phases { eprintln!("[TIME] lex: {:.3}s ({} tokens)", t1.elapsed().as_secs_f64(), tokens.len()); }

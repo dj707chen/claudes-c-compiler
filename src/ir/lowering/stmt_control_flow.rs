@@ -202,11 +202,33 @@ impl Lowerer {
         let cleanup_depth = target_depth.min(current_depth);
         let cleanups = self.collect_scope_cleanup_vars_above_depth(cleanup_depth);
         self.emit_cleanup_calls(&cleanups);
-        // If the function has VLA declarations, restore the saved stack pointer before
-        // jumping. This ensures VLA stack space is reclaimed on backward jumps (e.g.,
-        // goto to a label before a VLA declaration in a loop).
-        if let Some(save_val) = self.func().vla_stack_save {
-            self.emit(Instruction::StackRestore { ptr: save_val });
+        // Restore the stack pointer for VLA deallocation when needed.
+        //
+        // There are two cases where VLA stack space must be reclaimed:
+        // 1. The goto exits one or more scopes that contain VLAs — restore using
+        //    the outermost exited scope's stack save point.
+        // 2. The goto jumps backward within the same scope past a VLA declaration
+        //    (e.g., a goto-based loop around a VLA). Without restoration, the VLA
+        //    would be re-allocated on each iteration, causing stack overflow.
+        //
+        // Forward gotos within the same scope must NOT restore, because the VLA
+        // data may still be live (pointers into it may be used after the label).
+        // We distinguish forward from backward gotos by checking whether the
+        // target label has already been defined during lowering.
+        if cleanup_depth < current_depth {
+            // Case 1: exiting scopes. Find the outermost exited scope with VLAs.
+            let vla_restore = self.func().scope_stack[cleanup_depth..]
+                .iter()
+                .find_map(|frame| frame.scope_stack_save);
+            if let Some(save_val) = vla_restore {
+                self.emit(Instruction::StackRestore { ptr: save_val });
+            }
+        } else if let Some(save_val) = self.func().vla_stack_save {
+            // Case 2: same-scope goto. Only restore for backward jumps (label
+            // already defined), which may re-enter VLA declarations.
+            if self.user_label_exists(label) {
+                self.emit(Instruction::StackRestore { ptr: save_val });
+            }
         }
         let scoped_label = self.get_or_create_user_label(label);
         self.terminate(Terminator::Branch(scoped_label));

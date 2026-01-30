@@ -5,14 +5,14 @@ Format: [project] - ARM: pass/fail, x86: pass/fail, riscv: pass/fail, i686: pass
 zlib - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: core compression library
 lua - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: scripting language
 libsodium - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: crypto library
-mquickjs - ARM: pass, x86: pass, riscv: pass, i686: fail. Notes: JS engine, pre-existing i686 failure (test issue)
+mquickjs - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: JS engine, i686 now passing
 libpng - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: PNG library
 jq - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: JSON processor
 libjpeg - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: JPEG library
 mbedtls - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: TLS library
 libuv - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: async I/O
-libffi - ARM: pass, x86: pass, riscv: fail, i686: pass. Notes: pre-existing riscv failure
-musl - ARM: pass, x86: pass, riscv: pass, i686: fail. Notes: pre-existing i686 failure
+libffi - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: riscv now passing
+musl - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: i686 now passing
 tcc - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: tiny C compiler
 fastlz - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: FIXED i686 - was failing due to F64 skip-slot bug
 mruby - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: FIXED - build scripts rewrote to not need ruby/rake
@@ -25,3 +25,4 @@ MicroPython - ARM: pass, x86: pass, riscv: pass, i686: n/a. Notes: required C99 
 lemon - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: FIXED - func ptr deref with pointer return type was incorrectly classified as pointer-to-function-pointer
 Gravity - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: FIXED - ternary struct address normalization: `ptr ? *ptr : (struct){...}` both branches produce addresses (not just compound literals), use expr_produces_packed_struct_data() with struct-type guard
 mpack - ARM: untested, x86: fail, riscv: untested, i686: untested. Notes: C99 inline no-emit fix resolved fn_mpack_tag_nil address comparison; remaining failure in test_write_generic_kv (likely separate codegen bug)
+yyjson - ARM: pass, x86: pass, riscv: pass, i686: pass. Notes: FIXED - scalar init of struct member (.ptr = 3 where ptr is a struct) was dropping the value; first member of inner struct was not being set

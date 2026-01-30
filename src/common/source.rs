@@ -39,13 +39,14 @@ impl std::fmt::Display for SourceLocation {
 }
 
 /// Entry in the line map: maps a byte offset in the preprocessed output
-/// to an original filename and line number.
-#[derive(Debug, Clone)]
+/// to an original filename and line number. Uses a filename index into the
+/// deduplicated `line_map_filenames` table to avoid per-entry String allocation.
+#[derive(Debug, Clone, Copy)]
 struct LineMapEntry {
     /// Byte offset in preprocessed output where this mapping starts.
     pp_offset: u32,
-    /// Original filename.
-    filename: String,
+    /// Index into SourceManager::line_map_filenames.
+    filename_idx: u16,
     /// Original line number (1-based) at pp_offset.
     orig_line: u32,
 }
@@ -64,9 +65,9 @@ pub struct SourceManager {
     /// Line map entries sorted by pp_offset. When non-empty, resolve_span uses
     /// this instead of per-file line_offsets.
     line_map: Vec<LineMapEntry>,
-    /// Line offsets (byte offset of each '\n'+1) in the preprocessed output,
-    /// used to compute column numbers when line_map is active.
-    pp_line_offsets: Vec<u32>,
+    /// Deduplicated filename strings referenced by LineMapEntry::filename_idx.
+    /// Avoids allocating the same filename string for every line marker.
+    line_map_filenames: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -81,7 +82,7 @@ impl SourceManager {
         Self {
             files: Vec::new(),
             line_map: Vec::new(),
-            pp_line_offsets: Vec::new(),
+            line_map_filenames: Vec::new(),
         }
     }
 
@@ -102,34 +103,48 @@ impl SourceManager {
 
     /// Build a line map from GCC-style line markers in preprocessed output.
     ///
-    /// Scans the preprocessed text for lines matching `# <number> "<filename>"`.
-    /// These markers are emitted by the preprocessor at `#include` boundaries
-    /// and indicate that subsequent lines originate from the named file starting
-    /// at the given line number.
+    /// Scans the stored file content (files[0]) for lines matching
+    /// `# <number> "<filename>"`. These markers are emitted by the preprocessor
+    /// at `#include` boundaries and indicate that subsequent lines originate
+    /// from the named file starting at the given line number.
     ///
-    /// Also computes per-line byte offsets for the preprocessed output (used for
-    /// column number calculation).
-    pub fn build_line_map(&mut self, preprocessed: &str) {
-        let bytes = preprocessed.as_bytes();
+    /// Reuses the line offsets already computed by `add_file()` for column
+    /// calculation, avoiding a redundant scan of the preprocessed output.
+    ///
+    /// Must be called after `add_file()` has stored the preprocessed content.
+    pub fn build_line_map(&mut self) {
+        if self.files.is_empty() {
+            return;
+        }
+
+        // Line offsets for column calculation are reused directly from
+        // files[0].line_offsets (computed once during add_file), avoiding
+        // both a redundant O(n) scan and a Vec clone.
+
+        let bytes = self.files[0].content.as_bytes();
         let len = bytes.len();
 
-        // Compute line offsets for column calculation
-        self.pp_line_offsets = compute_line_offsets(preprocessed);
+        // Track the last filename (byte range) and its index to avoid redundant
+        // lookups. Consecutive line markers usually reference the same file.
+        let mut last_fname_start: usize = 0;
+        let mut last_fname_end: usize = 0;
+        let mut last_fname_idx: u16 = 0;
+        use crate::common::fx_hash::FxHashMap;
+        let mut fname_map: FxHashMap<&[u8], u16> = FxHashMap::default();
 
         let mut i = 0;
         while i < len {
-            let line_start = i;
+            // Find end of this line using fast newline search
+            let line_end = if let Some(rel) = memchr_newline(&bytes[i..]) {
+                i + rel
+            } else {
+                len
+            };
 
-            // Find end of this line
-            let mut line_end = i;
-            while line_end < len && bytes[line_end] != b'\n' {
-                line_end += 1;
-            }
-
-            // Check if this line is a line marker: # <number> "<filename>"
-            // Must start with '#' (possibly after whitespace)
-            let mut j = line_start;
-            while j < line_end && bytes[j].is_ascii_whitespace() && bytes[j] != b'\n' {
+            // Quick check: line markers start with '#' (possibly after whitespace).
+            // Skip lines that don't start with '#' for fast rejection.
+            let mut j = i;
+            while j < line_end && bytes[j] == b' ' {
                 j += 1;
             }
 
@@ -139,14 +154,13 @@ impl SourceManager {
                 while j < line_end && bytes[j] == b' ' {
                     j += 1;
                 }
-                // Parse line number
+                // Parse line number directly from bytes (avoids from_utf8 + parse)
                 let num_start = j;
                 while j < line_end && bytes[j].is_ascii_digit() {
                     j += 1;
                 }
                 if j > num_start {
-                    let num_str = std::str::from_utf8(&bytes[num_start..j]).unwrap_or("0");
-                    if let Ok(line_num) = num_str.parse::<u32>() {
+                    if let Some(line_num) = parse_u32_from_digits(&bytes[num_start..j]) {
                         // Skip whitespace
                         while j < line_end && bytes[j] == b' ' {
                             j += 1;
@@ -158,9 +172,33 @@ impl SourceManager {
                             while j < line_end && bytes[j] != b'"' {
                                 j += 1;
                             }
-                            let filename = std::str::from_utf8(&bytes[fname_start..j])
-                                .unwrap_or("<unknown>")
-                                .to_string();
+                            let fname_bytes = &bytes[fname_start..j];
+
+                            // Deduplicate filenames: check last-used cache first
+                            // (consecutive markers usually reference the same file),
+                            // then fall back to the hash map for non-consecutive repeats.
+                            let filename_idx =
+                                if last_fname_end > last_fname_start
+                                    && fname_bytes == &bytes[last_fname_start..last_fname_end]
+                                {
+                                    // Same filename as previous marker (common case)
+                                    last_fname_idx
+                                } else if let Some(&idx) = fname_map.get(fname_bytes) {
+                                    // Previously seen filename
+                                    idx
+                                } else {
+                                    // New unique filename - allocate once
+                                    let s = std::str::from_utf8(fname_bytes)
+                                        .unwrap_or("<unknown>")
+                                        .to_string();
+                                    let idx = self.line_map_filenames.len() as u16;
+                                    self.line_map_filenames.push(s);
+                                    fname_map.insert(fname_bytes, idx);
+                                    idx
+                                };
+                            last_fname_start = fname_start;
+                            last_fname_end = j;
+                            last_fname_idx = filename_idx;
 
                             // The next line (after this marker) maps to filename:line_num.
                             // Record the byte offset of the line after the marker.
@@ -172,7 +210,7 @@ impl SourceManager {
 
                             self.line_map.push(LineMapEntry {
                                 pp_offset: next_line_offset as u32,
-                                filename,
+                                filename_idx,
                                 orig_line: line_num,
                             });
                         }
@@ -233,11 +271,12 @@ impl SourceManager {
         // Count how many newlines are between entry.pp_offset and offset
         // to determine the line offset within this mapped region.
         let mut lines_past = 0u32;
+        let entry_filename = &self.line_map_filenames[entry.filename_idx as usize];
         let file_content = if !self.files.is_empty() {
             self.files[0].content.as_bytes()
         } else {
             return SourceLocation {
-                file: entry.filename.clone(),
+                file: entry_filename.clone(),
                 line: entry.orig_line,
                 column: 1,
             };
@@ -253,19 +292,22 @@ impl SourceManager {
             }
         }
 
-        // Compute column: distance from the start of the current line
-        let col = if !self.pp_line_offsets.is_empty() {
-            let pp_line = match self.pp_line_offsets.binary_search(&offset) {
+        // Compute column: distance from the start of the current line.
+        // Uses files[0].line_offsets (computed once during add_file) instead of
+        // maintaining a separate pp_line_offsets copy.
+        let line_offsets = &self.files[0].line_offsets;
+        let col = if !line_offsets.is_empty() {
+            let pp_line = match line_offsets.binary_search(&offset) {
                 Ok(i) => i,
                 Err(i) => if i > 0 { i - 1 } else { 0 },
             };
-            offset.saturating_sub(self.pp_line_offsets[pp_line]) + 1
+            offset.saturating_sub(line_offsets[pp_line]) + 1
         } else {
             1
         };
 
         SourceLocation {
-            file: entry.filename.clone(),
+            file: entry_filename.clone(),
             line: entry.orig_line + lines_past,
             column: col,
         }
@@ -331,11 +373,45 @@ fn is_line_marker(line: &[u8]) -> bool {
 }
 
 fn compute_line_offsets(content: &str) -> Vec<u32> {
-    let mut offsets = vec![0u32];
-    for (i, b) in content.bytes().enumerate() {
-        if b == b'\n' {
-            offsets.push((i + 1) as u32);
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    // Pre-allocate: estimate ~60 bytes per line (typical for C code)
+    let mut offsets = Vec::with_capacity(len / 60 + 1);
+    offsets.push(0u32);
+    let mut pos = 0;
+    while pos < len {
+        // Use memchr-style scanning: check bytes in chunks for newlines.
+        // This is faster than enumerate() because it avoids the tuple overhead
+        // and lets the compiler vectorize the inner search.
+        if let Some(rel) = memchr_newline(&bytes[pos..]) {
+            offsets.push((pos + rel + 1) as u32);
+            pos += rel + 1;
+        } else {
+            break;
         }
     }
     offsets
+}
+
+/// Fast newline search. Returns the position of the first b'\n' in `haystack`,
+/// or None if not found. Uses a simple loop that the compiler can auto-vectorize.
+#[inline]
+fn memchr_newline(haystack: &[u8]) -> Option<usize> {
+    haystack.iter().position(|&b| b == b'\n')
+}
+
+/// Parse a u32 directly from ASCII digit bytes, avoiding from_utf8 + parse overhead.
+#[inline]
+fn parse_u32_from_digits(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut result: u32 = 0;
+    for &b in bytes {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        result = result.checked_mul(10)?.checked_add((b - b'0') as u32)?;
+    }
+    Some(result)
 }

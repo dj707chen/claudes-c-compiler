@@ -426,9 +426,22 @@ impl Lowerer {
                         self.emit_memcpy_at_offset(base_alloca, field_offset, src_addr, sub_layout.size);
                         *item_idx += 1;
                     } else {
-                        // Flat init: consume items for inner struct/union fields
-                        let consumed = self.emit_struct_init(&items[*item_idx..], base_alloca, &sub_layout, field_offset);
-                        if consumed == 0 { *item_idx += 1; } else { *item_idx += consumed; }
+                        // Flat init: consume items for inner struct/union fields.
+                        // If the current item has a designator (e.g., `.y = 42` where y is
+                        // a struct), strip it so the scalar is treated as a positional init
+                        // for the first field of the sub-struct (C11 6.7.9p13).
+                        if !item.designators.is_empty() {
+                            let stripped = InitializerItem {
+                                designators: vec![],
+                                init: item.init.clone(),
+                            };
+                            self.zero_init_region(base_alloca, field_offset, sub_layout.size);
+                            self.emit_struct_init(&[stripped], base_alloca, &sub_layout, field_offset);
+                            *item_idx += 1;
+                        } else {
+                            let consumed = self.emit_struct_init(&items[*item_idx..], base_alloca, &sub_layout, field_offset);
+                            if consumed == 0 { *item_idx += 1; } else { *item_idx += consumed; }
+                        }
                     }
                 }
             }
@@ -601,6 +614,17 @@ impl Lowerer {
             let elem_offset = field_offset + ai * elem_size;
             match &sub_item.init {
                 Initializer::Expr(e) => {
+                    // String literal targeting a char sub-array: copy the string
+                    // into the array memory instead of storing a pointer.
+                    if let Expr::StringLiteral(s, _) = e {
+                        if let CType::Array(inner, _) = elem_ty {
+                            if matches!(inner.as_ref(), CType::Char | CType::UChar) {
+                                self.emit_string_to_alloca(base_alloca, s, elem_offset);
+                                ai += 1;
+                                continue;
+                            }
+                        }
+                    }
                     let elem_ir_ty = IrType::from_ctype(elem_ty);
                     self.emit_init_expr_to_offset_bool(e, base_alloca, elem_offset, elem_ir_ty, elem_is_bool);
                 }
@@ -614,6 +638,15 @@ impl Lowerer {
                             if ii >= *inner_size { break; }
                             if let Initializer::Expr(e) = &inner_item.init {
                                 let inner_offset = elem_offset + ii * inner_elem_size;
+                                // String literal targeting a char sub-array: copy string contents
+                                if let Expr::StringLiteral(s, _) = e {
+                                    if let CType::Array(inner_inner, _) = inner_elem_ty.as_ref() {
+                                        if matches!(inner_inner.as_ref(), CType::Char | CType::UChar) {
+                                            self.emit_string_to_alloca(base_alloca, s, inner_offset);
+                                            continue;
+                                        }
+                                    }
+                                }
                                 self.emit_init_expr_to_offset_bool(e, base_alloca, inner_offset, inner_elem_ir_ty, inner_is_bool);
                             }
                         }

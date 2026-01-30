@@ -1181,6 +1181,15 @@ impl Lowerer {
         }
     }
 
+    /// Check if a user-defined goto label has already been defined (i.e., the
+    /// label statement was already lowered). Used to determine backward vs forward gotos.
+    pub(super) fn user_label_exists(&self, name: &str) -> bool {
+        let resolved_name = self.resolve_local_label(name);
+        let func_name = &self.func().name;
+        let key = format!("{}::{}", func_name, resolved_name);
+        self.func().user_labels.contains_key(&key)
+    }
+
     /// Get or create a unique IR label for a user-defined goto label.
     /// If the label name is declared via __label__ in a local scope,
     /// uses the scope-qualified name so that different invocations of

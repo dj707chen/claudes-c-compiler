@@ -502,8 +502,20 @@ impl Lowerer {
                         return 1;
                     }
                 }
-                let consumed = self.fill_struct_global_bytes(items, sub_layout, bytes, field_offset);
-                if consumed == 0 { 1 } else { consumed }
+                // If the item has a designator (e.g., `.y = 42` where y is a struct),
+                // strip it so the scalar is treated as a positional init for the first
+                // field of the sub-struct (C11 6.7.9p13).
+                if !items[0].designators.is_empty() {
+                    let stripped = InitializerItem {
+                        designators: vec![],
+                        init: items[0].init.clone(),
+                    };
+                    self.fill_struct_global_bytes(&[stripped], sub_layout, bytes, field_offset);
+                    1
+                } else {
+                    let consumed = self.fill_struct_global_bytes(items, sub_layout, bytes, field_offset);
+                    if consumed == 0 { 1 } else { consumed }
+                }
             }
         }
     }

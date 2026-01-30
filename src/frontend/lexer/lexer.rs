@@ -344,12 +344,18 @@ impl Lexer {
             }
         }
 
-        let text = std::str::from_utf8(&self.input[start..self.pos]).unwrap_or("0").to_string();
+        // Save the end position of the number digits before parsing suffixes
+        // (which advance self.pos further).
+        let num_end = self.pos;
 
         if is_float {
             let (float_kind, is_imaginary) = self.parse_float_suffix();
-            self.make_float_token(&text, float_kind, is_imaginary, start)
+            // Borrow the digit text as &str without allocating a String.
+            let text = std::str::from_utf8(&self.input[start..num_end]).unwrap_or("0");
+            self.make_float_token(text, float_kind, is_imaginary, start)
         } else {
+            // Parse the integer value directly from the &str borrow (no heap allocation).
+            let text = std::str::from_utf8(&self.input[start..num_end]).unwrap_or("0");
             let uvalue: u64 = text.parse().unwrap_or(0);
             self.finish_int_literal(uvalue, false, start)
         }
