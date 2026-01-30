@@ -559,7 +559,14 @@ impl Lowerer {
         let controlling_ctype = self.get_expr_ctype_lowerer(controlling)
             .or_else(|| self.lookup_sema_expr_type(controlling));
         let controlling_ir_type = self.get_expr_type(controlling);
-        // Per C11 6.5.1.1p2: lvalue conversion strips top-level qualifiers.
+        // Per C11 6.5.1.1p2, lvalue conversion includes array-to-pointer and
+        // function-to-pointer decay.
+        let controlling_ctype = controlling_ctype.map(|ct| match ct {
+            CType::Array(elem, _) => CType::Pointer(elem, AddressSpace::Default),
+            CType::Function(ft) => CType::Pointer(Box::new(CType::Function(ft)), AddressSpace::Default),
+            other => other,
+        });
+        // Lvalue conversion also strips top-level qualifiers.
         // Only use ctrl_is_const for pointer types (where it reflects pointee constness).
         let ctrl_is_const = if let Some(ref ct) = controlling_ctype {
             matches!(ct, CType::Pointer(_, _)) && self.expr_is_const_qualified(controlling)

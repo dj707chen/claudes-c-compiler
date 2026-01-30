@@ -481,10 +481,17 @@ impl Lowerer {
     pub(super) fn resolve_generic_selection<'a>(&mut self, controlling: &Expr, associations: &'a [GenericAssociation]) -> &'a Expr {
         let controlling_ctype = self.get_expr_ctype(controlling);
         let controlling_ir_type = self.get_expr_type(controlling);
-        // Determine if the controlling expression's type has a const-qualified pointee.
         // Per C11 6.5.1.1p2, the controlling expression undergoes lvalue conversion,
-        // which strips top-level qualifiers. So for non-pointer types like `const int x`,
-        // the type becomes `int` (ctrl_is_const = false).
+        // which includes array-to-pointer and function-to-pointer decay, and strips
+        // top-level qualifiers.
+        let controlling_ctype = controlling_ctype.map(|ct| match ct {
+            CType::Array(elem, _) => CType::Pointer(elem, AddressSpace::Default),
+            CType::Function(ft) => CType::Pointer(Box::new(CType::Function(ft)), AddressSpace::Default),
+            other => other,
+        });
+        // Determine if the controlling expression's type has a const-qualified pointee.
+        // Lvalue conversion strips top-level qualifiers. So for non-pointer types like
+        // `const int x`, the type becomes `int` (ctrl_is_const = false).
         // For pointer types like `const int *p`, lvalue conversion strips the top-level
         // pointer const but preserves the pointee const, so ctrl_is_const reflects
         // whether the pointee is const.
@@ -575,9 +582,7 @@ impl Lowerer {
     }
 
     /// Check if an expression's type is const-qualified (for _Generic matching).
-    /// Only handles local variable identifiers and address-of expressions.
-    /// TODO: extend to global variables, casts, member access, subscripts
-    /// if _Generic const matching is needed for those expression forms.
+    /// Handles local variable identifiers, address-of, and comma expressions.
     pub(super) fn expr_is_const_qualified(&self, expr: &Expr) -> bool {
         match expr {
             Expr::Identifier(name, _) => {
@@ -591,6 +596,10 @@ impl Lowerer {
             // Address-of: &y where y is `const int` produces `const int *`.
             Expr::AddressOf(inner, _) => {
                 self.expr_is_const_qualified(inner)
+            }
+            // Comma: const-ness comes from the right-hand operand.
+            Expr::Comma(_, rhs, _) => {
+                self.expr_is_const_qualified(rhs)
             }
             _ => false,
         }
