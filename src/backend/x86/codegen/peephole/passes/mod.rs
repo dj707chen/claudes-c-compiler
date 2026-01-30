@@ -846,3 +846,49 @@ mod tests {
             "should fold with empty lines between: {}", result);
     }
 }
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    #[test]
+    fn test_store_forward_param_ref_gep() {
+        // This pattern comes from:
+        //   void f(struct state *s) { ... s->member[i] = 0; ... }
+        // The codegen emits:
+        //   movq %rdi, -8(%rbp)    # store param
+        //   movq -8(%rbp), %rax    # paramref load
+        //   movq %rax, -8(%rbp)    # paramref store-back (redundant)
+        //   movq -8(%rbp), %rax    # GEP base load
+        //   leaq 208(%rax), %rax   # GEP offset
+        // After peephole, rax must still be set correctly before the leaq.
+        let asm = [
+            "func:",
+            "    pushq %rbp",
+            "    movq %rsp, %rbp",
+            "    subq $16, %rsp",
+            "    movq %rdi, -8(%rbp)",
+            "    movq -8(%rbp), %rax",
+            "    movq %rax, -8(%rbp)",
+            "    movq -8(%rbp), %rax",
+            "    leaq 208(%rax), %rax",
+            "    movq %rax, %r14",
+            "    ret",
+            ".size func, .-func",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // After optimization, rax must be loaded from rdi or from the stack
+        // before the leaq instruction.
+        // The correct result should be something like:
+        //   movq %rdi, -8(%rbp) or movq %rdi, %rax + leaq 208(%rax)...
+        // NOT: leaq 208(%rax) with rax uninitialized!
+        eprintln!("Result:\n{}", result);
+        assert!(
+            result.contains("movq %rdi, %rax") || 
+            result.contains("movq -8(%rbp), %rax") ||
+            result.contains("leaq 208(%rdi)"),
+            "rax must be set from rdi before leaq 208(%rax): {}", result
+        );
+    }
+}
+

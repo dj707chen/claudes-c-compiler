@@ -251,8 +251,22 @@ pub(super) fn is_read_modify_write(trimmed: &str) -> bool {
         return false;
     }
 
-    // LEA is write-only for the destination
+    // LEA is write-only for the destination, UNLESS the destination register
+    // also appears in the address computation (source operand). For example:
+    //   leaq 4(%rax), %rax   -- reads %rax (base) and writes %rax (dest)
+    //   leaq (%rax,%rcx), %rax  -- reads %rax and writes %rax
+    //   leaq 8(%rcx), %rax   -- does NOT read %rax, only writes it
     if b[0] == b'l' && b[1] == b'e' && b[2] == b'a' {
+        // Check if dest register appears in the source (memory) operand.
+        // Source operand is everything before the last comma.
+        if let Some(comma) = trimmed.rfind(',') {
+            let dest_part = trimmed[comma + 1..].trim();
+            let src_part = &trimmed[..comma];
+            // If the dest register name appears in the source part, it's a read
+            if src_part.contains(dest_part) {
+                return true;
+            }
+        }
         return false;
     }
 
