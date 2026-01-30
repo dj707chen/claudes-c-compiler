@@ -432,13 +432,22 @@ impl Lowerer {
     pub(super) fn expr_ctype(&self, expr: &Expr) -> CType {
         // Handle complex-specific cases that get_expr_ctype doesn't cover
         match expr {
-            Expr::BinaryOp(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, lhs, rhs, _) => {
+            Expr::BinaryOp(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div
+                | BinOp::Mod | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                | BinOp::Shl | BinOp::Shr, lhs, rhs, _) => {
                 let lt = self.expr_ctype(lhs);
                 let rt = self.expr_ctype(rhs);
+                // GCC vector extensions: if either operand is a vector, result is that vector type
+                if lt.is_vector() {
+                    return lt;
+                }
+                if rt.is_vector() {
+                    return rt;
+                }
                 if lt.is_complex() || rt.is_complex() {
                     return self.common_complex_type(&lt, &rt);
                 }
-                // Fall through to get_expr_ctype for non-complex arithmetic
+                // Fall through to get_expr_ctype for non-complex/non-vector arithmetic
             }
             Expr::FunctionCall(callee, args, _) => {
                 if let Expr::Identifier(name, _) = callee.as_ref() {
