@@ -1,0 +1,262 @@
+/// External tool invocation: assembler, linker, and GCC fallback.
+///
+/// The compiler delegates assembly and linking to the system GCC toolchain.
+/// This module centralizes all external process spawning so the rest of the
+/// driver doesn't need to deal with `std::process::Command` building.
+///
+/// GCC fallback is used when the compiler encounters flags it can't handle
+/// natively (e.g., `-m16` for 16-bit real mode boot code). In fallback mode,
+/// the original command-line args are forwarded to the system GCC after
+/// filtering out flags the system GCC may not support.
+
+use super::Driver;
+use crate::backend::Target;
+
+impl Driver {
+    /// Assemble a .s or .S file to an object file using the target assembler.
+    /// For .S files, gcc handles preprocessing (macros, #include, etc.).
+    pub(super) fn assemble_source_file(&self, input_file: &str, output_path: &str) -> Result<(), String> {
+        let config = self.target.assembler_config();
+        let mut cmd = std::process::Command::new(config.command);
+        cmd.args(config.extra_args);
+
+        // Pass through RISC-V ABI/arch overrides (must come after config defaults
+        // so GCC uses last-wins semantics for -mabi= and -march=).
+        let extra_asm_args = self.build_asm_extra_args();
+        cmd.args(&extra_asm_args);
+
+        // Pass through include paths and defines for .S preprocessing
+        for path in &self.include_paths {
+            cmd.arg("-I").arg(path);
+        }
+        for path in &self.quote_include_paths {
+            cmd.arg("-iquote").arg(path);
+        }
+        for path in &self.isystem_include_paths {
+            cmd.arg("-isystem").arg(path);
+        }
+        for path in &self.after_include_paths {
+            cmd.arg("-idirafter").arg(path);
+        }
+        for def in &self.defines {
+            if def.value == "1" {
+                cmd.arg(format!("-D{}", def.name));
+            } else {
+                cmd.arg(format!("-D{}={}", def.name, def.value));
+            }
+        }
+        // Pass through force-include files (-include), -nostdinc, and -U flags
+        // for .S preprocessing (needed by kernel for kconfig.h, etc.)
+        for inc in &self.force_includes {
+            cmd.arg("-include").arg(inc);
+        }
+        if self.nostdinc {
+            cmd.arg("-nostdinc");
+        }
+        for undef in &self.undef_macros {
+            cmd.arg(format!("-U{}", undef));
+        }
+
+        // Pass through -Wa, assembler flags
+        for flag in &self.assembler_extra_args {
+            cmd.arg(format!("-Wa,{}", flag));
+        }
+
+        // When explicit language is set (from -x flag), tell gcc too
+        if let Some(ref lang) = self.explicit_language {
+            cmd.arg("-x").arg(lang);
+        }
+
+        cmd.args(["-c", "-o", output_path, input_file]);
+
+        // If assembler extra args are present (e.g., -Wa,--version), inherit
+        // stdout so the assembler's output flows through to the caller.
+        // This is needed by kernel's as-version.sh which captures the output.
+        if !self.assembler_extra_args.is_empty() {
+            cmd.stdout(std::process::Stdio::inherit());
+        }
+
+        let result = cmd.output()
+            .map_err(|e| format!("Failed to run assembler for {}: {}", input_file, e))?;
+
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            return Err(format!("Assembly of {} failed: {}", input_file, stderr));
+        }
+
+        Ok(())
+    }
+
+    /// Build extra assembler arguments for RISC-V ABI/arch overrides.
+    ///
+    /// When -mabi= or -march= are specified on the CLI, these override the
+    /// defaults hardcoded in the assembler config. This is critical for the
+    /// Linux kernel which uses -mabi=lp64 (soft-float) instead of the default
+    /// lp64d (double-float), and -march=rv64imac... instead of rv64gc.
+    /// The assembler uses these flags to set ELF e_flags (float ABI, RVC, etc.).
+    pub(super) fn build_asm_extra_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        // Only pass RISC-V flags to the RISC-V assembler. Passing -mabi/-march
+        // to x86/ARM gcc would cause warnings or errors.
+        if self.target == Target::Riscv64 {
+            if let Some(ref abi) = self.riscv_abi {
+                args.push(format!("-mabi={}", abi));
+            }
+            if let Some(ref march) = self.riscv_march {
+                args.push(format!("-march={}", march));
+            }
+            if self.riscv_no_relax {
+                args.push("-mno-relax".to_string());
+            }
+            // The RISC-V GNU assembler defaults to PIC mode, which causes
+            // `la` pseudo-instructions to expand with R_RISCV_GOT_HI20 (GOT
+            // indirection) instead of R_RISCV_PCREL_HI20 (direct PC-relative).
+            // The Linux kernel does not have a GOT and expects PCREL relocations,
+            // so we must explicitly pass -fno-pic when PIC is not requested.
+            if !self.pic {
+                args.push("-fno-pic".to_string());
+            }
+        }
+        // Pass through any -Wa, flags from the command line. These are needed
+        // when compiling C code that contains inline asm requiring specific
+        // assembler settings (e.g., -Wa,-misa-spec=2.2 for RISC-V to enable
+        // implicit zicsr in the old ISA spec, required by Linux kernel vDSO).
+        for flag in &self.assembler_extra_args {
+            args.push(format!("-Wa,{}", flag));
+        }
+        args
+    }
+
+    /// Build linker args from collected flags, preserving command-line ordering.
+    ///
+    /// Order-independent flags (-shared, -static, -nostdlib, -L paths) go first.
+    /// Then linker_ordered_items provides the original CLI ordering of positional
+    /// object/archive files, -l flags, and -Wl, pass-through flags. This ordering
+    /// is critical for flags like -Wl,--whole-archive which must appear before
+    /// the archive they affect.
+    pub(super) fn build_linker_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if self.shared_lib {
+            args.push("-shared".to_string());
+        }
+        if self.static_link {
+            args.push("-static".to_string());
+        }
+        if self.nostdlib {
+            args.push("-nostdlib".to_string());
+        }
+        for path in &self.linker_paths {
+            args.push(format!("-L{}", path));
+        }
+        // Emit objects, -l flags, and -Wl, flags in their original command-line order.
+        args.extend_from_slice(&self.linker_ordered_items);
+        args
+    }
+
+    /// Delegate compilation to the system GCC when we can't handle the target mode
+    /// (e.g., -m16 or -m32 for 32-bit/16-bit x86 code).
+    ///
+    /// Filters out flags that the system GCC may not support. This is necessary
+    /// because ccc silently accepts unknown flags (returning success), so the
+    /// kernel's `cc-option` mechanism thinks ccc supports GCC-version-specific
+    /// flags. When ccc falls back to the system GCC (which may be a different
+    /// version than what ccc impersonates), those flags can cause errors.
+    pub(super) fn run_gcc_fallback(&self) -> Result<(), String> {
+        let filtered_args = self.filter_args_for_system_gcc();
+
+        let mut cmd = std::process::Command::new("gcc");
+        cmd.args(&filtered_args);
+
+        let result = cmd.output()
+            .map_err(|e| format!("Failed to run gcc fallback: {}", e))?;
+
+        // Forward stderr
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        if !stderr.is_empty() {
+            eprint!("{}", stderr);
+        }
+        // Forward stdout
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        if !stdout.is_empty() {
+            print!("{}", stdout);
+        }
+
+        if !result.status.success() {
+            return Err(match result.status.code() {
+                Some(code) => format!("gcc fallback failed (exit code: {})", code),
+                None => "gcc fallback failed (killed by signal)".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Filter command-line arguments to remove flags the system GCC doesn't support.
+    ///
+    /// ccc pretends to be GCC 14.2 (__GNUC__=14, __GNUC_MINOR__=2), but the system
+    /// GCC is typically a different version. The kernel adds version-specific flags
+    /// based on cc-option tests (which always pass with ccc since it silently accepts
+    /// unknown flags). We test each potentially problematic flag against the real
+    /// system GCC and remove those it rejects.
+    fn filter_args_for_system_gcc(&self) -> Vec<String> {
+        use std::collections::HashSet;
+
+        // Identify flags that might be version-specific and need testing.
+        // These are flags that ccc silently accepts but may not exist in the
+        // system GCC: --param=..., -fmin-function-alignment, etc.
+        let mut flags_to_test: Vec<&str> = Vec::new();
+        for arg in &self.original_args {
+            if arg.starts_with("--param=") ||
+               arg == "-fmin-function-alignment" ||
+               arg.starts_with("-fmin-function-alignment=") {
+                flags_to_test.push(arg.as_str());
+            }
+        }
+
+        // Test each flag against the system GCC
+        let mut rejected_flags: HashSet<String> = HashSet::new();
+        for flag in &flags_to_test {
+            if !Self::system_gcc_accepts_flag(flag) {
+                rejected_flags.insert(flag.to_string());
+            }
+        }
+
+        // Build filtered arg list, skipping rejected flags
+        self.original_args.iter()
+            .filter(|arg| !rejected_flags.contains(arg.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    /// Test whether the system GCC accepts a given flag by compiling /dev/null.
+    fn system_gcc_accepts_flag(flag: &str) -> bool {
+        let result = std::process::Command::new("gcc")
+            .args(["-Werror", flag, "-c", "-x", "c", "/dev/null", "-o", "/dev/null"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match result {
+            Ok(status) => status.success(),
+            Err(_) => true, // If we can't run gcc, don't filter (let it fail naturally)
+        }
+    }
+
+    /// Write a Make-compatible dependency file for the given input/output.
+    /// Format: "output: input\n"
+    /// This is a minimal dependency file that tells make the object depends
+    /// on its source file. A full implementation would also list included headers.
+    pub(super) fn write_dep_file(&self, input_file: &str, output_file: &str) {
+        if let Some(ref dep_path) = self.dep_file {
+            let dep_path = if dep_path.is_empty() {
+                // Derive from output: replace extension with .d
+                let p = std::path::Path::new(output_file);
+                p.with_extension("d").to_string_lossy().into_owned()
+            } else {
+                dep_path.clone()
+            };
+            let input_name = if input_file == "-" { "<stdin>" } else { input_file };
+            let content = format!("{}: {}\n", output_file, input_name);
+            let _ = std::fs::write(&dep_path, content);
+        }
+    }
+}
