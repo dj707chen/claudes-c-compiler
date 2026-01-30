@@ -91,7 +91,7 @@ impl Lowerer {
                 continue;
             }
             let mut resolved_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
-            if let Some(vs) = decl.vector_size {
+            if let Some(vs) = decl.resolve_vector_size(resolved_ctype.size()) {
                 resolved_ctype = CType::Vector(Box::new(resolved_ctype), vs);
             }
             // When re-processing a typedef for an anonymous struct/union, the lowerer
@@ -176,7 +176,8 @@ impl Lowerer {
     fn try_lower_register_global(&mut self, decl: &Declaration, declarator: &InitDeclarator) -> bool {
         let Some(ref reg_name) = declarator.attrs.asm_register else { return false };
         let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
-        if let Some(vs) = decl.vector_size {
+        let elem_size = da.c_type.as_ref().map_or(0, |ct| ct.size());
+        if let Some(vs) = decl.resolve_vector_size(elem_size) {
             da.apply_vector_size(vs);
         }
         let mut ginfo = GlobalInfo::from_analysis(&da);
@@ -193,7 +194,8 @@ impl Lowerer {
         }
         if !self.globals.contains_key(&declarator.name) {
             let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
-            if let Some(vs) = decl.vector_size {
+            let elem_size = da.c_type.as_ref().map_or(0, |ct| ct.size());
+            if let Some(vs) = decl.resolve_vector_size(elem_size) {
                 da.apply_vector_size(vs);
             }
             let mut ginfo = GlobalInfo::from_analysis(&da);
@@ -203,7 +205,8 @@ impl Lowerer {
         // For extern TLS variables, emit an IrGlobal so codegen uses TLS access patterns.
         if decl.is_thread_local() && !self.emitted_global_names.contains(&declarator.name) {
             let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
-            if let Some(vs) = decl.vector_size {
+            let elem_size = da.c_type.as_ref().map_or(0, |ct| ct.size());
+            if let Some(vs) = decl.resolve_vector_size(elem_size) {
                 da.apply_vector_size(vs);
             }
             self.module.globals.push(IrGlobal {
@@ -273,7 +276,8 @@ impl Lowerer {
     /// array fixup, and scalar size adjustment.
     fn prepare_global_analysis(&self, decl: &Declaration, declarator: &InitDeclarator) -> DeclAnalysis {
         let mut da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
-        if let Some(vs) = decl.vector_size {
+        let elem_size = da.c_type.as_ref().map_or(0, |ct| ct.size());
+        if let Some(vs) = decl.resolve_vector_size(elem_size) {
             da.apply_vector_size(vs);
         }
         if da.is_array_of_pointers || da.is_array_of_func_ptrs {

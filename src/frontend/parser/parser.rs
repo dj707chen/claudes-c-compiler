@@ -128,6 +128,9 @@ pub(super) struct ParsedDeclAttrs {
     pub parsing_cleanup_fn: Option<String>,
     /// `__attribute__((vector_size(N)))` total vector size in bytes.
     pub parsing_vector_size: Option<usize>,
+    /// `__attribute__((ext_vector_type(N)))` number of vector elements.
+    /// Converted to total byte size in lowering using sizeof(element_type) * N.
+    pub parsing_ext_vector_nelem: Option<usize>,
 
     // --- Alignment ---
     /// `_Alignas(N)` or `__attribute__((aligned(N)))` value.
@@ -217,6 +220,7 @@ impl std::fmt::Debug for ParsedDeclAttrs {
             .field("parsing_section", &self.parsing_section)
             .field("parsing_cleanup_fn", &self.parsing_cleanup_fn)
             .field("parsing_vector_size", &self.parsing_vector_size)
+            .field("parsing_ext_vector_nelem", &self.parsing_ext_vector_nelem)
             .field("parsed_alignas", &self.parsed_alignas)
             .field("parsed_alignas_type", &self.parsed_alignas_type)
             .field("parsed_alignment_sizeof_type", &self.parsed_alignment_sizeof_type)
@@ -746,6 +750,7 @@ impl Parser {
             "cleanup" | "__cleanup__" => { self.advance(); self.parse_cleanup_attr(); }
             "mode" | "__mode__" => { self.advance(); self.parse_mode_attr(mode_kind); }
             "vector_size" | "__vector_size__" => { self.advance(); self.parse_vector_size_attr(); }
+            "ext_vector_type" | "__ext_vector_type__" => { self.advance(); self.parse_ext_vector_type_attr(); }
             "used" | "__used__" => { self.attrs.set_used(true); self.advance(); }
             "fastcall" | "__fastcall__" => { self.attrs.set_fastcall(true); self.advance(); }
             "naked" | "__naked__" => { self.attrs.set_naked(true); self.advance(); }
@@ -851,6 +856,20 @@ impl Parser {
         let tag_aligns = if self.struct_tag_alignments.is_empty() { None } else { Some(&self.struct_tag_alignments) };
         if let Some(size) = Self::eval_const_int_expr_with_enums(&expr, enums, tag_aligns) {
             self.attrs.parsing_vector_size = Some(size as usize);
+        }
+        if matches!(self.peek(), TokenKind::RParen) { self.advance(); }
+    }
+
+    /// Parse ext_vector_type(N) attribute (Clang-style vector type).
+    /// Stores the element count N; the total size is computed in lowering as N * sizeof(elem).
+    fn parse_ext_vector_type_attr(&mut self) {
+        if !matches!(self.peek(), TokenKind::LParen) { return; }
+        self.advance();
+        let expr = self.parse_assignment_expr();
+        let enums = if self.enum_constants.is_empty() { None } else { Some(&self.enum_constants) };
+        let tag_aligns = if self.struct_tag_alignments.is_empty() { None } else { Some(&self.struct_tag_alignments) };
+        if let Some(nelem) = Self::eval_const_int_expr_with_enums(&expr, enums, tag_aligns) {
+            self.attrs.parsing_ext_vector_nelem = Some(nelem as usize);
         }
         if matches!(self.peek(), TokenKind::RParen) { self.advance(); }
     }

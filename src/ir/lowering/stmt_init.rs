@@ -48,7 +48,8 @@ impl Lowerer {
 
         if !self.globals.contains_key(&declarator.name) {
             let mut ext_da = self.analyze_declaration(&decl.type_spec, &declarator.derived);
-            if let Some(vs) = decl.vector_size {
+            let elem_size = ext_da.c_type.as_ref().map_or(0, |ct| ct.size());
+            if let Some(vs) = decl.resolve_vector_size(elem_size) {
                 ext_da.apply_vector_size(vs);
             }
             self.globals.insert(declarator.name.clone(), GlobalInfo::from_analysis(&ext_da));

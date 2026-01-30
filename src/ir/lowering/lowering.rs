@@ -451,17 +451,19 @@ impl Lowerer {
             }
         }
 
-        // Pre-pass: update typedefs that have __attribute__((vector_size(N))).
+        // Pre-pass: update typedefs that have __attribute__((vector_size(N))) or
+        // __attribute__((ext_vector_type(N))).
         // Sema doesn't handle vector_size, so the typedef map has the unwrapped base type.
         // We need to apply vector_size wrapping before registering function metadata,
         // so that function return types using vector typedefs are correctly resolved.
         for decl in &tu.decls {
             if let ExternalDecl::Declaration(decl) = decl {
                 if decl.is_typedef() {
-                    if let Some(vs) = decl.vector_size {
-                        for declarator in &decl.declarators {
-                            if !declarator.name.is_empty() {
-                                let base_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                    for declarator in &decl.declarators {
+                        if !declarator.name.is_empty() {
+                            let base_ctype = self.build_full_ctype(&decl.type_spec, &declarator.derived);
+                            let elem_size = base_ctype.size();
+                            if let Some(vs) = decl.resolve_vector_size(elem_size) {
                                 let vec_ctype = CType::Vector(Box::new(base_ctype), vs);
                                 self.types.typedefs.insert(declarator.name.clone(), vec_ctype);
                             }

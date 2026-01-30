@@ -100,7 +100,8 @@ impl Lowerer {
             }
 
             let mut da = self.analyze_declaration(type_spec, &declarator.derived);
-            if let Some(vs) = decl.vector_size {
+            let elem_size = da.c_type.as_ref().map_or(0, |ct| ct.size());
+            if let Some(vs) = decl.resolve_vector_size(elem_size) {
                 da.apply_vector_size(vs);
             }
             self.fixup_unsized_array(&mut da, type_spec, &declarator.derived, &declarator.init);
@@ -191,7 +192,7 @@ impl Lowerer {
                 self.types.func_ptr_typedef_info.insert(declarator.name.clone(), fti);
             }
             let mut resolved_ctype = self.build_full_ctype(type_spec, &declarator.derived);
-            if let Some(vs) = decl.vector_size {
+            if let Some(vs) = decl.resolve_vector_size(resolved_ctype.size()) {
                 resolved_ctype = CType::Vector(Box::new(resolved_ctype), vs);
             }
             // Preserve sema's anonymous struct key for consistency with _Generic

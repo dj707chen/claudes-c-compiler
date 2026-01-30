@@ -66,6 +66,7 @@ pub struct FunctionInfo {
     pub params: Vec<(CType, Option<String>)>,
     pub variadic: bool,
     pub is_defined: bool,
+    pub is_noreturn: bool,
 }
 
 /// Results of semantic analysis, used by the lowering phase.
@@ -199,6 +200,7 @@ impl SemanticAnalyzer {
             params: params.clone(),
             variadic: func.variadic,
             is_defined: true,
+            is_noreturn: func.attrs.is_noreturn(),
         };
 
         // Register in function table
@@ -402,15 +404,33 @@ impl SemanticAnalyzer {
 
             // Check if this is a function declaration (prototype)
             if let CType::Function(ref ft) = full_type {
-                let func_info = FunctionInfo {
-                    name: init_decl.name.clone(),
-                    return_type: ft.return_type.clone(),
-                    params: ft.params.clone(),
-                    variadic: ft.variadic,
-                    is_defined: false,
-                };
-                self.result.functions.entry(init_decl.name.clone())
-                    .or_insert(func_info);
+                let is_noreturn = init_decl.attrs.is_noreturn();
+                // If redeclared with noreturn, update existing entry
+                if is_noreturn {
+                    if let Some(existing) = self.result.functions.get_mut(&init_decl.name) {
+                        existing.is_noreturn = true;
+                    } else {
+                        let func_info = FunctionInfo {
+                            name: init_decl.name.clone(),
+                            return_type: ft.return_type.clone(),
+                            params: ft.params.clone(),
+                            variadic: ft.variadic,
+                            is_defined: false,
+                            is_noreturn: true,
+                        };
+                        self.result.functions.insert(init_decl.name.clone(), func_info);
+                    }
+                } else if !self.result.functions.contains_key(&init_decl.name) {
+                    let func_info = FunctionInfo {
+                        name: init_decl.name.clone(),
+                        return_type: ft.return_type.clone(),
+                        params: ft.params.clone(),
+                        variadic: ft.variadic,
+                        is_defined: false,
+                        is_noreturn: false,
+                    };
+                    self.result.functions.insert(init_decl.name.clone(), func_info);
+                }
             }
 
             // Resolve explicit alignment from _Alignas or __attribute__((aligned(N))).
@@ -900,11 +920,25 @@ impl SemanticAnalyzer {
             Stmt::CaseRange(_, _, inner, _) => self.stmt_can_fall_through(inner),
             Stmt::Default(inner, _) => self.stmt_can_fall_through(inner),
 
-            // expression statements, declarations, inline asm: always fall through
-            Stmt::Expr(_) => true,
+            // expression statements: fall through unless they call a noreturn function
+            Stmt::Expr(Some(expr)) => !self.is_noreturn_call(expr),
+            Stmt::Expr(None) => true,
             Stmt::Declaration(_) => true,
             Stmt::InlineAsm { .. } => true,
         }
+    }
+
+    /// Check if an expression is a call to a function declared with _Noreturn
+    /// or __attribute__((noreturn)), such as abort(), exit(), _Exit(), etc.
+    fn is_noreturn_call(&self, expr: &Expr) -> bool {
+        if let Expr::FunctionCall(callee, _, _) = expr {
+            if let Expr::Identifier(name, _) = callee.as_ref() {
+                if let Some(func_info) = self.result.functions.get(name) {
+                    return func_info.is_noreturn;
+                }
+            }
+        }
+        false
     }
 
     /// Check if an expression is a compile-time constant that evaluates to true (non-zero).
@@ -960,6 +994,7 @@ impl SemanticAnalyzer {
                             params: Vec::new(),
                             variadic: true, // unknown params
                             is_defined: false,
+                            is_noreturn: false,
                         };
                         self.result.functions.insert(name.clone(), func_info);
                     }
@@ -1228,12 +1263,14 @@ impl SemanticAnalyzer {
         ];
 
         for (name, ret_type, variadic) in &implicit_funcs {
+            let is_noreturn = matches!(*name, "exit" | "abort" | "_Exit" | "quick_exit");
             let func_info = FunctionInfo {
                 name: name.to_string(),
                 return_type: ret_type.clone(),
                 params: Vec::new(),
                 variadic: *variadic,
                 is_defined: false,
+                is_noreturn,
             };
             self.result.functions.insert(name.to_string(), func_info);
         }

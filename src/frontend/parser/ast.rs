@@ -225,6 +225,9 @@ pub struct Declaration {
     /// GCC __attribute__((vector_size(N))): total vector size in bytes.
     /// When present on a typedef, wraps the base type in CType::Vector.
     pub vector_size: Option<usize>,
+    /// Clang __attribute__((ext_vector_type(N))): number of vector elements.
+    /// Resolved to total bytes in lowering via N * sizeof(element_type).
+    pub ext_vector_nelem: Option<usize>,
     pub span: Span,
 }
 
@@ -268,6 +271,7 @@ impl Declaration {
         alignment_sizeof_type: Option<TypeSpecifier>,
         address_space: AddressSpace,
         vector_size: Option<usize>,
+        ext_vector_nelem: Option<usize>,
         span: Span,
     ) -> Self {
         Self {
@@ -279,6 +283,7 @@ impl Declaration {
             alignment_sizeof_type,
             address_space,
             vector_size,
+            ext_vector_nelem,
             span,
         }
     }
@@ -293,8 +298,20 @@ impl Declaration {
             None,
             AddressSpace::Default,
             None,
+            None,
             Span::dummy(),
         )
+    }
+
+    /// Resolve the total vector size in bytes, considering both `vector_size` (total bytes)
+    /// and `ext_vector_type` (element count). `elem_size` is the sizeof the base element type.
+    /// Returns `None` if neither attribute is present.
+    pub fn resolve_vector_size(&self, elem_size: usize) -> Option<usize> {
+        if let Some(vs) = self.vector_size {
+            Some(vs)
+        } else {
+            self.ext_vector_nelem.map(|n| n * elem_size)
+        }
     }
 }
 
@@ -316,6 +333,7 @@ impl std::fmt::Debug for Declaration {
             .field("alignment_sizeof_type", &self.alignment_sizeof_type)
             .field("address_space", &self.address_space)
             .field("vector_size", &self.vector_size)
+            .field("ext_vector_nelem", &self.ext_vector_nelem)
             .field("span", &self.span)
             .finish()
     }

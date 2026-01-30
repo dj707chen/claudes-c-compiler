@@ -121,6 +121,7 @@ impl Parser {
                 None, None, None,
                 self.attrs.parsing_address_space,
                 self.attrs.parsing_vector_size.take(),
+                self.attrs.parsing_ext_vector_nelem.take(),
                 start,
             );
             d.set_static(self.attrs.parsing_static());
@@ -607,6 +608,7 @@ impl Parser {
             ctx.alignment, ctx.alignas_type, ctx.alignment_sizeof_type,
             self.attrs.parsing_address_space,
             self.attrs.parsing_vector_size.take(),
+            self.attrs.parsing_ext_vector_nelem.take(),
             start,
         );
         d.set_static(self.attrs.parsing_static());
@@ -654,6 +656,7 @@ impl Parser {
                 None, None, None,
                 self.attrs.parsing_address_space,
                 self.attrs.parsing_vector_size.take(),
+                self.attrs.parsing_ext_vector_nelem.take(),
                 start,
             );
             d.set_static(is_static);
@@ -746,6 +749,7 @@ impl Parser {
             alignment, alignas_type, alignment_sizeof_type,
             self.attrs.parsing_address_space,
             self.attrs.parsing_vector_size.take(),
+            self.attrs.parsing_ext_vector_nelem.take(),
             start,
         );
         d.set_static(is_static);

@@ -257,6 +257,10 @@ impl WarningConfig {
                 self.werror_all = true;
                 true
             }
+            "no-error" => {
+                self.werror_all = false;
+                true
+            }
             "all" => {
                 self.enable_wall();
                 true
