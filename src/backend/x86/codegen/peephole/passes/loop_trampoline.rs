@@ -300,7 +300,17 @@ pub(super) fn eliminate_loop_trampolines(store: &mut LineStore, infos: &mut [Lin
                     LineKind::Other { dest_reg } => dest_reg == src_fam,
                     LineKind::StoreRbp { .. } => false,
                     LineKind::LoadRbp { reg, .. } => reg == src_fam,
-                    LineKind::SetCC { reg } => reg == src_fam,
+                    LineKind::SetCC { reg } => {
+                        // SetCC is a partial write (only 1 byte) — it cannot be
+                        // safely rewritten to a different register family because
+                        // it does not clear the upper bytes. Bail out of coalescing
+                        // entirely when SetCC modifies src_fam.
+                        if reg == src_fam {
+                            scan_ok = false;
+                            break;
+                        }
+                        false
+                    }
                     LineKind::Pop { reg } => reg == src_fam,
                     _ => false,
                 };

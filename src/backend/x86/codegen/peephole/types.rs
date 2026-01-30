@@ -1105,7 +1105,7 @@ pub(super) fn parse_setcc(s: &str) -> Option<&str> {
     let cc = &rest[..space_idx];
     match cc {
         "e" | "ne" | "l" | "le" | "g" | "ge" | "b" | "be" | "a" | "ae"
-        | "s" | "ns" | "o" | "no" | "p" | "np" | "z" | "nz" => Some(cc),
+        | "c" | "nc" | "s" | "ns" | "o" | "no" | "p" | "np" | "z" | "nz" => Some(cc),
         _ => None,
     }
 }
@@ -1119,8 +1119,8 @@ pub(super) fn invert_cc(cc: &str) -> &str {
         "ge" => "l",
         "le" => "g",
         "g" => "le",
-        "b" => "ae",
-        "ae" => "b",
+        "b" | "c" => "ae",
+        "ae" | "nc" => "b",
         "be" => "a",
         "a" => "be",
         "s" => "ns",
