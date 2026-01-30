@@ -542,12 +542,36 @@ impl Lowerer {
     }
 
     pub(super) fn ctype_matches_generic(&self, controlling: &CType, assoc: &CType) -> bool {
-        // For _Generic, types must match exactly per C11 6.5.1.1.
-        // CType derives PartialEq so direct comparison handles most cases.
-        // Const/volatile qualification is checked separately via is_const flags
-        // on GenericAssociation and expr_is_const_qualified(), since CType does
-        // not track qualifiers.
-        controlling == assoc
+        // Per C11 6.5.1.1p2, the controlling expression undergoes lvalue conversion,
+        // which includes array-to-pointer decay.
+        // Const/volatile qualification is checked separately via is_const flags.
+
+        // Exact structural match (same discriminant)
+        if std::mem::discriminant(controlling) == std::mem::discriminant(assoc) {
+            match (controlling, assoc) {
+                (CType::Pointer(a, _), CType::Pointer(b, _)) => {
+                    return self.ctype_matches_generic(a, b);
+                }
+                (CType::Array(a, _), CType::Array(b, _)) => {
+                    return self.ctype_matches_generic(a, b);
+                }
+                _ => return true,
+            }
+        }
+        // Array decays to pointer for _Generic matching
+        if let CType::Array(elem, _) = controlling {
+            if let CType::Pointer(pointee, _) = assoc {
+                return self.ctype_matches_generic(elem, pointee);
+            }
+        }
+        // Enum matches int
+        if matches!(controlling, CType::Enum(_)) && matches!(assoc, CType::Int) {
+            return true;
+        }
+        if matches!(controlling, CType::Int) && matches!(assoc, CType::Enum(_)) {
+            return true;
+        }
+        false
     }
 
     /// Check if an expression's type is const-qualified (for _Generic matching).

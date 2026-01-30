@@ -1424,13 +1424,34 @@ impl ArchCodegen for I686Codegen {
 
             // Fastcall: first eligible params come from ecx/edx
             if self.is_fastcall && fastcall_reg_idx < fastcall_reg_count && self.is_fastcall_reg_eligible(ty) {
-                let store_instr = self.mov_store_for_type(ty);
-                let src_reg = if fastcall_reg_idx == 0 {
-                    self.ecx_for_type(ty)
-                } else {
-                    self.edx_for_type(ty)
-                };
-                emit!(self.state, "    {} {}, {}(%ebp)", store_instr, src_reg, slot.0);
+                let src_reg_full = if fastcall_reg_idx == 0 { "%ecx" } else { "%edx" };
+                // For sub-int types, sign/zero-extend to full 32-bit before
+                // storing to the 4-byte SSA slot (avoids partial-write issues).
+                match ty {
+                    IrType::I8 => {
+                        let src_byte = if fastcall_reg_idx == 0 { "%cl" } else { "%dl" };
+                        emit!(self.state, "    movsbl {}, {}", src_byte, src_reg_full);
+                        emit!(self.state, "    movl {}, {}(%ebp)", src_reg_full, slot.0);
+                    }
+                    IrType::U8 => {
+                        let src_byte = if fastcall_reg_idx == 0 { "%cl" } else { "%dl" };
+                        emit!(self.state, "    movzbl {}, {}", src_byte, src_reg_full);
+                        emit!(self.state, "    movl {}, {}(%ebp)", src_reg_full, slot.0);
+                    }
+                    IrType::I16 => {
+                        let src_word = if fastcall_reg_idx == 0 { "%cx" } else { "%dx" };
+                        emit!(self.state, "    movswl {}, {}", src_word, src_reg_full);
+                        emit!(self.state, "    movl {}, {}(%ebp)", src_reg_full, slot.0);
+                    }
+                    IrType::U16 => {
+                        let src_word = if fastcall_reg_idx == 0 { "%cx" } else { "%dx" };
+                        emit!(self.state, "    movzwl {}, {}", src_word, src_reg_full);
+                        emit!(self.state, "    movl {}, {}(%ebp)", src_reg_full, slot.0);
+                    }
+                    _ => {
+                        emit!(self.state, "    movl {}, {}(%ebp)", src_reg_full, slot.0);
+                    }
+                }
                 fastcall_reg_idx += 1;
                 continue;
             }
@@ -1452,10 +1473,13 @@ impl ArchCodegen for I686Codegen {
                         emit!(self.state, "    movl %eax, {}(%ebp)", slot.0 + 4);
                     } else {
                         let load_instr = self.mov_load_for_type(ty);
-                        let store_instr = self.mov_store_for_type(ty);
                         emit!(self.state, "    {} {}(%ebp), %eax", load_instr, src_offset);
-                        let dest_reg = self.eax_for_type(ty);
-                        emit!(self.state, "    {} {}, {}(%ebp)", store_instr, dest_reg, slot.0);
+                        // Always store full 32-bit value to SSA slot. The load
+                        // instruction above already sign/zero-extended sub-int
+                        // types into the full eax register. Using movb/movw here
+                        // would leave garbage in the upper bytes of the 4-byte
+                        // slot, which gets read back later by movl.
+                        emit!(self.state, "    movl %eax, {}(%ebp)", slot.0);
                     }
                 }
                 ParamClass::StructStack { offset, size } => {
