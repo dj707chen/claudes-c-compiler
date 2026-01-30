@@ -241,6 +241,22 @@ pub fn eval_builtin_call(
                          else { (v as u64).leading_zeros() as i32 - 1 };
             Some(IrConst::I32(result))
         }
+        // Float constant builtins: NaN, Infinity, huge_val
+        // These are critical for static/global initializers like:
+        //   volatile double d = NAN;  // expands to __builtin_nan("")
+        //   double inf = INFINITY;    // expands to __builtin_inff()
+        // Without these, eval_const_expr returns None and global_init.rs
+        // falls through to GlobalInit::Zero, silently zero-initializing
+        // the variable instead of storing NaN/Infinity.
+        "__builtin_nan" => Some(IrConst::F64(f64::NAN)),
+        "__builtin_nanf" => Some(IrConst::F32(f32::NAN)),
+        "__builtin_nanl" => Some(IrConst::long_double(f64::NAN)),
+        "__builtin_inf" => Some(IrConst::F64(f64::INFINITY)),
+        "__builtin_inff" => Some(IrConst::F32(f32::INFINITY)),
+        "__builtin_infl" => Some(IrConst::long_double(f64::INFINITY)),
+        "__builtin_huge_val" => Some(IrConst::F64(f64::INFINITY)),
+        "__builtin_huge_valf" => Some(IrConst::F32(f32::INFINITY)),
+        "__builtin_huge_vall" => Some(IrConst::long_double(f64::INFINITY)),
         _ => None,
     }
 }
