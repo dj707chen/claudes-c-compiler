@@ -1,0 +1,18 @@
+Fix statement expression local variables leaking as global symbol references
+============================================================================
+Status: in_progress
+Date: 2026-01-30
+
+Problem:
+Local variables declared inside statement expressions (({ ... })) like ____ptr
+and __v are being emitted as global symbol references instead of stack-local
+variables, causing undefined reference linker errors when building the Linux kernel.
+
+This is the primary remaining blocker for the kernel build after the
+__compiletime_assert fix.
+
+Plan:
+1. Investigate how statement expression variables are registered and looked up
+2. Fix the scope/lookup issue to keep them local
+3. Add regression test
+4. Verify kernel builds successfully
