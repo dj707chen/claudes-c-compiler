@@ -120,6 +120,7 @@ impl I686Codegen {
 
             // --- Same-size cast between I64 and U64: copy all 8 bytes ---
             CastKind::SignedToUnsignedSameSize { to_ty: IrType::U64 }
+            | CastKind::UnsignedToSignedSameSize { to_ty: IrType::I64 }
             | CastKind::Noop if matches!((from_ty, to_ty), (IrType::I64, IrType::U64) | (IrType::U64, IrType::I64) | (IrType::I64, IrType::I64) | (IrType::U64, IrType::U64)) => {
                 self.emit_load_acc_pair(src);
                 self.emit_store_acc_pair(dest);
@@ -479,7 +480,7 @@ impl I686Codegen {
         use crate::backend::cast::{CastKind, classify_cast};
 
         match classify_cast(from_ty, to_ty) {
-            CastKind::Noop => {}
+            CastKind::Noop | CastKind::UnsignedToSignedSameSize { .. } => {}
 
             CastKind::IntNarrow { .. } => {
                 // Truncation: no-op on x86 (use sub-register)

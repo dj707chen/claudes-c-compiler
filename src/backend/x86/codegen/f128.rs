@@ -401,7 +401,7 @@ impl X86Codegen {
     /// Dispatch on classify_cast() for non-F128 cast kinds.
     fn emit_generic_cast(&mut self, from_ty: IrType, to_ty: IrType) {
         match classify_cast(from_ty, to_ty) {
-            CastKind::Noop => {}
+            CastKind::Noop | CastKind::UnsignedToSignedSameSize { .. } => {}
 
             CastKind::FloatToSigned { from_f64 } => {
                 if from_f64 {

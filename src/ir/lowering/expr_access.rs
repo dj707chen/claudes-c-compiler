@@ -227,7 +227,10 @@ impl Lowerer {
                         elem_size * items.len()
                     }
                 } else {
-                    elem_size * items.len()
+                    // Use compute_init_list_array_size to correctly handle designated
+                    // initializers like (int[]){[1]=10, [8]=80} which need 9 elements,
+                    // not just items.len() (4 in this example).
+                    elem_size * self.compute_init_list_array_size(items)
                 }
             }
             _ => self.sizeof_type(type_spec),

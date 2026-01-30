@@ -8,7 +8,7 @@ use super::codegen::ArmCodegen;
 impl ArmCodegen {
     pub(super) fn emit_cast_instrs_impl(&mut self, from_ty: IrType, to_ty: IrType) {
         match classify_cast(from_ty, to_ty) {
-            CastKind::Noop => {}
+            CastKind::Noop | CastKind::UnsignedToSignedSameSize { .. } => {}
 
             CastKind::FloatToSigned { from_f64 } => {
                 if from_f64 {

@@ -10,6 +10,17 @@ impl RiscvCodegen {
         match classify_cast(from_ty, to_ty) {
             CastKind::Noop => {}
 
+            CastKind::UnsignedToSignedSameSize { to_ty } => {
+                // On RISC-V, 32-bit values must be sign-extended in 64-bit registers
+                // per the ABI. When converting U32 to I32, we must sign-extend
+                // to ensure correct behavior when the value is used in comparisons
+                // or passed to functions compiled by other compilers (e.g. glibc).
+                if to_ty == IrType::I32 {
+                    self.state.emit("    sext.w t0, t0");
+                }
+                // U8->I8, U16->I16, U64->I64 are true noops
+            }
+
             CastKind::FloatToSigned { from_f64 } => {
                 if from_f64 {
                     self.state.emit("    fmv.d.x ft0, t0");

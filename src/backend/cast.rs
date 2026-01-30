@@ -35,6 +35,10 @@ pub enum CastKind {
     IntNarrow { to_ty: IrType },
     /// Same-size signed-to-unsigned (need to mask/clear upper bits).
     SignedToUnsignedSameSize { to_ty: IrType },
+    /// Same-size unsigned-to-signed. On most architectures this is a noop,
+    /// but on RISC-V 64-bit, U32->I32 needs sign-extension because the ABI
+    /// requires all 32-bit values to be sign-extended in 64-bit registers.
+    UnsignedToSignedSameSize { to_ty: IrType },
     /// Signed integer -> F128 via softfloat (__floatsitf / __floatditf).
     /// Used on ARM/RISC-V where long double is IEEE binary128.
     SignedToF128 { from_ty: IrType },
@@ -129,6 +133,9 @@ pub fn classify_cast_with_f128(from_ty: IrType, to_ty: IrType, f128_is_native: b
     if from_size == to_size {
         if from_ty.is_signed() && to_ty.is_unsigned() {
             return CastKind::SignedToUnsignedSameSize { to_ty };
+        }
+        if from_ty.is_unsigned() && to_ty.is_signed() {
+            return CastKind::UnsignedToSignedSameSize { to_ty };
         }
         return CastKind::Noop;
     }
