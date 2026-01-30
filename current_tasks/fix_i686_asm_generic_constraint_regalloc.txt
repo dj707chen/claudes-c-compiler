@@ -1,0 +1,28 @@
+Fix i686 inline asm generic constraint register allocation conflict
+
+Status: in_progress
+Started: 2026-01-30
+
+Problem:
+On i686, inline asm with generic register constraints ("+q", "r", "g", etc.)
+could silently clobber callee-saved registers (esi, edi, ebx) that the register
+allocator had assigned to live variables spanning the asm block. This caused:
+- inline-asm-typed-operands test failure (xchgb spinlock returning garbage)
+- Potential silent corruption in any code using inline asm with generic constraints
+
+Root cause:
+The pre-scan phase (collect_inline_asm_callee_saved) only recognized specific
+register constraints ("S"=esi, "D"=edi, "b"=ebx) and explicit clobbers. Generic
+constraints like "q", "r", "g" returned None from constraint_to_phys, so the
+register allocator treated callee-saved registers as available. At codegen time,
+the scratch allocator assigned esi/edi/ebx to these generic constraints, clobbering
+register-allocated values.
+
+Fix:
+- Added collect_inline_asm_callee_saved_with_generic() that accepts the full
+  callee-saved register list and conservatively marks ALL callee-saved registers
+  as clobbered when a generic GP register class constraint is detected.
+- Added is_generic_gp_constraint() helper to classify constraint strings.
+- i686 prologue now uses this variant; other backends unchanged.
+- Also added i686-specific expected.stdout for sizeof-undeclared-identifier test
+  (sizeof(long)=4 on i686 vs 8 on 64-bit).

@@ -28,6 +28,9 @@ impl I686Codegen {
             AtomicRmwOp::TestAndSet => {
                 self.state.emit("    movb $1, %al");
                 self.state.emit("    xchgb %al, (%ecx)");
+                // Zero-extend %al to %eax: xchgb only sets the low byte,
+                // leaving upper bytes with garbage from prior register usage.
+                self.state.emit("    movzbl %al, %eax");
             }
             AtomicRmwOp::Add => {
                 let suffix = self.type_suffix(ty);
