@@ -681,9 +681,13 @@ impl Lowerer {
                     }
                 }
                 // Fallback: resolve struct layout from the variable's CType
-                // (handles forward-declared struct pointers where layout was None at decl time)
-                if let Some(CType::Pointer(pointee, _)) = self.get_expr_ctype(expr).as_ref() {
-                    return self.struct_layout_from_ctype(pointee);
+                // (handles forward-declared struct pointers where layout was None at decl time,
+                // and array typedef parameters like `typedef struct S arr[1]`)
+                match self.get_expr_ctype(expr).as_ref() {
+                    Some(CType::Pointer(pointee, _)) | Some(CType::Array(pointee, _)) => {
+                        return self.struct_layout_from_ctype(pointee);
+                    }
+                    _ => {}
                 }
                 None
             }
@@ -993,10 +997,12 @@ impl Lowerer {
 
     /// Given a CType that should be a Pointer to a struct, resolve the struct layout.
     /// Handles self-referential structs by looking up the cache when fields are empty.
+    /// Also handles array types (e.g., `typedef struct S my_arr[1]` parameters decay
+    /// to pointers, so the element type is the pointed-to struct).
     fn resolve_struct_from_pointer_ctype(&self, ctype: &CType) -> Option<RcLayout> {
-        if let CType::Pointer(inner, _) = ctype {
-            return self.struct_layout_from_ctype(inner);
+        match ctype {
+            CType::Pointer(inner, _) | CType::Array(inner, _) => self.struct_layout_from_ctype(inner),
+            _ => None,
         }
-        None
     }
 }

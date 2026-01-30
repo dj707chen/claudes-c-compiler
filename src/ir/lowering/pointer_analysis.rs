@@ -17,16 +17,25 @@ use super::lowering::Lowerer;
 impl Lowerer {
     /// For a pointer-to-struct parameter type (e.g., `struct TAG *p`), get the
     /// pointed-to struct's layout. This enables `p->field` access.
+    /// Also handles array typedef parameters (e.g., `typedef struct S arr[1]`)
+    /// which decay to pointers in function parameters.
     pub(super) fn get_struct_layout_for_pointer_param(&self, type_spec: &TypeSpecifier) -> Option<RcLayout> {
         // Try TypeSpecifier match first
         let resolved = self.resolve_type_spec(type_spec);
-        if let TypeSpecifier::Pointer(inner, _) = resolved { return self.get_struct_layout_for_type(inner) }
-        // Fall back to CType for typedef'd pointer types
-        let ctype = self.type_spec_to_ctype(type_spec);
-        if let CType::Pointer(inner, _) = &ctype {
-            return self.struct_layout_from_ctype(inner);
+        match resolved {
+            TypeSpecifier::Pointer(inner, _) | TypeSpecifier::Array(inner, _) => {
+                return self.get_struct_layout_for_type(inner);
+            }
+            _ => {}
         }
-        None
+        // Fall back to CType for typedef'd pointer/array types
+        let ctype = self.type_spec_to_ctype(type_spec);
+        match &ctype {
+            CType::Pointer(inner, _) | CType::Array(inner, _) => {
+                return self.struct_layout_from_ctype(inner);
+            }
+            _ => None,
+        }
     }
 
     /// Compute the IR type of the pointee for a pointer/array type specifier.
