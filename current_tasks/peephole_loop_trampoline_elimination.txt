@@ -1,0 +1,32 @@
+Task: Eliminate loop phi-shuffle trampolines in x86 peephole optimizer
+
+CCC's SSA codegen creates "trampoline" blocks for loop back-edges to resolve
+phi nodes. Instead of updating loop variables in-place, it creates new SSA
+values in fresh registers and then shuffles them back:
+
+    .LOOP:
+        ; ... loop body ...
+        movq %r9, %r14           ; new_dest = old_dest
+        addq $320, %r14          ; new_dest += SCREENWIDTH
+        movq %r10, %r15          ; new_frac = old_frac
+        addl %r8d, %r15d         ; new_frac += step
+        jne .TRAMPOLINE
+    .TRAMPOLINE:
+        movq %r14, %r9           ; old_dest = new_dest
+        movq %r15, %r10          ; old_frac = new_frac
+        jmp .LOOP
+
+Should become:
+    .LOOP:
+        ; ... loop body ...
+        addq $320, %r9           ; dest += SCREENWIDTH (in-place)
+        addl %r8d, %r10d         ; frac += step (in-place)
+        jne .LOOP                ; direct back-edge
+
+This eliminates ~5 instructions per loop iteration in DOOM rendering loops,
+which are the most performance-critical code paths.
+
+Plan:
+1. Detect trampoline blocks (blocks containing only reg-to-reg moves + jmp)
+2. Match the "copy to new reg, modify new reg, trampoline shuffles back" pattern
+3. Rewrite to in-place updates and eliminate the trampoline
