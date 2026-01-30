@@ -90,7 +90,25 @@ pub(super) fn eliminate_dead_reg_moves(store: &LineStore, infos: &mut [LineInfo]
                             false
                         } else {
                             let t = infos[j].trimmed(store.get(j));
-                            is_read_modify_write(t)
+                            if is_read_modify_write(t) {
+                                true
+                            } else {
+                                // Defense-in-depth: is_read_modify_write uses exact
+                                // string matching for LEA source checks, which misses
+                                // cross-size register references (e.g., %eax in source
+                                // vs %rax in dest). Use REG_NAMES to match all size
+                                // variants of the dest register in the source operand.
+                                if let Some(comma_pos) = t.rfind(',') {
+                                    let src_part = &t[..comma_pos];
+                                    REG_NAMES.iter().any(|row|
+                                        src_part.contains(row[dst_reg as usize])
+                                    )
+                                } else {
+                                    // Single-operand instruction that both reads
+                                    // and writes (e.g., negq %rax) - conservative
+                                    true
+                                }
+                            }
                         }
                     }
                     _ => refs_dst,

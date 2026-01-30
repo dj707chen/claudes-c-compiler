@@ -48,6 +48,7 @@ impl Parser {
         let mut flags = TypeSpecFlags::default();
         let mut mode_kind: Option<ModeKind> = None;
         let mut any_base_specifier = false;
+        let mut any_storage_class = false;
 
         // Collect qualifiers, storage classes, and type specifiers
         loop {
@@ -61,10 +62,13 @@ impl Parser {
                     self.advance();
                     self.attrs.set_volatile(true);
                 }
-                TokenKind::Restrict
-                | TokenKind::Register
+                TokenKind::Restrict => {
+                    self.advance();
+                }
+                TokenKind::Register
                 | TokenKind::Auto => {
                     self.advance();
+                    any_storage_class = true;
                 }
                 TokenKind::Noreturn => {
                     self.advance();
@@ -92,19 +96,23 @@ impl Parser {
                 TokenKind::Static => {
                     self.advance();
                     self.attrs.set_static(true);
+                    any_storage_class = true;
                 }
                 TokenKind::Extern => {
                     self.advance();
                     self.attrs.set_extern(true);
+                    any_storage_class = true;
                 }
                 TokenKind::Typedef => {
                     self.advance();
                     self.attrs.set_typedef(true);
+                    any_storage_class = true;
                 }
                 // Thread-local storage class (__thread / _Thread_local)
                 TokenKind::ThreadLocal => {
                     self.advance();
                     self.attrs.set_thread_local(true);
+                    any_storage_class = true;
                 }
                 // _Complex modifier
                 TokenKind::Complex => {
@@ -274,6 +282,13 @@ impl Parser {
         self.collect_trailing_specifiers(&mut flags, &mut mode_kind);
 
         if !any_base_specifier {
+            // C89 implicit int: if a storage class specifier was consumed but no
+            // type specifier was found, the type defaults to int.
+            // E.g., "static x = 5;" means "static int x = 5;",
+            //       "register y;" means "register int y;".
+            if any_storage_class {
+                return Some(TypeSpecifier::Int);
+            }
             return None;
         }
 

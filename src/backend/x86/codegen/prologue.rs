@@ -281,8 +281,16 @@ impl X86Codegen {
             if let Some((slot, alloca_ty)) = self.state.param_alloca_slots[param_idx] {
                 let load_instr = Self::mov_load_for_type(alloca_ty);
                 let reg = Self::load_dest_reg(alloca_ty);
+                let dest_slot = self.state.get_slot(dest.0);
                 self.state.emit_fmt(format_args!("    {} {}(%rbp), {}", load_instr, slot.0, reg));
-                self.store_rax_to(dest);
+                if dest_slot.map_or(true, |ds| ds.0 != slot.0) {
+                    self.store_rax_to(dest);
+                } else {
+                    // Dest shares the same stack slot as the param alloca;
+                    // skip the redundant store-back (value is already there
+                    // from emit_store_params). Just update the reg cache.
+                    self.state.reg_cache.set_acc(dest.0, false);
+                }
                 return;
             }
         }
