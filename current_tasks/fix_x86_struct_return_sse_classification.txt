@@ -1,0 +1,21 @@
+Task: Fix x86-64 struct return ABI: SSE eightbytes should use xmm registers
+Status: in_progress
+Started: 2026-01-30
+
+Problem:
+When returning structs with mixed INTEGER and SSE eightbytes (e.g.,
+struct { int a; float b; double c; } which is 16 bytes with 2 eightbytes),
+the compiler returns all eightbytes in general-purpose registers (rax, rdx).
+
+Per the SysV AMD64 ABI, eightbytes classified as SSE should be returned in
+xmm0/xmm1, not rdx. For example:
+- Eightbyte 0: int + float -> INTEGER class -> rax
+- Eightbyte 1: double -> SSE class -> xmm0
+
+Currently both eightbytes go into rax:rdx (I128 packing), but the second
+eightbyte should go into xmm0.
+
+Fix: Update the two-register struct return path to detect SSE-class eightbytes
+and return them in xmm registers instead of general-purpose registers.
+
+Affects: chibicc project test suite (struct_test25 fails), likely other projects
