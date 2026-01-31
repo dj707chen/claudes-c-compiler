@@ -12,4 +12,10 @@ Reproducer:
   __attribute__((aligned(64))) unsigned char data[] = {0xcc, 0x38, ...};
   // data[0..15] = garbage, data[16..] = the actual initialization values
 
-Status: in_progress
+Status: completed
+
+Root cause: When an alloca has over-alignment (>16), the store path correctly computes
+the runtime-aligned address, but numerous codegen sites that take the alloca's address
+(for function calls, inline asm, memcpy, etc.) used emit_add_sp_offset/emit_addi_s0/leaq
+without the alignment rounding. Fixed by adding emit_alloca_addr helpers in all backends
+(ARM, RISC-V, x86, i686) that check alloca_over_align and compute the aligned address.

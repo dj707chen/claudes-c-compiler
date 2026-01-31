@@ -235,7 +235,7 @@ impl InlineAsmEmitter for ArmCodegen {
                         // Alloca: the IR value represents the ADDRESS of the
                         // allocated memory. Compute its address instead of
                         // loading the contents.
-                        self.emit_add_sp_offset(reg, slot.0);
+                        self.emit_alloca_addr(reg, v.0, slot.0);
                     } else {
                         // Non-alloca: load the value from the stack slot.
                         self.emit_load_from_sp(reg, slot.0, "ldr");

@@ -1807,6 +1807,15 @@ fn resolve_copy_aliases(
         if state.small_slot_values.contains(&root_id) {
             state.small_slot_values.insert(dest_id);
         }
+        // Propagate alloca status: if root is an alloca, the aliased copy
+        // must also be recognized as an alloca so codegen computes the
+        // stack address instead of loading from the slot.
+        if state.alloca_values.contains(&root_id) {
+            state.alloca_values.insert(dest_id);
+        }
+        if let Some(&align) = state.alloca_alignments.get(&root_id) {
+            state.alloca_alignments.insert(dest_id, align);
+        }
         // If root has no slot (optimized away or reg-assigned), the aliased
         // value also gets no slot. The Copy works via accumulator path.
     }

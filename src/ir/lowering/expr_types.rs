@@ -383,6 +383,25 @@ impl Lowerer {
                 promote_integer(lty)
             }
             _ => {
+                // Pointer subtraction (ptr - ptr) yields ptrdiff_t, which is
+                // target_int_ir_type() (I32 on i686, I64 on x86-64).
+                // Without this check, the generic wider_type logic would
+                // propagate the operand types (e.g. U64 from pointer+offset
+                // arithmetic), producing incorrect from_ty in Cast instructions.
+                if *op == BinOp::Sub {
+                    let lty = self.get_expr_type(lhs);
+                    let rty = self.get_expr_type(rhs);
+                    if lty == IrType::Ptr && rty == IrType::Ptr {
+                        return crate::common::types::target_int_ir_type();
+                    }
+                    // Also handle array types decaying to pointers
+                    let lct = self.expr_ctype(lhs);
+                    let rct = self.expr_ctype(rhs);
+                    if lct.is_pointer_like() && rct.is_pointer_like() {
+                        return crate::common::types::target_int_ir_type();
+                    }
+                }
+
                 // Iterate left-skewed chains to avoid O(2^n) recursion
                 let rty = self.get_expr_type(rhs);
                 let mut result = rty;

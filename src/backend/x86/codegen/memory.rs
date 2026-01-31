@@ -214,9 +214,20 @@ impl X86Codegen {
         self.state.out.emit_instr_imm_reg("    addq", offset, "rcx");
     }
 
+    /// Compute the address of an alloca into `reg`, handling over-aligned allocas.
+    pub(super) fn emit_alloca_addr_to(&mut self, reg: &str, val_id: u32, offset: i64) {
+        if let Some(align) = self.state.alloca_over_align(val_id) {
+            self.state.out.emit_instr_rbp_reg("    leaq", offset, reg);
+            self.state.out.emit_instr_imm_reg("    addq", (align - 1) as i64, reg);
+            self.state.out.emit_instr_imm_reg("    andq", -(align as i64), reg);
+        } else {
+            self.state.out.emit_instr_rbp_reg("    leaq", offset, reg);
+        }
+    }
+
     pub(super) fn emit_slot_addr_to_secondary_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            self.state.out.emit_instr_rbp_reg("    leaq", slot.0, "rcx");
+            self.emit_alloca_addr_to("rcx", val_id, slot.0);
         } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
             let reg_name = phys_reg_name(reg);
             self.state.out.emit_instr_reg_reg("    movq", reg_name, "rcx");
@@ -289,7 +300,7 @@ impl X86Codegen {
 
     pub(super) fn emit_memcpy_load_dest_addr_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            self.state.out.emit_instr_rbp_reg("    leaq", slot.0, "rdi");
+            self.emit_alloca_addr_to("rdi", val_id, slot.0);
         } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
             let reg_name = phys_reg_name(reg);
             self.state.out.emit_instr_reg_reg("    movq", reg_name, "rdi");
@@ -300,7 +311,7 @@ impl X86Codegen {
 
     pub(super) fn emit_memcpy_load_src_addr_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            self.state.out.emit_instr_rbp_reg("    leaq", slot.0, "rsi");
+            self.emit_alloca_addr_to("rsi", val_id, slot.0);
         } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
             let reg_name = phys_reg_name(reg);
             self.state.out.emit_instr_reg_reg("    movq", reg_name, "rsi");

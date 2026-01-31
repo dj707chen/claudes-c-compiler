@@ -274,6 +274,21 @@ impl RiscvCodegen {
         }
     }
 
+    /// Compute the address of an alloca into `dest`, handling over-aligned allocas.
+    /// For normal allocas: `dest = s0 + offset`.
+    /// For over-aligned allocas: `dest = (s0 + offset + align-1) & -align`.
+    pub(super) fn emit_alloca_addr(&mut self, dest: &str, val_id: u32, offset: i64) {
+        if let Some(align) = self.state.alloca_over_align(val_id) {
+            self.emit_addi_s0(dest, offset);
+            self.state.emit_fmt(format_args!("    li t6, {}", align - 1));
+            self.state.emit_fmt(format_args!("    add {}, {}, t6", dest, dest));
+            self.state.emit_fmt(format_args!("    li t6, -{}", align));
+            self.state.emit_fmt(format_args!("    and {}, {}, t6", dest, dest));
+        } else {
+            self.emit_addi_s0(dest, offset);
+        }
+    }
+
     /// Emit: store `reg` to `offset(sp)`, handling large offsets via t6.
     pub(super) fn emit_store_to_sp(&mut self, reg: &str, offset: i64, store_instr: &str) {
         if Self::fits_imm12(offset) {
@@ -346,15 +361,7 @@ impl RiscvCodegen {
                     self.state.reg_cache.set_acc(v.0, false);
                 } else if let Some(slot) = self.state.get_slot(v.0) {
                     if is_alloca {
-                        if let Some(align) = self.state.alloca_over_align(v.0) {
-                            self.emit_addi_s0("t0", slot.0);
-                            self.state.emit_fmt(format_args!("    li t6, {}", align - 1));
-                            self.state.emit("    add t0, t0, t6");
-                            self.state.emit_fmt(format_args!("    li t6, -{}", align));
-                            self.state.emit("    and t0, t0, t6");
-                        } else {
-                            self.emit_addi_s0("t0", slot.0);
-                        }
+                        self.emit_alloca_addr("t0", v.0, slot.0);
                     } else {
                         self.emit_load_from_s0("t0", slot.0, "ld");
                     }
@@ -406,7 +413,7 @@ impl RiscvCodegen {
             Operand::Value(v) => {
                 if let Some(slot) = self.state.get_slot(v.0) {
                     if self.state.is_alloca(v.0) {
-                        self.emit_addi_s0("t0", slot.0);
+                        self.emit_alloca_addr("t0", v.0, slot.0);
                         self.state.emit("    li t1, 0");
                     } else if self.state.is_i128_value(v.0) {
                         self.emit_load_from_s0("t0", slot.0, "ld");
@@ -477,7 +484,7 @@ impl RiscvCodegen {
     pub(super) fn load_ptr_to_reg_rv(&mut self, ptr: &Value, reg: &str) {
         if let Some(slot) = self.state.get_slot(ptr.0) {
             if self.state.is_alloca(ptr.0) {
-                self.emit_addi_s0(reg, slot.0);
+                self.emit_alloca_addr(reg, ptr.0, slot.0);
             } else {
                 self.emit_load_from_s0(reg, slot.0, "ld");
             }

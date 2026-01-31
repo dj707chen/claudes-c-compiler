@@ -121,7 +121,7 @@ impl RiscvCodegen {
 
     pub(super) fn emit_slot_addr_to_secondary_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            self.emit_addi_s0("t1", slot.0);
+            self.emit_alloca_addr("t1", val_id, slot.0);
         } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
             let reg_name = callee_saved_name(reg);
             self.state.emit_fmt(format_args!("    mv t1, {}", reg_name));
@@ -190,7 +190,7 @@ impl RiscvCodegen {
 
     pub(super) fn emit_memcpy_load_dest_addr_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            self.emit_addi_s0("t1", slot.0);
+            self.emit_alloca_addr("t1", val_id, slot.0);
         } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
             let reg_name = callee_saved_name(reg);
             self.state.emit_fmt(format_args!("    mv t1, {}", reg_name));
@@ -201,7 +201,7 @@ impl RiscvCodegen {
 
     pub(super) fn emit_memcpy_load_src_addr_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            self.emit_addi_s0("t2", slot.0);
+            self.emit_alloca_addr("t2", val_id, slot.0);
         } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
             let reg_name = callee_saved_name(reg);
             self.state.emit_fmt(format_args!("    mv t2, {}", reg_name));

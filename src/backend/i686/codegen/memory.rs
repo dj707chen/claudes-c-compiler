@@ -375,10 +375,21 @@ impl I686Codegen {
 
     // ---- GEP primitives ----
 
+    /// Compute the address of an alloca into `reg`, handling over-aligned allocas.
+    pub(super) fn emit_alloca_addr_to(&mut self, reg: &str, val_id: u32, slot: StackSlot) {
+        let sr = self.slot_ref(slot);
+        if let Some(align) = self.state.alloca_over_align(val_id) {
+            emit!(self.state, "    leal {}, %{}", sr, reg);
+            emit!(self.state, "    addl ${}, %{}", align - 1, reg);
+            emit!(self.state, "    andl ${}, %{}", -(align as i32), reg);
+        } else {
+            emit!(self.state, "    leal {}, %{}", sr, reg);
+        }
+    }
+
     pub(super) fn emit_slot_addr_to_secondary_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            let sr = self.slot_ref(slot);
-            emit!(self.state, "    leal {}, %ecx", sr);
+            self.emit_alloca_addr_to("ecx", val_id, slot);
         } else if let Some(phys) = self.reg_assignments.get(&val_id).copied() {
             let reg = phys_reg_name(phys);
             emit!(self.state, "    movl %{}, %ecx", reg);
@@ -467,8 +478,7 @@ impl I686Codegen {
 
     pub(super) fn emit_memcpy_load_dest_addr_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            let sr = self.slot_ref(slot);
-            emit!(self.state, "    leal {}, %edi", sr);
+            self.emit_alloca_addr_to("edi", val_id, slot);
         } else if let Some(phys) = self.reg_assignments.get(&val_id).copied() {
             let reg = phys_reg_name(phys);
             emit!(self.state, "    movl %{}, %edi", reg);
@@ -480,8 +490,7 @@ impl I686Codegen {
 
     pub(super) fn emit_memcpy_load_src_addr_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            let sr = self.slot_ref(slot);
-            emit!(self.state, "    leal {}, %esi", sr);
+            self.emit_alloca_addr_to("esi", val_id, slot);
         } else if let Some(phys) = self.reg_assignments.get(&val_id).copied() {
             let reg = phys_reg_name(phys);
             emit!(self.state, "    movl %{}, %esi", reg);

@@ -67,7 +67,7 @@ impl RiscvCodegen {
                                     self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
                                 } else if let Some(slot) = self.state.get_slot(v.0) {
                                     if self.state.is_alloca(v.0) {
-                                        self.emit_addi_s0("t0", slot.0);
+                                        self.emit_alloca_addr("t0", v.0, slot.0);
                                     } else {
                                         self.emit_load_from_s0("t0", slot.0, "ld");
                                     }
@@ -102,7 +102,7 @@ impl RiscvCodegen {
                             Operand::Value(v) => {
                                 if let Some(slot) = self.state.get_slot(v.0) {
                                     if self.state.is_alloca(v.0) {
-                                        self.emit_addi_s0("t0", slot.0);
+                                        self.emit_alloca_addr("t0", v.0, slot.0);
                                         self.emit_store_to_sp("t0", offset as i64, "sd");
                                         self.emit_store_to_sp("zero", (offset + 8) as i64, "sd");
                                     } else {
@@ -150,7 +150,7 @@ impl RiscvCodegen {
                                     self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
                                 } else if let Some(slot) = self.state.get_slot(v.0) {
                                     if self.state.is_alloca(v.0) {
-                                        self.emit_addi_s0("t0", slot.0);
+                                        self.emit_alloca_addr("t0", v.0, slot.0);
                                     } else {
                                         self.emit_load_from_s0("t0", slot.0, "ld");
                                     }
@@ -262,7 +262,7 @@ impl RiscvCodegen {
                     Operand::Value(v) => {
                         if let Some(slot) = self.state.get_slot(v.0) {
                             if self.state.is_alloca(v.0) {
-                                self.emit_addi_s0(RISCV_ARG_REGS[base_reg_idx], slot.0);
+                                self.emit_alloca_addr(RISCV_ARG_REGS[base_reg_idx], v.0, slot.0);
                                 self.state.emit_fmt(format_args!("    mv {}, zero", RISCV_ARG_REGS[base_reg_idx + 1]));
                             } else {
                                 self.emit_load_from_s0(RISCV_ARG_REGS[base_reg_idx], slot.0, "ld");
@@ -285,7 +285,7 @@ impl RiscvCodegen {
                             self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
                         } else if let Some(slot) = self.state.get_slot(v.0) {
                             if self.state.is_alloca(v.0) {
-                                self.emit_addi_s0("t0", slot.0);
+                                self.emit_alloca_addr("t0", v.0, slot.0);
                             } else {
                                 self.emit_load_from_s0("t0", slot.0, "ld");
                             }
@@ -312,7 +312,7 @@ impl RiscvCodegen {
                             self.state.emit_fmt(format_args!("    mv t0, {}", reg_name));
                         } else if let Some(slot) = self.state.get_slot(v.0) {
                             if self.state.is_alloca(v.0) {
-                                self.emit_addi_s0("t0", slot.0);
+                                self.emit_alloca_addr("t0", v.0, slot.0);
                             } else {
                                 self.emit_load_from_s0("t0", slot.0, "ld");
                             }

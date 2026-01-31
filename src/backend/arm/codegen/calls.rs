@@ -52,7 +52,7 @@ impl ArmCodegen {
                                 } else if let Some(slot) = self.state.get_slot(v.0) {
                                     let adjusted = slot.0 + src_adjust;
                                     if self.state.is_alloca(v.0) {
-                                        self.emit_add_sp_offset("x0", adjusted);
+                                        self.emit_alloca_addr("x0", v.0, adjusted);
                                     } else {
                                         self.emit_load_from_sp("x0", adjusted, "ldr");
                                     }
@@ -88,7 +88,7 @@ impl ArmCodegen {
                                 if let Some(slot) = self.state.get_slot(v.0) {
                                     let adjusted = slot.0 + src_adjust;
                                     if self.state.is_alloca(v.0) {
-                                        self.emit_add_sp_offset("x0", adjusted);
+                                        self.emit_alloca_addr("x0", v.0, adjusted);
                                         self.emit_store_to_raw_sp("x0", stack_offset, "str");
                                         self.state.emit("    mov x0, #0");
                                         self.emit_store_to_raw_sp("x0", stack_offset + 8, "str");
@@ -157,7 +157,7 @@ impl ArmCodegen {
                                     } else if let Some(slot) = self.state.get_slot(v.0) {
                                         let adjusted = slot.0 + src_adjust;
                                         if self.state.is_alloca(v.0) {
-                                            self.emit_add_sp_offset("x0", adjusted);
+                                            self.emit_alloca_addr("x0", v.0, adjusted);
                                         } else {
                                             self.emit_load_from_sp("x0", adjusted, "ldr");
                                         }
@@ -183,7 +183,7 @@ impl ArmCodegen {
                                 } else if let Some(slot) = self.state.get_slot(v.0) {
                                     let adjusted = slot.0 + src_adjust;
                                     if self.state.is_alloca(v.0) {
-                                        self.emit_add_sp_offset("x0", adjusted);
+                                        self.emit_alloca_addr("x0", v.0, adjusted);
                                     } else {
                                         self.emit_load_from_sp("x0", adjusted, "ldr");
                                     }

@@ -812,6 +812,22 @@ impl ArmCodegen {
         }
     }
 
+    /// Compute the address of an alloca into `dest`, handling over-aligned allocas.
+    /// For normal allocas: `dest = sp + offset`.
+    /// For over-aligned allocas: `dest = (sp + offset + align-1) & -align`.
+    /// `offset` is the raw stack slot offset (already adjusted for call setup if needed).
+    pub(super) fn emit_alloca_addr(&mut self, dest: &str, val_id: u32, offset: i64) {
+        if let Some(align) = self.state.alloca_over_align(val_id) {
+            self.emit_add_sp_offset(dest, offset);
+            self.load_large_imm("x17", (align - 1) as i64);
+            self.state.emit_fmt(format_args!("    add {}, {}, x17", dest, dest));
+            self.load_large_imm("x17", -(align as i64));
+            self.state.emit_fmt(format_args!("    and {}, {}, x17", dest, dest));
+        } else {
+            self.emit_add_sp_offset(dest, offset);
+        }
+    }
+
     /// Emit `add dest, x29, #offset` handling large offsets.
     /// Uses x17 (IP1) as scratch for offsets > 4095.
     pub(super) fn emit_add_fp_offset(&mut self, dest: &str, offset: i64) {
@@ -1005,17 +1021,7 @@ impl ArmCodegen {
                 }
                 if let Some(slot) = self.state.get_slot(v.0) {
                     if is_alloca {
-                        if let Some(align) = self.state.alloca_over_align(v.0) {
-                            // Over-aligned alloca: compute aligned address.
-                            // x0 = (slot_addr + align-1) & -align
-                            self.emit_add_sp_offset("x0", slot.0);
-                            self.load_large_imm("x17", (align - 1) as i64);
-                            self.state.emit("    add x0, x0, x17");
-                            self.load_large_imm("x17", -(align as i64));
-                            self.state.emit("    and x0, x0, x17");
-                        } else {
-                            self.emit_add_sp_offset("x0", slot.0);
-                        }
+                        self.emit_alloca_addr("x0", v.0, slot.0);
                     } else {
                         self.emit_load_from_sp("x0", slot.0, "ldr");
                     }
@@ -1074,7 +1080,7 @@ impl ArmCodegen {
                 if let Some(slot) = self.state.get_slot(v.0) {
                     if self.state.is_alloca(v.0) {
                         // Alloca: address, not a 128-bit value itself
-                        self.emit_add_sp_offset("x0", slot.0);
+                        self.emit_alloca_addr("x0", v.0, slot.0);
                         self.state.emit("    mov x1, #0");
                     } else if self.state.is_i128_value(v.0) {
                         // 128-bit value in 16-byte stack slot
@@ -1178,7 +1184,7 @@ impl ArmCodegen {
     pub(super) fn load_ptr_to_reg(&mut self, ptr: &Value, reg: &str) {
         if let Some(slot) = self.state.get_slot(ptr.0) {
             if self.state.is_alloca(ptr.0) {
-                self.emit_add_sp_offset(reg, slot.0);
+                self.emit_alloca_addr(reg, ptr.0, slot.0);
             } else {
                 self.emit_load_from_sp(reg, slot.0, "ldr");
             }
@@ -1199,7 +1205,7 @@ impl ArmCodegen {
                     } else if let Some(slot) = self.state.get_slot(v.0) {
                         let adjusted = slot.0 + slot_adjust + extra_sp_adj;
                         if self.state.is_alloca(v.0) {
-                            self.emit_add_sp_offset(dest, adjusted);
+                            self.emit_alloca_addr(dest, v.0, adjusted);
                         } else {
                             self.emit_load_from_sp(dest, adjusted, "ldr");
                         }
@@ -1225,7 +1231,7 @@ impl ArmCodegen {
                         self.state.emit_fmt(format_args!("    mov {}, {}", dest, callee_saved_name(reg)));
                     } else if let Some(slot) = self.state.get_slot(v.0) {
                         if self.state.is_alloca(v.0) {
-                            self.emit_add_sp_offset(dest, slot.0);
+                            self.emit_alloca_addr(dest, v.0, slot.0);
                         } else {
                             self.emit_load_from_sp(dest, slot.0, "ldr");
                         }
@@ -1422,11 +1428,7 @@ impl ArmCodegen {
                         if let Some(slot) = self.state.get_slot(v.0) {
                             let adj = if needs_adjusted_load { slot.0 + slot_adjust } else { slot.0 };
                             if self.state.is_alloca(v.0) {
-                                if needs_adjusted_load {
-                                    self.emit_load_from_sp(ARM_ARG_REGS[base_reg_idx], adj, "ldr");
-                                } else {
-                                    self.emit_add_sp_offset(ARM_ARG_REGS[base_reg_idx], adj);
-                                }
+                                self.emit_alloca_addr(ARM_ARG_REGS[base_reg_idx], v.0, adj);
                                 self.state.emit_fmt(format_args!("    mov {}, #0", ARM_ARG_REGS[base_reg_idx + 1]));
                             } else {
                                 self.emit_load_from_sp(ARM_ARG_REGS[base_reg_idx], adj, "ldr");

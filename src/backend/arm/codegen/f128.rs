@@ -56,7 +56,7 @@ impl F128SoftFloat for ArmCodegen {
 
     fn f128_load_ptr_to_addr_reg(&mut self, slot: StackSlot, val_id: u32) {
         if self.state.is_alloca(val_id) {
-            self.emit_add_sp_offset("x17", slot.0);
+            self.emit_alloca_addr("x17", val_id, slot.0);
         } else {
             self.emit_load_from_sp("x17", slot.0, "ldr");
         }

@@ -16,7 +16,7 @@ impl ArmCodegen {
             Operand::Value(v) => {
                 if let Some(slot) = self.state.get_slot(v.0) {
                     if self.state.is_alloca(v.0) {
-                        self.emit_add_sp_offset("x1", slot.0);
+                        self.emit_alloca_addr("x1", v.0, slot.0);
                     } else {
                         self.emit_load_from_sp("x1", slot.0, "ldr");
                     }

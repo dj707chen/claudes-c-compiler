@@ -134,7 +134,7 @@ impl ArmCodegen {
 
     pub(super) fn emit_slot_addr_to_secondary_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            self.emit_add_sp_offset("x1", slot.0);
+            self.emit_alloca_addr("x1", val_id, slot.0);
         } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
             let reg_name = callee_saved_name(reg);
             self.state.emit_fmt(format_args!("    mov x1, {}", reg_name));
@@ -195,7 +195,7 @@ impl ArmCodegen {
 
     pub(super) fn emit_memcpy_load_dest_addr_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            self.emit_add_sp_offset("x9", slot.0);
+            self.emit_alloca_addr("x9", val_id, slot.0);
         } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
             let reg_name = callee_saved_name(reg);
             self.state.emit_fmt(format_args!("    mov x9, {}", reg_name));
@@ -206,7 +206,7 @@ impl ArmCodegen {
 
     pub(super) fn emit_memcpy_load_src_addr_impl(&mut self, slot: StackSlot, is_alloca: bool, val_id: u32) {
         if is_alloca {
-            self.emit_add_sp_offset("x10", slot.0);
+            self.emit_alloca_addr("x10", val_id, slot.0);
         } else if let Some(&reg) = self.reg_assignments.get(&val_id) {
             let reg_name = callee_saved_name(reg);
             self.state.emit_fmt(format_args!("    mov x10, {}", reg_name));
