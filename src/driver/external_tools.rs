@@ -7,7 +7,83 @@
 use super::Driver;
 use crate::backend::Target;
 
+/// Output mode for GCC -m16 passthrough compilation.
+pub(super) enum GccM16Mode {
+    /// Generate assembly output (-S)
+    Assembly,
+    /// Generate object file (-c)
+    Object,
+}
+
 impl Driver {
+    /// Compile a C source file using GCC instead of the internal compiler.
+    ///
+    /// This is a hack for -m16 mode: the internal i686 backend produces code
+    /// that is too large for the 32KB real-mode limit in Linux kernel boot code.
+    /// Until our code size is competitive with GCC, we delegate -m16 compilation
+    /// to GCC so the kernel can boot.
+    ///
+    /// We forward the raw CLI arguments directly to GCC, preserving flag ordering
+    /// (critical for overrides like -fcf-protection=none after =branch). We strip
+    /// out -o, -c, -S, and input files, then add our own mode flags.
+    ///
+    /// TODO: Remove this once i686 code size optimizations bring boot code under 32KB.
+    pub(super) fn compile_with_gcc_m16(
+        &self,
+        input_file: &str,
+        output_path: &str,
+        mode: GccM16Mode,
+    ) -> Result<Option<String>, String> {
+        let mut cmd = std::process::Command::new("gcc");
+
+        // Forward raw args, skipping -o <path>, -c, -S flags (we set those ourselves)
+        let mut skip_next = false;
+        for arg in &self.raw_args {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            match arg.as_str() {
+                "-o" => { skip_next = true; continue; }
+                "-c" | "-S" => continue,
+                _ => {}
+            }
+            cmd.arg(arg);
+        }
+
+        // Suppress warnings (GCC may warn about flags it doesn't recognize from our CLI)
+        cmd.arg("-w");
+
+        match mode {
+            GccM16Mode::Assembly => {
+                cmd.arg("-S");
+                cmd.arg("-o").arg(output_path);
+                cmd.arg(input_file);
+                let result = cmd.output()
+                    .map_err(|e| format!("Failed to run GCC for -m16: {}", e))?;
+                if !result.status.success() {
+                    let stderr = String::from_utf8_lossy(&result.stderr);
+                    return Err(format!("GCC -m16 compilation of {} failed: {}", input_file, stderr));
+                }
+                let asm = std::fs::read_to_string(output_path)
+                    .map_err(|e| format!("Cannot read GCC assembly output {}: {}", output_path, e))?;
+                Ok(Some(asm))
+            }
+            GccM16Mode::Object => {
+                cmd.arg("-c");
+                cmd.arg("-o").arg(output_path);
+                cmd.arg(input_file);
+                let result = cmd.output()
+                    .map_err(|e| format!("Failed to run GCC for -m16: {}", e))?;
+                if !result.status.success() {
+                    let stderr = String::from_utf8_lossy(&result.stderr);
+                    return Err(format!("GCC -m16 compilation of {} failed: {}", input_file, stderr));
+                }
+                Ok(None)
+            }
+        }
+    }
+
     /// Assemble a .s or .S file to an object file using the target assembler.
     /// For .S files, gcc handles preprocessing (macros, #include, etc.).
     pub(super) fn assemble_source_file(&self, input_file: &str, output_path: &str) -> Result<(), String> {

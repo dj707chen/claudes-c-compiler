@@ -208,6 +208,10 @@ pub struct Driver {
     pub(super) regparm: u8,
     /// Whether to omit the frame pointer (-fomit-frame-pointer).
     pub(super) omit_frame_pointer: bool,
+    /// Raw CLI arguments (excluding argv[0], -o, output path, and input files).
+    /// Used for GCC -m16 passthrough: we forward all flags directly to GCC
+    /// rather than trying to reconstruct them from parsed state.
+    pub(super) raw_args: Vec<String>,
 }
 
 impl Driver {
@@ -265,6 +269,7 @@ impl Driver {
             fcommon: false,
             regparm: 0,
             omit_frame_pointer: false,
+            raw_args: Vec::new(),
         }
     }
 
@@ -460,8 +465,18 @@ impl Driver {
 
     fn run_assembly_only(&self) -> Result<(), String> {
         for input_file in &self.input_files {
-            let asm = self.compile_to_assembly(input_file)?;
             let out_path = self.output_for_input(input_file);
+            if self.code16gcc && Self::is_c_source(input_file) {
+                // Delegate -m16 C compilation to GCC (boot code size hack)
+                use super::external_tools::GccM16Mode;
+                self.compile_with_gcc_m16(input_file, &out_path, GccM16Mode::Assembly)?;
+                self.write_dep_file(input_file, &out_path);
+                if self.verbose {
+                    eprintln!("Assembly output (GCC -m16): {}", out_path);
+                }
+                continue;
+            }
+            let asm = self.compile_to_assembly(input_file)?;
             std::fs::write(&out_path, &asm)
                 .map_err(|e| format!("Cannot write {}: {}", out_path, e))?;
             self.write_dep_file(input_file, &out_path);
@@ -478,6 +493,13 @@ impl Driver {
             if Self::is_assembly_source(input_file) || self.is_explicit_assembly() {
                 // .s/.S files (or -x assembler): pass directly to the assembler (gcc)
                 self.assemble_source_file(input_file, &out_path)?;
+            } else if self.code16gcc {
+                // Delegate -m16 C compilation to GCC (boot code size hack)
+                use super::external_tools::GccM16Mode;
+                self.compile_with_gcc_m16(input_file, &out_path, GccM16Mode::Object)?;
+                if self.verbose {
+                    eprintln!("Object output (GCC -m16): {}", out_path);
+                }
             } else {
                 let asm = self.compile_to_assembly(input_file)?;
                 let extra = self.build_asm_extra_args();
@@ -516,6 +538,16 @@ impl Driver {
                 // treat as object file. These weren't caught by is_object_or_archive
                 // at parse time, so add them to the extra passthrough list.
                 extra_passthrough.push(input_file.clone());
+            } else if self.code16gcc {
+                // Delegate -m16 C compilation to GCC (boot code size hack)
+                use super::external_tools::GccM16Mode;
+                let tmp = TempFile::new("ccc", Self::input_stem(input_file), "o");
+                self.compile_with_gcc_m16(input_file, tmp.to_str(), GccM16Mode::Object)?;
+                if self.verbose {
+                    eprintln!("Compiled (GCC -m16): {}", input_file);
+                }
+                self.write_dep_file(input_file, &self.output_path);
+                temp_guards.push(tmp);
             } else {
                 // Compile .c files to .o
                 let asm = self.compile_to_assembly(input_file)?;

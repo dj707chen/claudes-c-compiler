@@ -43,6 +43,17 @@ impl Driver {
 
         self.parse_main_args(&args[1..])?;
 
+        // Store raw args for GCC -m16 passthrough. We keep everything except
+        // argv[0], -o <output>, -c/-S/-E (we set mode ourselves), and input files.
+        // GCC understands all the same flags we accept, so forwarding them directly
+        // preserves ordering semantics (e.g., -fcf-protection=none after =branch).
+        if self.code16gcc {
+            self.raw_args = args[1..].iter()
+                .filter(|a| !self.input_files.contains(a))
+                .cloned()
+                .collect();
+        }
+
         // Special case: no input files but -Wl,--version is present.
         // Build systems like Meson run `compiler -Wl,--version` without source files
         // to detect the linker type. Invoke our linker driver (GCC) directly.

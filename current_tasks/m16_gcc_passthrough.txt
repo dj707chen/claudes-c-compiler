@@ -1,9 +1,0 @@
-Task: Add GCC passthrough for -m16 mode
-Status: in_progress
-
-Goal: When -m16 is used, delegate compilation to GCC instead of using the
-internal compiler. The i686 backend produces code that is too large for the
-32KB real mode limit used by Linux kernel boot code. As a temporary hack,
--m16 files will be compiled by i686-linux-gnu-gcc -m16 instead.
-
-This unblocks building the Linux kernel for booting Doom.
