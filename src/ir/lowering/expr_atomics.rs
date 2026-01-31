@@ -30,6 +30,10 @@ impl Lowerer {
     /// Uses table-driven dispatch for fetch-op and op-fetch families.
     /// The __atomic_* variants take an explicit ordering argument; __sync_* always use SeqCst.
     pub(super) fn try_lower_atomic_builtin(&mut self, name: &str, args: &[Expr]) -> Option<Operand> {
+        // Strip size suffix (_1, _2, _4, _8, _16) from __sync_* builtins so that
+        // e.g. __sync_fetch_and_add_8 dispatches the same as __sync_fetch_and_add.
+        let name = crate::frontend::sema::builtins::strip_sync_size_suffix(name);
+
         let val_ty = if !args.is_empty() {
             self.get_pointee_ir_type(&args[0]).unwrap_or(crate::common::types::target_int_ir_type())
         } else {

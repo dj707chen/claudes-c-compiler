@@ -97,8 +97,12 @@ impl Lowerer {
                         }
                         _ => { item_idx += 1; current_field_idx = *anon_field_idx + 1; continue; }
                     };
+                    let mut synth_desigs = vec![Designator::Field(inner_name.clone())];
+                    if item.designators.len() > 1 {
+                        synth_desigs.extend(item.designators[1..].iter().cloned());
+                    }
                     let sub_item = InitializerItem {
-                        designators: vec![Designator::Field(inner_name.clone())],
+                        designators: synth_desigs,
                         init: item.init.clone(),
                     };
                     self.emit_struct_init(&[sub_item], base_alloca, &sub_layout, anon_offset);

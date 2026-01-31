@@ -257,6 +257,8 @@ impl Lowerer {
     /// __atomic_fetch_*, __atomic_*_fetch, __sync_fetch_and_*, __sync_*_and_fetch,
     /// __atomic_exchange, __atomic_load, and __sync_val_compare_and_swap.
     fn is_polymorphic_atomic_builtin(name: &str) -> bool {
+        // Strip size suffix (_1, _2, _4, _8, _16) from __sync_* builtins
+        let name = crate::frontend::sema::builtins::strip_sync_size_suffix(name);
         // fetch-op family (returns old value)
         name == "__atomic_fetch_add"
         || name == "__atomic_fetch_sub"

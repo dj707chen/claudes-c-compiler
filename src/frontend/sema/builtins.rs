@@ -682,8 +682,12 @@ fn is_atomic_builtin(name: &str) -> bool {
         );
     }
     // __sync_* family (legacy GCC-style)
+    // GCC also provides size-suffixed variants (e.g., __sync_fetch_and_add_4,
+    // __sync_fetch_and_add_8) which are the actual library entry points.
+    // Strip the _N suffix before matching.
     if name.starts_with("__sync_") {
-        return matches!(name,
+        let base = strip_sync_size_suffix(name);
+        return matches!(base,
             "__sync_fetch_and_add" | "__sync_fetch_and_sub" | "__sync_fetch_and_and" |
             "__sync_fetch_and_or" | "__sync_fetch_and_xor" | "__sync_fetch_and_nand" |
             "__sync_add_and_fetch" | "__sync_sub_and_fetch" | "__sync_and_and_fetch" |
@@ -694,4 +698,20 @@ fn is_atomic_builtin(name: &str) -> bool {
         );
     }
     false
+}
+
+/// Strip size suffix (_1, _2, _4, _8, _16) from GCC __sync_* builtin names.
+/// E.g., "__sync_fetch_and_add_8" -> "__sync_fetch_and_add".
+/// Returns the name unchanged if no suffix is present.
+pub fn strip_sync_size_suffix(name: &str) -> &str {
+    if let Some(base) = name.strip_suffix("_1")
+        .or_else(|| name.strip_suffix("_2"))
+        .or_else(|| name.strip_suffix("_4"))
+        .or_else(|| name.strip_suffix("_8"))
+        .or_else(|| name.strip_suffix("_16"))
+    {
+        base
+    } else {
+        name
+    }
 }

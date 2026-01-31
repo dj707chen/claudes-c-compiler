@@ -570,8 +570,12 @@ impl Lowerer {
                     let anon_field = &sub_layout.fields[*anon_field_idx];
                     let anon_offset = base_offset + anon_field.offset;
                     if let Some(anon_layout) = self.get_struct_layout_for_ctype(&anon_field.ty) {
+                        let mut synth_desigs = vec![Designator::Field(inner_name.clone())];
+                        if inner_item.designators.len() > 1 {
+                            synth_desigs.extend(inner_item.designators[1..].iter().cloned());
+                        }
                         let sub_item = InitializerItem {
-                            designators: vec![Designator::Field(inner_name.clone())],
+                            designators: synth_desigs,
                             init: inner_item.init.clone(),
                         };
                         self.fill_nested_struct_with_ptrs(

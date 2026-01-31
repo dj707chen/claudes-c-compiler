@@ -324,12 +324,11 @@ struct LoopMemoryInfo {
     /// or InlineAsm with clobbers). Calls can modify any global variable,
     /// so loads from globals cannot be hoisted past calls.
     has_calls: bool,
-    /// Whether the loop body has any stores through GlobalAddr-derived
-    /// pointers (including through Copy and GEP chains), which could
-    /// potentially write to other global variables. Stores through
-    /// non-GlobalAddr pointers (e.g., function parameter pointers,
-    /// alloca-derived pointers) do not modify global storage since they
-    /// point to stack or heap memory, not the data/bss sections.
+    /// Whether the loop body has any stores through non-alloca pointers,
+    /// which could potentially write to global variables. A pointer loaded
+    /// from memory at runtime (e.g., through a struct field) may point to
+    /// global memory, so any store through a non-alloca pointer must be
+    /// treated conservatively as potentially modifying globals.
     has_global_derived_stores: bool,
 }
 
@@ -338,8 +337,8 @@ struct LoopMemoryInfo {
 fn analyze_loop_memory(
     func: &IrFunction,
     loop_body: &FxHashSet<usize>,
-    _alloca_info: &AllocaAnalysis,
-    global_addr_values: &FxHashSet<u32>,
+    alloca_info: &AllocaAnalysis,
+    _global_addr_values: &FxHashSet<u32>,
 ) -> LoopMemoryInfo {
     let mut stored_allocas = FxHashSet::default();
     let mut has_calls = false;
@@ -359,19 +358,22 @@ fn analyze_loop_memory(
             match inst {
                 Instruction::Store { ptr, .. } => {
                     stored_allocas.insert(ptr.0);
-                    // Only flag stores through GlobalAddr-derived pointers,
-                    // since those could write to static global storage that
-                    // other global loads read from. Stores through parameter
-                    // pointers or other non-global pointers target heap/stack
-                    // memory and cannot alias global variables.
-                    if global_addr_values.contains(&ptr.0) {
+                    // A store through any pointer that is NOT a known alloca
+                    // could potentially modify global memory. For example, a
+                    // pointer loaded from a struct field at runtime may point
+                    // to a global variable (e.g., linked list node->next->prev
+                    // where next points to a global anchor). We must
+                    // conservatively flag all non-alloca stores as potentially
+                    // modifying globals to prevent incorrect hoisting of global
+                    // loads.
+                    if !alloca_info.alloca_values.contains(&ptr.0) {
                         has_global_derived_stores = true;
                     }
                 }
                 Instruction::AtomicRmw { ptr, .. } => {
                     collect_ptr(ptr, &mut stored_allocas);
                     if let Operand::Value(v) = ptr {
-                        if global_addr_values.contains(&v.0) {
+                        if !alloca_info.alloca_values.contains(&v.0) {
                             has_global_derived_stores = true;
                         }
                     }
@@ -379,7 +381,7 @@ fn analyze_loop_memory(
                 Instruction::AtomicCmpxchg { ptr, .. } => {
                     collect_ptr(ptr, &mut stored_allocas);
                     if let Operand::Value(v) = ptr {
-                        if global_addr_values.contains(&v.0) {
+                        if !alloca_info.alloca_values.contains(&v.0) {
                             has_global_derived_stores = true;
                         }
                     }
@@ -387,14 +389,14 @@ fn analyze_loop_memory(
                 Instruction::AtomicStore { ptr, .. } => {
                     collect_ptr(ptr, &mut stored_allocas);
                     if let Operand::Value(v) = ptr {
-                        if global_addr_values.contains(&v.0) {
+                        if !alloca_info.alloca_values.contains(&v.0) {
                             has_global_derived_stores = true;
                         }
                     }
                 }
                 Instruction::Memcpy { dest, .. } => {
                     stored_allocas.insert(dest.0);
-                    if global_addr_values.contains(&dest.0) {
+                    if !alloca_info.alloca_values.contains(&dest.0) {
                         has_global_derived_stores = true;
                     }
                 }
