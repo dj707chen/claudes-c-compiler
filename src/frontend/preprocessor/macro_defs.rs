@@ -949,6 +949,15 @@ impl MacroTable {
                 }
                 let ident = bytes_to_str(bytes, start, i);
 
+                // Check if this identifier is a pp-number suffix (e.g., the "L"
+                // in "10L", "ULL" in "0xFFULL"). Per C11 §6.4.8, pp-numbers are
+                // single tokens and their suffixes must not be treated as macro
+                // parameters even if they happen to share a name.
+                if Self::is_ppnumber_suffix(result.as_bytes(), ident) {
+                    result.push_str(ident);
+                    continue;
+                }
+
                 if ident == "__VA_ARGS__" && is_variadic {
                     let va_args = self.get_va_args(params, args);
                     let next = if i < len { Some(bytes[i]) } else { None };

@@ -118,14 +118,15 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
         cmd.arg(arg);
     }
 
-    // Default libs (skip for -nostdlib and -shared; only add if not already specified)
+    // Always append default libs at the end (skip for -nostdlib and -shared).
+    // We must always add -lc and -lm here even if the user already specified them
+    // earlier on the command line, because static archives (.a files) appearing
+    // after the user's -l flags may have unresolved references to libc/libm symbols.
+    // Having a library appear twice on the link line is harmless but ensures all
+    // forward references from later archives are satisfied.
     if !is_nostdlib && !is_shared {
-        if !user_args.iter().any(|a| a == "-lc") {
-            cmd.arg("-lc");
-        }
-        if !user_args.iter().any(|a| a == "-lm") {
-            cmd.arg("-lm");
-        }
+        cmd.arg("-lc");
+        cmd.arg("-lm");
     }
 
     let result = cmd.output()

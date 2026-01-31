@@ -1,0 +1,9 @@
+Task: Add missing _mm_cvtsi64_si128 SSE2 intrinsic to emmintrin.h
+
+Status: in_progress
+
+Description:
+- xz_liblzma CRC32/CRC64 fast path uses _mm_cvtsi64_si128 (convert 64-bit int to __m128i)
+- This intrinsic was missing from our emmintrin.h, causing undefined reference linker errors
+- Fix: add _mm_cvtsi64_si128 and _mm_cvtsi64x_si128 alias using _mm_set_epi64x(0, __a)
+- Also update new_projects.txt with test results for: giflib, libexpat, brotli, libevent
