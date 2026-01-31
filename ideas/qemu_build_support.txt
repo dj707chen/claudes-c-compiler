@@ -1,27 +1,45 @@
-QEMU Build Support
-==================
+QEMU Build Support Status
+=========================
 
-Status: Configure passes, full build not yet tested.
+Summary: QEMU 10.2.50 can be compiled (1700+ C files) using ccc-x86, but has
+runtime issues. The compound literal array bug that caused CPU double-registration
+has been fixed. Remaining issue is QOM (QEMU Object Model) type system failures.
 
-The Meson build system now correctly detects our compiler as GCC 14.2.0
-and passes all QEMU configure-time checks. The only configure failure was
-a missing git submodule (keycodemapdb) which is a setup issue, not a
-compiler issue.
+Build Status:
+- Configure: PASS
+- Compilation: PASS (with one file workaround - qapi-introspect.c routes to gcc)
+- Linking: PASS (after response file support was added)
+- Runtime: PARTIAL - "--version" works, but type system errors on CPU listing
 
-Next steps to complete QEMU build support:
-1. Set up QEMU with all submodules (git submodule init/update)
-2. Run `make -j64` to identify any compilation failures
-3. Fix specific C features/edge cases that QEMU uses but we don't support
-4. Run QEMU test suite to verify correctness
-5. Test with multiple QEMU target configurations (not just x86_64-softmmu)
+Build Steps:
+  1. Use wrapper script that routes qapi-introspect.c to gcc
+  2. Configure: CC=/tmp/ccc_wrapper.sh CXX=g++ ./configure --target-list=x86_64-softmmu
+  3. Build: ninja -C build qemu-system-x86_64
 
-Known potential issues:
-- QEMU uses complex preprocessor macros and GCC extensions extensively
-- QEMU may use GCC builtins we don't implement (e.g., __builtin_clz family,
-  __atomic_* operations, __sync_* operations)
-- QEMU may use statement expressions ({...}) and other GCC extensions
-- QEMU may use _Pragma, __attribute__((cleanup)), etc.
-- The _Float* types are currently mapped to standard C types via macros
-  which loses precision for _Float128 on x86-64
+Known Issues Fixed:
+  1. __has_attribute macro aliasing (cleanup attribute) - FIXED
+  2. Bitfield ICE in global_init_compound_struct - FIXED
+  3. Response file (@file) support - FIXED
+  4. Compound literal array init (CPU double-registration) - FIXED
 
-Priority: HIGH - QEMU is a major milestone for the compiler
+Remaining Issues:
+  1. qapi-introspect.c parse failure via ninja (works fine manually, possibly
+     a state/concurrency issue in the preprocessor) - WORKAROUND: gcc wrapper
+  2. QOM type system runtime failure:
+     "VMSTATE_IF_CLASS: Object 0x... is not an instance of type vmstate-if"
+     This is likely a codegen bug affecting:
+     - QOM type info struct initialization (TypeInfo structs use function pointers
+       and class_size/instance_size fields)
+     - The class checker macros (DECLARE_CLASS_CHECKERS) which use
+       object_class_dynamic_cast_assert
+     - Possibly related to struct member offsets or function pointer storage
+
+     Investigation needed: Compare QOM TypeInfo struct layout and TypeImpl
+     struct layout between gcc and ccc builds. Focus on:
+     - object.c: type_new(), type_initialize(), object_class_dynamic_cast_assert()
+     - The INTERFACE_CLASS_CHECK / DECLARE_CLASS_CHECKERS macro expansion
+     - Whether all the TypeInfo compound literals used in type_register_static()
+       are correctly initialized (these use compound struct literals extensively)
+
+Priority: Medium - QEMU can be built from gcc for testing while kernel compilation
+is the primary focus.
