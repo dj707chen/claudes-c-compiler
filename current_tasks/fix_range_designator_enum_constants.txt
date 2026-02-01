@@ -1,0 +1,10 @@
+Fix: Range designators with enum constants in 2D array initializers
+
+The expand_range_designators() function in the parser doesn't pass enum
+constants to eval_const_int_expr(), so range designators like
+[IN_START ... IN_START_INTERP] where IN_START/IN_START_INTERP are enum
+constants fail to expand. This causes the affected array rows to be
+zero-initialized instead of receiving their designated values.
+
+This is the root cause of the QEMU JSON parse crash at startup - the
+json_lexer 2D array uses enum-based range designators.
