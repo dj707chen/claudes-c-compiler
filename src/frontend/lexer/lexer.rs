@@ -298,10 +298,17 @@ impl Lexer {
         while self.pos < self.input.len() && self.input[self.pos] >= b'0' && self.input[self.pos] <= b'7' {
             self.pos += 1;
         }
-        // Float indicator or non-octal digit → backtrack to decimal
+        // Float indicator or non-octal digit → backtrack to decimal.
+        // But '.' followed by '..' is ellipsis, not a decimal point — keep the octal.
         if self.pos < self.input.len() && matches!(self.input[self.pos], b'.' | b'e' | b'E' | b'8' | b'9') {
-            self.pos = saved_pos;
-            return None;
+            let is_ellipsis = self.input[self.pos] == b'.'
+                && self.pos + 2 < self.input.len()
+                && self.input[self.pos + 1] == b'.'
+                && self.input[self.pos + 2] == b'.';
+            if !is_ellipsis {
+                self.pos = saved_pos;
+                return None;
+            }
         }
         let oct_str = std::str::from_utf8(&self.input[oct_start..self.pos]).unwrap_or("0");
         let value = u64::from_str_radix(oct_str, 8).unwrap_or(0);
@@ -325,7 +332,12 @@ impl Lexer {
             self.pos += 1;
         }
 
-        if self.pos < self.input.len() && self.input[self.pos] == b'.' {
+        // Check for decimal point, but NOT if it's the start of '...' (ellipsis).
+        // E.g. `2...15` from GCC case range `case 2 ... 15:` must lex as `2` `...` `15`,
+        // not as float `2.` followed by invalid `..15`.
+        if self.pos < self.input.len() && self.input[self.pos] == b'.'
+            && !(self.pos + 2 < self.input.len() && self.input[self.pos + 1] == b'.' && self.input[self.pos + 2] == b'.')
+        {
             is_float = true;
             self.pos += 1;
             while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
