@@ -845,7 +845,12 @@ impl Parser {
             }
             self.expect_closing(&TokenKind::RBrace, open);
             // Expand range designators [lo ... hi] into individual Index items
-            let items = Self::expand_range_designators(items);
+            let enums = if self.enum_constants.is_empty() {
+                None
+            } else {
+                Some(&self.enum_constants)
+            };
+            let items = Self::expand_range_designators(items, enums);
             Initializer::List(items)
         } else {
             Initializer::Expr(self.parse_assignment_expr())
@@ -855,14 +860,17 @@ impl Parser {
     /// Expand GCC range designators `[lo ... hi] = val` into multiple items
     /// `[lo] = val, [lo+1] = val, ..., [hi] = val` so downstream code only
     /// sees `Designator::Index`.
-    fn expand_range_designators(items: Vec<InitializerItem>) -> Vec<InitializerItem> {
+    fn expand_range_designators(
+        items: Vec<InitializerItem>,
+        enum_consts: Option<&FxHashMap<String, i64>>,
+    ) -> Vec<InitializerItem> {
         let mut result = Vec::with_capacity(items.len());
         for item in items {
             if let Some(range_pos) = item.designators.iter().position(|d| matches!(d, Designator::Range(_, _))) {
                 if let Designator::Range(ref lo_expr, ref hi_expr) = item.designators[range_pos] {
                     // Try to evaluate lo and hi as integer constants
-                    let lo = Self::eval_const_int_expr(lo_expr);
-                    let hi = Self::eval_const_int_expr(hi_expr);
+                    let lo = Self::eval_const_int_expr_with_enums(lo_expr, enum_consts, None);
+                    let hi = Self::eval_const_int_expr_with_enums(hi_expr, enum_consts, None);
                     if let (Some(lo_val), Some(hi_val)) = (lo, hi) {
                         for idx in lo_val..=hi_val {
                             let mut new_desigs = item.designators.clone();
