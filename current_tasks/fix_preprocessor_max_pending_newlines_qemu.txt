@@ -1,0 +1,7 @@
+Fix preprocessor MAX_PENDING_NEWLINES limit for QEMU qapi-introspect.c
+
+The preprocessor's MAX_PENDING_NEWLINES constant (2000) causes incorrect macro
+expansion when a function-like macro invocation spans more than 2000 lines.
+QEMU's qapi-introspect.c has a single QLIT_QLIST(...) call spanning ~32000 lines.
+
+Fix: increase the limit significantly to support very large macro invocations.
