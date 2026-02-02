@@ -174,7 +174,7 @@ pub struct CodegenState {
     pub debug_info: bool,
     /// Pre-computed parameter classifications for the current function.
     /// Populated by `emit_store_params` so that `emit_param_ref` can access them.
-    pub param_classes: Vec<crate::backend::call_emit::ParamClass>,
+    pub param_classes: Vec<crate::backend::call_abi::ParamClass>,
     /// Number of function parameters (for ParamRef bounds checking).
     pub num_params: usize,
     /// Whether the current function is variadic (for ParamRef ABI handling).

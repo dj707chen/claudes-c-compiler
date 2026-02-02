@@ -3,7 +3,7 @@
 use crate::ir::ir::IrFunction;
 use crate::common::types::IrType;
 use crate::backend::generation::{calculate_stack_space_common, find_param_alloca};
-use crate::backend::call_emit::{ParamClass, classify_params};
+use crate::backend::call_abi::{ParamClass, classify_params};
 use super::codegen::{
     RiscvCodegen, callee_saved_name,
     collect_inline_asm_callee_saved_riscv, RISCV_CALLEE_SAVED, CALL_TEMP_CALLEE_SAVED,
@@ -19,12 +19,12 @@ impl RiscvCodegen {
         // This is critical for va_start to correctly point to the first variadic arg.
         if func.is_variadic {
             // For variadic callee, call_abi_config() already has variadic_floats_in_gp: true.
-            let classification = crate::backend::call_emit::classify_params_full(func, &self.call_abi_config_impl());
+            let classification = crate::backend::call_abi::classify_params_full(func, &self.call_abi_config_impl());
             // Use the effective GP register index (includes alignment gaps for I128/F128 pairs)
             // rather than summing gp_reg_count(), so we correctly skip over alignment padding.
             self.va_named_gp_count = classification.int_reg_idx.min(8);
             // Track stack bytes consumed by named params that overflowed to the caller's stack.
-            self.va_named_stack_bytes = crate::backend::call_emit::named_params_stack_bytes(&classification.classes);
+            self.va_named_stack_bytes = crate::backend::call_abi::named_params_stack_bytes(&classification.classes);
             self.is_variadic = true;
         } else {
             self.is_variadic = false;

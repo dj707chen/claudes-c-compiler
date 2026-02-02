@@ -46,6 +46,22 @@ Full Overhaul (2026-02-02):
 
 - src/frontend/lexer/README.md: Expanded from bare minimum to include design notes
 
+Dead code / style cleanup (2026-02-02, round 2):
+- Removed unjustified #[allow(dead_code)] from IrFunction and IrParam in ir/module.rs
+  (both are extensively used across 37+ files)
+- Fixed stale #[allow(dead_code)] comments on ParamClass::StructMixedIntSseReg/StructMixedSseIntReg
+  (old comment: "not yet consumed by any backend" — actually used by x86 and RISC-V backends)
+  Updated comments to accurately describe that `size` field mirrors CallArgClass/CoreArgClass
+- Eliminated call_emit.rs backward-compatibility shim:
+  - Updated all imports from call_emit to call_abi (x86/i686/arm/riscv prologue.rs, arm codegen.rs, state.rs)
+  - Removed call_emit.rs file and mod.rs declaration
+  - Removed call_emit.rs entry from src/backend/README.md
+- Remaining justified #[allow(dead_code)]:
+  - TypeSpecifier::Signed/Unsigned (ast.rs): matched but never constructed by parser
+  - ParamClass::StructMixed* (call_abi.rs): size field not read by backends
+  - is_small_slot() (state.rs): infrastructure placeholder, set populated but method uncalled
+  - 3 disabled i686 peephole passes: intentionally disabled pending bug fixes
+
 Clippy/style cleanup (2026-02-02):
 - Removed exact numeric counts from READMEs that would go stale:
   - src/common/README.md: removed "22 primitive" and "14 __builtin_*" counts

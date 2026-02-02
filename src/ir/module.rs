@@ -159,7 +159,6 @@ impl GlobalInit {
 
 /// An IR function.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct IrFunction {
     pub name: String,
     pub return_type: IrType,
@@ -225,7 +224,6 @@ pub struct IrFunction {
 
 /// A function parameter.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct IrParam {
     pub ty: IrType,
     /// If this param is a struct/union passed by value, its byte size. None for non-struct params.

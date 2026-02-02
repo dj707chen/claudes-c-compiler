@@ -19,7 +19,7 @@ use crate::backend::state::{CodegenState, StackSlot};
 use crate::backend::traits::ArchCodegen;
 use crate::backend::generation::find_param_alloca;
 use crate::backend::call_abi::{CallAbiConfig, CallArgClass};
-use crate::backend::call_emit::ParamClass;
+use crate::backend::call_abi::ParamClass;
 use crate::backend::inline_asm::emit_inline_asm_common;
 use crate::backend::regalloc::PhysReg;
 use super::asm_emitter::ARM_GP_SCRATCH;

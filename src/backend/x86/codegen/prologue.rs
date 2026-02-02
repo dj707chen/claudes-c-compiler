@@ -2,7 +2,7 @@
 
 use crate::ir::ir::{IrFunction, Instruction, Value};
 use crate::common::types::IrType;
-use crate::backend::call_emit::{ParamClass, classify_params};
+use crate::backend::call_abi::{ParamClass, classify_params};
 use crate::backend::generation::{calculate_stack_space_common, find_param_alloca};
 use crate::backend::regalloc::PhysReg;
 use super::codegen::{X86Codegen, X86_CALLEE_SAVED, X86_CALLER_SAVED, phys_reg_name,
@@ -16,19 +16,19 @@ impl X86Codegen {
         // stays in sync with classify_call_args (caller side) automatically.
         {
             let config = self.call_abi_config_impl();
-            let classification = crate::backend::call_emit::classify_params_full(func, &config);
+            let classification = crate::backend::call_abi::classify_params_full(func, &config);
             let mut named_gp = 0usize;
             let mut named_fp = 0usize;
             for class in &classification.classes {
                 named_gp += class.gp_reg_count();
-                if matches!(class, crate::backend::call_emit::ParamClass::FloatReg { .. }) {
+                if matches!(class, crate::backend::call_abi::ParamClass::FloatReg { .. }) {
                     named_fp += 1;
                 }
             }
             self.num_named_int_params = named_gp;
             self.num_named_fp_params = named_fp;
             self.num_named_stack_bytes =
-                crate::backend::call_emit::named_params_stack_bytes(&classification.classes);
+                crate::backend::call_abi::named_params_stack_bytes(&classification.classes);
         }
 
         // Run register allocator BEFORE stack space computation so we can

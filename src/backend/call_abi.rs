@@ -109,12 +109,12 @@ pub enum ParamClass {
     /// Small struct where all eightbytes are SSE class -> 1-2 XMM registers.
     StructSseReg { lo_fp_idx: usize, hi_fp_idx: Option<usize>, size: usize },
     /// Small struct: first eightbyte INTEGER, second SSE.
-    /// (`size` is carried for ABI symmetry but not yet consumed by any backend.)
-    #[allow(dead_code)]
+    /// (`size` mirrors `CallArgClass`/`CoreArgClass` for structural consistency.)
+    #[allow(dead_code)] // size field not yet read by any backend
     StructMixedIntSseReg { int_reg_idx: usize, fp_reg_idx: usize, size: usize },
     /// Small struct: first eightbyte SSE, second INTEGER.
-    /// (`size` is carried for ABI symmetry but not yet consumed by any backend.)
-    #[allow(dead_code)]
+    /// (`size` mirrors `CallArgClass`/`CoreArgClass` for structural consistency.)
+    #[allow(dead_code)] // size field not yet read by any backend
     StructMixedSseIntReg { fp_reg_idx: usize, int_reg_idx: usize, size: usize },
     /// F128 (long double) in FP register (ARM: Q-reg).
     F128FpReg { reg_idx: usize },

@@ -3,7 +3,7 @@
 use crate::ir::ir::{IrFunction, Value};
 use crate::common::types::IrType;
 use crate::backend::generation::{calculate_stack_space_common, find_param_alloca};
-use crate::backend::call_emit::{ParamClass, classify_params};
+use crate::backend::call_abi::{ParamClass, classify_params};
 use super::codegen::{
     ArmCodegen, callee_saved_name, ARM_CALLEE_SAVED, ARM_CALLER_SAVED, ARM_ARG_REGS,
 };
@@ -73,19 +73,19 @@ impl ArmCodegen {
             }
 
             let config = self.call_abi_config_impl();
-            let param_classes = crate::backend::call_emit::classify_params(func, &config);
+            let param_classes = crate::backend::call_abi::classify_params(func, &config);
             let mut named_gp = 0usize;
             let mut named_fp = 0usize;
             for class in &param_classes {
                 named_gp += class.gp_reg_count();
-                if matches!(class, crate::backend::call_emit::ParamClass::FloatReg { .. }
-                    | crate::backend::call_emit::ParamClass::F128FpReg { .. }) {
+                if matches!(class, crate::backend::call_abi::ParamClass::FloatReg { .. }
+                    | crate::backend::call_abi::ParamClass::F128FpReg { .. }) {
                     named_fp += 1;
                 }
             }
             self.va_named_gp_count = named_gp.min(8);
             self.va_named_fp_count = named_fp.min(8);
-            self.va_named_stack_bytes = crate::backend::call_emit::named_params_stack_bytes(&param_classes);
+            self.va_named_stack_bytes = crate::backend::call_abi::named_params_stack_bytes(&param_classes);
         }
 
         let save_count = self.used_callee_saved.len() as i64;

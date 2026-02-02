@@ -6,7 +6,7 @@ use crate::backend::generation::{
     is_i128_type, calculate_stack_space_common, run_regalloc_and_merge_clobbers,
     filter_available_regs, find_param_alloca, collect_inline_asm_callee_saved_with_generic,
 };
-use crate::backend::call_emit::{ParamClass, classify_params};
+use crate::backend::call_abi::{ParamClass, classify_params};
 use crate::emit;
 use super::codegen::{
     I686Codegen, phys_reg_name, i686_constraint_to_phys, i686_clobber_to_phys,
@@ -32,7 +32,7 @@ impl I686Codegen {
         // Compute named parameter stack bytes for va_start (variadic functions).
         if func.is_variadic {
             let config = self.call_abi_config();
-            let classification = crate::backend::call_emit::classify_params_full(func, &config);
+            let classification = crate::backend::call_abi::classify_params_full(func, &config);
             self.va_named_stack_bytes = classification.total_stack_bytes;
         }
 
@@ -420,7 +420,7 @@ impl I686Codegen {
     // ---- emit_param_ref ----
 
     pub(super) fn emit_param_ref_impl(&mut self, dest: &Value, param_idx: usize, ty: IrType) {
-        use crate::backend::call_emit::ParamClass;
+        use crate::backend::call_abi::ParamClass;
 
         if param_idx < self.state.param_alloca_slots.len() {
             if let Some((alloca_slot, _alloca_ty)) = self.state.param_alloca_slots[param_idx] {
