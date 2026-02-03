@@ -1,0 +1,6 @@
+Refactor the 4 duplicated link_direct_ld_* functions and their
+find_gcc_lib_dir_*/find_crt_dir_* helpers into a single generic
+implementation using per-architecture configuration data.
+
+This eliminates ~800 lines of duplicated code across x86-64, RISC-V,
+i686, and AArch64 backends.
