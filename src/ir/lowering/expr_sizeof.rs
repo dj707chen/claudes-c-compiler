@@ -12,7 +12,7 @@ use crate::frontend::parser::ast::{
     UnaryOp,
 };
 use crate::common::types::CType;
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
 

@@ -1,10 +1,10 @@
 //! RiscvCodegen: prologue/epilogue and stack frame operations.
 
-use crate::ir::ir::IrFunction;
+use crate::ir::reexports::IrFunction;
 use crate::common::types::IrType;
 use crate::backend::generation::{calculate_stack_space_common, find_param_alloca};
 use crate::backend::call_abi::{ParamClass, classify_params};
-use super::codegen::{
+use super::emit::{
     RiscvCodegen, callee_saved_name,
     collect_inline_asm_callee_saved_riscv, RISCV_CALLEE_SAVED, CALL_TEMP_CALLEE_SAVED,
     RISCV_ARG_REGS,
@@ -497,7 +497,7 @@ impl RiscvCodegen {
 
     // ---- emit_param_ref ----
 
-    pub(super) fn emit_param_ref_impl(&mut self, dest: &crate::ir::ir::Value, param_idx: usize, ty: IrType) {
+    pub(super) fn emit_param_ref_impl(&mut self, dest: &crate::ir::reexports::Value, param_idx: usize, ty: IrType) {
         if param_idx >= self.state.param_classes.len() {
             return;
         }

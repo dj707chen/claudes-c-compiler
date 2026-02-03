@@ -14,7 +14,7 @@
 //! Phi nodes in successor blocks are updated when edges are redirected.
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BasicBlock,
     BlockId,
     Instruction,
@@ -1108,7 +1108,7 @@ fn consts_equal_for_phi(a: &IrConst, b: &IrConst) -> bool {
 mod tests {
     use super::*;
     use crate::common::types::IrType;
-    use crate::ir::ir::IrCmpOp;
+    use crate::ir::reexports::IrCmpOp;
 
     /// Create a basic block for testing. Reduces boilerplate since
     /// `source_spans` is always empty in tests.

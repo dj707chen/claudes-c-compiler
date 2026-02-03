@@ -7,7 +7,7 @@
 //!
 //! All scanning operates on byte slices for performance (no Vec<char> allocation).
 
-use super::preprocessor::Preprocessor;
+use super::pipeline::Preprocessor;
 use super::utils::{is_ident_start_byte, is_ident_cont_byte, bytes_to_str};
 
 impl Preprocessor {

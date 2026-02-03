@@ -1,10 +1,10 @@
 //! I686Codegen: comparison operations (float, int, fused branches, select).
 
-use crate::ir::ir::{IrCmpOp, Operand, Value};
+use crate::ir::reexports::{IrCmpOp, Operand, Value};
 use crate::common::types::IrType;
 use crate::emit;
 use crate::backend::traits::ArchCodegen;
-use super::codegen::I686Codegen;
+use super::emit::I686Codegen;
 
 impl I686Codegen {
     pub(super) fn emit_float_cmp_impl(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {
@@ -157,7 +157,7 @@ impl I686Codegen {
     }
 
     pub(super) fn emit_select_impl(&mut self, dest: &Value, cond: &Operand, true_val: &Operand, false_val: &Operand, ty: IrType) {
-        use crate::ir::ir::IrConst;
+        use crate::ir::reexports::IrConst;
         // Constant-fold wide conditions at compile time
         match cond {
             Operand::Const(IrConst::I64(v)) => {

@@ -1,4 +1,4 @@
-pub(crate) mod codegen;
+pub(crate) mod emit;
 mod asm_emitter;
 mod f128;
 mod inline_asm;

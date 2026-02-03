@@ -1,5 +1,5 @@
 use crate::delegate_to_impl;
-use crate::ir::ir::{
+use crate::ir::reexports::{
     AtomicOrdering,
     AtomicRmwOp,
     BlockId,
@@ -1378,7 +1378,7 @@ impl ArmCodegen {
                     IrConst::LongDouble(_, f128_bytes) => *f128_bytes,
                     _ => {
                         let f64_val = c.to_f64().unwrap_or(0.0);
-                        crate::ir::ir::f64_to_f128_bytes(f64_val)
+                        crate::ir::reexports::f64_to_f128_bytes(f64_val)
                     }
                 };
                 let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());

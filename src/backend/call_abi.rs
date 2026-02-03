@@ -10,7 +10,7 @@
 //! - `classify_args_core`: single implementation of the classification algorithm
 //! - `classify_call_args` / `classify_params_full`: thin wrappers over the core
 
-use crate::ir::ir::{IrConst, IrFunction, Operand};
+use crate::ir::reexports::{IrConst, IrFunction, Operand};
 use crate::common::types::IrType;
 use super::generation::is_i128_type;
 

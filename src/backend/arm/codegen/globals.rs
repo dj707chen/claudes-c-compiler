@@ -1,7 +1,7 @@
 //! ArmCodegen: global address operations.
 
-use crate::ir::ir::Value;
-use super::codegen::ArmCodegen;
+use crate::ir::reexports::Value;
+use super::emit::ArmCodegen;
 
 impl ArmCodegen {
     pub(super) fn emit_global_addr_impl(&mut self, dest: &Value, name: &str) {

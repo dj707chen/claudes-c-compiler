@@ -11,7 +11,7 @@
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::common::source::Span;
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BasicBlock,
     BlockId,
     Instruction,

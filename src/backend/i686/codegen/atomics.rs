@@ -1,9 +1,9 @@
 //! I686Codegen: atomic operations (RMW, cmpxchg, load, store, fence).
 
-use crate::ir::ir::{AtomicOrdering, AtomicRmwOp, Operand, Value};
+use crate::ir::reexports::{AtomicOrdering, AtomicRmwOp, Operand, Value};
 use crate::common::types::IrType;
 use crate::emit;
-use super::codegen::I686Codegen;
+use super::emit::I686Codegen;
 
 impl I686Codegen {
     pub(super) fn emit_atomic_rmw_impl(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand,

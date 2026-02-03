@@ -53,7 +53,7 @@ All files live under `src/backend/riscv/codegen/`.
 
 | File | Purpose |
 |------|---------|
-| `codegen.rs` | Core `RiscvCodegen` struct, register constants, operand load/store helpers (`operand_to_t0`, `store_t0_to`), 12-bit immediate check, large-offset helpers, `ArchCodegen` trait implementation, switch/jump-table emission. |
+| `emit.rs` | Core `RiscvCodegen` struct, register constants, operand load/store helpers (`operand_to_t0`, `store_t0_to`), 12-bit immediate check, large-offset helpers, `ArchCodegen` trait implementation, switch/jump-table emission. |
 | `prologue.rs` | Stack space calculation, register allocator invocation, prologue/epilogue emission (small-frame, large-frame, stack-probing paths), parameter classification and storage, variadic register save area setup. |
 | `calls.rs` | Outgoing call ABI: `CallAbiConfig` for LP64D, stack argument marshalling, GP/FP register argument staging (three-phase strategy using t3/t4/t5), F128 and i128 register-pair argument loading, call instruction emission, result retrieval. |
 | `memory.rs` | Load, store, and memcpy operations. Slot addressing (direct s0-relative, indirect through pointer, over-aligned alloca). GEP (get-element-pointer) with constant and variable offsets. |

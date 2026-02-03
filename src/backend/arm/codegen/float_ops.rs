@@ -1,10 +1,10 @@
 //! ArmCodegen: floating-point binary operations.
 
-use crate::ir::ir::{Operand, Value};
+use crate::ir::reexports::{Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::cast::FloatOp;
 use crate::backend::traits::ArchCodegen;
-use super::codegen::ArmCodegen;
+use super::emit::ArmCodegen;
 
 impl ArmCodegen {
     pub(super) fn emit_float_binop_impl(&mut self, dest: &Value, op: FloatOp, lhs: &Operand, rhs: &Operand, ty: IrType) {

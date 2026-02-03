@@ -16,7 +16,7 @@
 //! FxHashMap, since Value IDs are dense sequential u32s. This eliminates hashing
 //! overhead and gives O(1) lookups with better cache locality.
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrFunction,
     IrModule,
@@ -373,7 +373,7 @@ fn replace_value_in_place(val: &mut Value, copy_map: &[Option<Operand>]) -> usiz
 mod tests {
     use super::*;
     use crate::common::types::IrType;
-    use crate::ir::ir::{BasicBlock, BlockId, IrBinOp, IrConst};
+    use crate::ir::reexports::{BasicBlock, BlockId, IrBinOp, IrConst};
 
     #[test]
     fn test_simple_copy_propagation() {

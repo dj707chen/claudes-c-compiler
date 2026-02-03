@@ -1,8 +1,8 @@
 //! I686Codegen: global address operations (global, label, TLS).
 
-use crate::ir::ir::Value;
+use crate::ir::reexports::Value;
 use crate::emit;
-use super::codegen::I686Codegen;
+use super::emit::I686Codegen;
 
 impl I686Codegen {
     pub(super) fn emit_global_addr_impl(&mut self, dest: &Value, name: &str) {

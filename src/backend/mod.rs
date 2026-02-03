@@ -21,7 +21,7 @@ pub(crate) mod i686;
 pub(crate) mod arm;
 pub(crate) mod riscv;
 
-use crate::ir::ir::IrModule;
+use crate::ir::reexports::IrModule;
 
 /// Options that control code generation, parsed from CLI flags.
 #[derive(Debug, Clone, Default)]

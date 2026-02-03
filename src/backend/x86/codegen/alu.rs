@@ -1,8 +1,8 @@
 //! X86Codegen: integer/float arithmetic, unary ops, binop, copy.
 
-use crate::ir::ir::{IrBinOp, Operand, Value};
+use crate::ir::reexports::{IrBinOp, Operand, Value};
 use crate::common::types::IrType;
-use super::codegen::{X86Codegen, shift_mnemonic};
+use super::emit::{X86Codegen, shift_mnemonic};
 
 impl X86Codegen {
     // ---- Unary ----

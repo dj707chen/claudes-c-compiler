@@ -1,10 +1,10 @@
 //! I686Codegen: variadic argument operations (va_arg, va_start, va_copy).
 
-use crate::ir::ir::Value;
+use crate::ir::reexports::Value;
 use crate::common::types::IrType;
 use crate::backend::generation::is_i128_type;
 use crate::emit;
-use super::codegen::I686Codegen;
+use super::emit::I686Codegen;
 
 impl I686Codegen {
     pub(super) fn emit_va_arg_impl(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType) {

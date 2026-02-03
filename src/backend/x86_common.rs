@@ -8,7 +8,7 @@
 use std::borrow::Cow;
 use std::fmt::Write;
 use crate::common::types::IrType;
-use crate::ir::ir::BlockId;
+use crate::ir::reexports::BlockId;
 
 /// Resolve GCC inline asm dialect alternatives in a template string.
 ///

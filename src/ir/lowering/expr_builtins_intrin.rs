@@ -5,7 +5,7 @@
 //! l/ll suffix variants).
 
 use crate::frontend::parser::ast::Expr;
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrBinOp,
     IrCmpOp,
@@ -14,7 +14,7 @@ use crate::ir::ir::{
     Operand,
 };
 use crate::common::types::{IrType, target_int_ir_type};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Determine the operand width for a suffix-encoded intrinsic (clz, ctz, popcount, etc.).

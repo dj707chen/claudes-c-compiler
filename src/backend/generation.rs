@@ -9,7 +9,7 @@
 //! These functions are arch-independent — they use the `ArchCodegen` trait to call
 //! into the backend-specific implementations.
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BasicBlock,
     GlobalInit,
     Instruction,

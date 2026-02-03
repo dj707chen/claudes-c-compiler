@@ -5,7 +5,7 @@
 //! substitution logic used by `emit_inline_asm` in the main codegen module.
 
 use std::fmt::Write;
-use super::codegen::RiscvCodegen;
+use super::emit::RiscvCodegen;
 
 /// Constraint classification for RISC-V inline asm operands.
 #[derive(Clone, PartialEq)]

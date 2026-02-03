@@ -7,7 +7,7 @@ The lexer lives in two files:
 | File | Purpose |
 |------|---------|
 | `token.rs` | `Token`, `TokenKind` enum, keyword lookup table |
-| `lexer.rs` | `Lexer` struct and the scanning/parsing logic |
+| `scan.rs` | `Lexer` struct and the scanning/parsing logic |
 
 ---
 

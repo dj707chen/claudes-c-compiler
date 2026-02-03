@@ -1,6 +1,6 @@
 pub(crate) mod definitions;
 pub(crate) mod func_state;
-pub(crate) mod lowering;
+pub(crate) mod lower;
 mod func_lowering;
 mod global_decl;
 pub(crate) mod expr;
@@ -40,4 +40,4 @@ mod expr_sizeof;
 mod pointer_analysis;
 mod ref_collection;
 
-pub(crate) use lowering::Lowerer;
+pub(crate) use lower::Lowerer;

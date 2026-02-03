@@ -6,7 +6,7 @@ use crate::frontend::parser::ast::{
     TypeSpecifier,
     UnaryOp,
 };
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrConst,
     Operand,
@@ -14,7 +14,7 @@ use crate::ir::ir::{
 };
 use std::rc::Rc;
 use crate::common::types::{AddressSpace, IrType, StructLayout, RcLayout, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Register a struct/union type definition from a TypeSpecifier, computing and

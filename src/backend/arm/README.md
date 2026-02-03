@@ -51,7 +51,7 @@ All codegen source files reside under `src/backend/arm/codegen/`.
 
 | File | Responsibility |
 |------|---------------|
-| `codegen.rs` | Core `ArmCodegen` struct, register pool definitions (`ARM_CALLEE_SAVED`, `ARM_CALLER_SAVED`), ALU mnemonic mapping, condition code tables, immediate encoding helpers (`const_as_imm12`, `const_as_power_of_2`), prescan of inline asm for callee-saved register discovery, and integer comparison emission with optimized reg-vs-imm12 and reg-vs-reg paths. |
+| `emit.rs` | Core `ArmCodegen` struct, register pool definitions (`ARM_CALLEE_SAVED`, `ARM_CALLER_SAVED`), ALU mnemonic mapping, condition code tables, immediate encoding helpers (`const_as_imm12`, `const_as_power_of_2`), prescan of inline asm for callee-saved register discovery, and integer comparison emission with optimized reg-vs-imm12 and reg-vs-reg paths. |
 | `mod.rs` | Module declaration and re-exports for the codegen submodules. |
 | `prologue.rs` | Stack space calculation, prologue/epilogue emission (frame pointer/link register pair save, callee-saved register save/restore via `STP`/`LDP`), parameter store dispatch, and variadic register save area layout. |
 | `calls.rs` | Call ABI configuration (`CallAbiConfig` with 8 integer regs, 8 float regs, I128 pair alignment), stack argument marshalling (scalars, I128, F128, structs by value), GP-to-temp staging, FP register argument loading, indirect call via `BLR x17`, and post-call stack cleanup. |

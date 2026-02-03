@@ -1,8 +1,8 @@
 //! RiscvCodegen: integer/float arithmetic, unary ops, binop, copy.
 
-use crate::ir::ir::{IrBinOp, Operand, Value};
+use crate::ir::reexports::{IrBinOp, Operand, Value};
 use crate::common::types::IrType;
-use super::codegen::RiscvCodegen;
+use super::emit::RiscvCodegen;
 
 impl RiscvCodegen {
     // ---- Unary ----

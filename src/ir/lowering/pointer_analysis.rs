@@ -12,7 +12,7 @@ use crate::frontend::parser::ast::{
     UnaryOp,
 };
 use crate::common::types::{AddressSpace, IrType, RcLayout, CType, target_ptr_size};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// For a pointer-to-struct parameter type (e.g., `struct TAG *p`), get the

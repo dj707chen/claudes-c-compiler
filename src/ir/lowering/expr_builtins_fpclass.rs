@@ -6,7 +6,7 @@
 //! delegates to libc for F128 (long double).
 
 use crate::frontend::parser::ast::{Expr};
-use crate::ir::ir::{
+use crate::ir::reexports::{
     CallInfo,
     Instruction,
     IrBinOp,
@@ -16,7 +16,7 @@ use crate::ir::ir::{
     Value,
 };
 use crate::common::types::{AddressSpace, IrType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Helper: get the type of the last argument for fp classification builtins.

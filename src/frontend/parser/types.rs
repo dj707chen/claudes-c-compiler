@@ -8,7 +8,7 @@
 use crate::common::types::AddressSpace;
 use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
-use super::parser::{ModeKind, Parser};
+use super::parse::{ModeKind, Parser};
 
 /// Collected type specifier flags during parsing.
 ///

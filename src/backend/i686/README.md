@@ -65,7 +65,7 @@ All code generation logic lives under `src/backend/i686/codegen/`:
 
 | File | Responsibility |
 |------|---------------|
-| `codegen.rs` | `I686Codegen` struct, `ArchCodegen` trait impl, accumulator load/store helpers (`operand_to_eax`, `operand_to_ecx`, `store_eax_to`), x87 FPU load helpers, 64-bit atomic helpers (`cmpxchg8b`), runtime stubs (`__x86.get_pc_thunk.bx`, `__divdi3`/`__udivdi3`/`__moddi3`/`__umoddi3`) |
+| `emit.rs` | `I686Codegen` struct, `ArchCodegen` trait impl, accumulator load/store helpers (`operand_to_eax`, `operand_to_ecx`, `store_eax_to`), x87 FPU load helpers, 64-bit atomic helpers (`cmpxchg8b`), runtime stubs (`__x86.get_pc_thunk.bx`, `__divdi3`/`__udivdi3`/`__moddi3`/`__umoddi3`) |
 | `prologue.rs` | Stack frame setup: `calculate_stack_space`, `emit_prologue`/`emit_epilogue`, parameter storage, register allocator integration, frame pointer omission logic |
 | `calls.rs` | Call ABI: stack argument layout, `regparm` register argument emission, call instruction emission (direct/indirect/PLT), result retrieval (`%eax`, `%eax:%edx`, `st(0)`) |
 | `memory.rs` | Load/store overrides for 64-bit and F128 types, constant-offset load/store, GEP address computation, memcpy emission, alloca alignment |

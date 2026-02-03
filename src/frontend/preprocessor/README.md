@@ -492,7 +492,7 @@ enabling GCC-compatible `file:line:col: error:` / `warning:` output formatting.
 | File | Purpose |
 |------|---------|
 | `mod.rs` | Module declaration and re-exports. Exposes `Preprocessor` as the public type. |
-| `preprocessor.rs` | Core struct, `preprocess()` pipeline, directive dispatch (`process_directive`), line accumulation, and public configuration API. |
+| `pipeline.rs` | Core struct, `preprocess()` pipeline, directive dispatch (`process_directive`), line accumulation, and public configuration API. |
 | `macro_defs.rs` | `MacroDef` and `MacroTable` types. All macro expansion logic: `expand_text`, `expand_function_macro`, `handle_stringify_and_paste`, `substitute_params`, argument parsing, blue-paint markers, paste-protection markers, and anti-paste guards. |
 | `conditionals.rs` | `ConditionalStack` (push/pop state machine for `#if` nesting). `evaluate_condition` and `expand_condition_macros` for `#if` expression preprocessing. `eval_const_expr` recursive-descent expression evaluator and tokenizer. |
 | `expr_eval.rs` | `resolve_defined_in_expr` (replaces `defined()`, `__has_builtin()`, `__has_attribute()`, `__has_include()`, etc. with `0`/`1`). `replace_remaining_idents_with_zero` (C standard: undefined identifiers in `#if` are `0`). |

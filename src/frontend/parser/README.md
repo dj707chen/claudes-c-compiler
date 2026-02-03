@@ -59,14 +59,14 @@ several properties of the C grammar:
 
 ## Module Organization
 
-The `Parser` struct is defined once in `parser.rs`, but its methods are spread
+The `Parser` struct is defined once in `parse.rs`, but its methods are spread
 across five files via separate `impl Parser` blocks.  Each file is a private
 module that adds domain-specific parsing methods:
 
 ```
 parser/
   mod.rs            -- Module declarations; re-exports Parser
-  parser.rs         -- Parser struct, constructor, token helpers, entry point
+  parse.rs         -- Parser struct, constructor, token helpers, entry point
   expressions.rs    -- Expression parsing (precedence climbing)
   types.rs          -- Type specifier collection and resolution
   declarations.rs   -- External and local declarations, initializers, function defs

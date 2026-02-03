@@ -1,8 +1,8 @@
 //! X86Codegen: atomic operations (RMW, cmpxchg, load, store, fence).
 
-use crate::ir::ir::{Operand, Value, AtomicRmwOp, AtomicOrdering};
+use crate::ir::reexports::{Operand, Value, AtomicRmwOp, AtomicOrdering};
 use crate::common::types::IrType;
-use super::codegen::X86Codegen;
+use super::emit::X86Codegen;
 
 impl X86Codegen {
     pub(super) fn emit_atomic_rmw_impl(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, _ordering: AtomicOrdering) {

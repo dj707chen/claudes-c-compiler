@@ -1,4 +1,4 @@
-pub(crate) mod codegen;
+pub(crate) mod emit;
 pub(crate) mod peephole;
 mod asm_emitter;
 mod f128;

@@ -19,9 +19,9 @@ use crate::frontend::parser::ast::{
     TypeSpecifier,
     UnaryOp,
 };
-use crate::ir::ir::{GlobalInit, IrConst};
+use crate::ir::reexports::{GlobalInit, IrConst};
 use crate::common::types::{CType, StructLayout};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Try to extract a global address from an initializer.

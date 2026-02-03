@@ -1,9 +1,9 @@
 //! X86Codegen: floating-point binary operations and F128 negation.
 
-use crate::ir::ir::{IrUnaryOp, Operand, Value};
+use crate::ir::reexports::{IrUnaryOp, Operand, Value};
 use crate::backend::cast::FloatOp;
 use crate::common::types::IrType;
-use super::codegen::X86Codegen;
+use super::emit::X86Codegen;
 
 impl X86Codegen {
     pub(super) fn emit_float_binop_impl(&mut self, dest: &Value, op: FloatOp, lhs: &Operand, rhs: &Operand, ty: IrType) {

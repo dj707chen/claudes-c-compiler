@@ -3,8 +3,8 @@
 //! NEON intrinsics: SSE-equivalent operations via 128-bit NEON instructions.
 //! F128: IEEE 754 binary128 via compiler-rt/libgcc soft-float libcalls.
 
-use crate::ir::ir::{IntrinsicOp, Operand, Value};
-use super::codegen::ArmCodegen;
+use crate::ir::reexports::{IntrinsicOp, Operand, Value};
+use super::emit::ArmCodegen;
 
 impl ArmCodegen {
     pub(super) fn emit_neon_binary_128(&mut self, dest_ptr: &Value, args: &[Operand], neon_inst: &str) {

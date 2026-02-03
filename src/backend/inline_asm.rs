@@ -11,7 +11,7 @@
 //! orchestrates the phases.
 
 use std::borrow::Cow;
-use crate::ir::ir::{BlockId, Operand, Value};
+use crate::ir::reexports::{BlockId, Operand, Value};
 use crate::common::types::{AddressSpace, IrType};
 pub use crate::common::asm_constraints::constraint_is_immediate_only;
 use super::state::CodegenState;

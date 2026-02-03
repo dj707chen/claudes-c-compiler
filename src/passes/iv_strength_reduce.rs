@@ -23,7 +23,7 @@
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::common::types::IrType;
 use crate::ir::analysis;
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrBinOp,
     IrConst,
@@ -660,7 +660,7 @@ fn is_loop_invariant(val_id: u32, loop_body: &FxHashSet<usize>, func: &IrFunctio
 mod tests {
     use super::*;
     use crate::common::types::{AddressSpace, IrType};
-    use crate::ir::ir::{BasicBlock, BlockId, IrCmpOp, Terminator};
+    use crate::ir::reexports::{BasicBlock, BlockId, IrCmpOp, Terminator};
 
     /// Test basic IV detection on a simple counting loop.
     #[test]

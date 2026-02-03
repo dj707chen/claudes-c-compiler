@@ -1,9 +1,9 @@
 //! ArmCodegen: 128-bit integer operations.
 
-use crate::ir::ir::{IrCmpOp, Operand, Value};
+use crate::ir::reexports::{IrCmpOp, Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::state::StackSlot;
-use super::codegen::ArmCodegen;
+use super::emit::ArmCodegen;
 
 impl ArmCodegen {
     pub(super) fn emit_load_acc_pair_impl(&mut self, op: &Operand) {

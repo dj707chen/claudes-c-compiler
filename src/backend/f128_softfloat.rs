@@ -24,7 +24,7 @@
 //! - **Comparison** (`f128_cmp`): F128 comparison via libcalls
 //! - **Negation** (`f128_neg`): sign bit flip
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     IrCmpOp,
     IrConst,
     Operand,

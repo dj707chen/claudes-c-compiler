@@ -1,9 +1,9 @@
 //! ArmCodegen: function call operations.
 
-use crate::ir::ir::{IrConst, Operand, Value};
+use crate::ir::reexports::{IrConst, Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::call_abi::{CallAbiConfig, CallArgClass, compute_stack_arg_space};
-use super::codegen::{ArmCodegen, callee_saved_name};
+use super::emit::{ArmCodegen, callee_saved_name};
 
 impl ArmCodegen {
     pub(super) fn call_abi_config_impl(&self) -> CallAbiConfig {
@@ -114,7 +114,7 @@ impl ArmCodegen {
                                     IrConst::LongDouble(_, f128_bytes) => *f128_bytes,
                                     _ => {
                                         let f64_val = c.to_f64().unwrap_or(0.0);
-                                        crate::ir::ir::f64_to_f128_bytes(f64_val)
+                                        crate::ir::reexports::f64_to_f128_bytes(f64_val)
                                     }
                                 };
                                 let lo = u64::from_le_bytes(bytes[0..8].try_into().unwrap());

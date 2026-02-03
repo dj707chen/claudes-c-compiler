@@ -1,8 +1,8 @@
 //! X86Codegen: return value operations.
 
-use crate::ir::ir::{IrConst, Operand, Value};
+use crate::ir::reexports::{IrConst, Operand, Value};
 use crate::common::types::IrType;
-use super::codegen::X86Codegen;
+use super::emit::X86Codegen;
 
 impl X86Codegen {
     pub(super) fn emit_return_impl(&mut self, val: Option<&Operand>, frame_size: i64) {

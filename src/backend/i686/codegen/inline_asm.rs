@@ -10,9 +10,9 @@
 use std::borrow::Cow;
 use std::fmt::Write;
 use crate::common::types::IrType;
-use crate::ir::ir::BlockId;
+use crate::ir::reexports::BlockId;
 use crate::backend::x86_common;
-use super::codegen::I686Codegen;
+use super::emit::I686Codegen;
 
 impl I686Codegen {
     /// Substitute %0, %1, %[name], %k0, %b1, %w2, %h3, %c0, %P0, %a0, %n0, %l[name] etc.

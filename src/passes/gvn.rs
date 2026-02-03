@@ -19,7 +19,7 @@
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::common::types::{AddressSpace, IrType};
-use crate::ir::ir::{
+use crate::ir::reexports::{
     ConstHashKey,
     Instruction,
     IrBinOp,
@@ -682,7 +682,7 @@ fn should_swap(lhs: &VNOperand, rhs: &VNOperand) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::ir::{BasicBlock, BlockId, CallInfo, IrConst, IrModule, Terminator};
+    use crate::ir::reexports::{BasicBlock, BlockId, CallInfo, IrConst, IrModule, Terminator};
 
     #[test]
     fn test_commutative_cse() {

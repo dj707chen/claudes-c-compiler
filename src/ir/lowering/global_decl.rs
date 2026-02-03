@@ -14,9 +14,9 @@ use crate::frontend::parser::ast::{
     Initializer,
     TypeSpecifier,
 };
-use crate::ir::ir::{GlobalInit, IrGlobal};
+use crate::ir::reexports::{GlobalInit, IrGlobal};
 use crate::common::types::{IrType, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 use super::definitions::{GlobalInfo, DeclAnalysis};
 
 enum RedeclResult {

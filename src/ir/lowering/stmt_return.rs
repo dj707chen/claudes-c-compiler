@@ -5,7 +5,7 @@
 //! and scalar-to-complex conversions. This module breaks that into focused helpers.
 
 use crate::frontend::parser::ast::{BinOp, Expr};
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrBinOp,
     IrConst,
@@ -13,7 +13,7 @@ use crate::ir::ir::{
     Value,
 };
 use crate::common::types::{AddressSpace, IrType, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Check if an expression is a BinaryOp with an arithmetic/bitwise operator.

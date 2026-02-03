@@ -18,7 +18,7 @@
 //! sizeof/alignof, binary operations with type inference) remain in the
 //! respective callers.
 
-use crate::ir::ir::IrConst;
+use crate::ir::reexports::IrConst;
 use crate::frontend::parser::ast::{BinOp, Expr};
 use super::const_arith;
 use super::types::target_is_32bit;

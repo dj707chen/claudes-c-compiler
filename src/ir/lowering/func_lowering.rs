@@ -21,7 +21,7 @@ use crate::frontend::parser::ast::{
     Stmt,
     TypeSpecifier,
 };
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrBinOp,
     IrConst,
@@ -32,7 +32,7 @@ use crate::ir::ir::{
     Value,
 };
 use crate::common::types::{AddressSpace, IrType, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 use super::definitions::{LocalInfo, VarInfo, FuncSig, IrParamBuildResult, ParamKind, VlaDimInfo};
 use super::func_state::FunctionBuildState;
 

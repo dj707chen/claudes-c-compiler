@@ -20,14 +20,14 @@ use crate::frontend::parser::ast::{
     Initializer,
     InitializerItem,
 };
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrConst,
     Operand,
     Value,
 };
 use crate::common::types::{AddressSpace, IrType, CType, StructLayout, StructFieldLayout, InitFieldResolution};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Recursively emit struct field initialization from an initializer list.

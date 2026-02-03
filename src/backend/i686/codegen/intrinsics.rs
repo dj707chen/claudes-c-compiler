@@ -9,14 +9,14 @@
 //! - Frame/return address intrinsics
 //! - x87 FPU math (sqrt, fabs) for F32/F64
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     IntrinsicOp,
     IrConst,
     Operand,
     Value,
 };
 use crate::emit;
-use super::codegen::I686Codegen;
+use super::emit::I686Codegen;
 
 impl I686Codegen {
     pub(super) fn emit_intrinsic_impl(&mut self, dest: &Option<Value>, op: &IntrinsicOp, dest_ptr: &Option<Value>, args: &[Operand]) {

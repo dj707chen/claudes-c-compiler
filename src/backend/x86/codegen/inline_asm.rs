@@ -8,9 +8,9 @@
 use std::borrow::Cow;
 use std::fmt::Write;
 use crate::common::types::IrType;
-use crate::ir::ir::BlockId;
+use crate::ir::reexports::BlockId;
 use crate::backend::x86_common;
-use super::codegen::X86Codegen;
+use super::emit::X86Codegen;
 
 impl X86Codegen {
     /// Substitute %0, %1, %[name], %k0, %b1, %w2, %q3, %h4, %c0, %P0, %a0, %n0, %l[name] etc.

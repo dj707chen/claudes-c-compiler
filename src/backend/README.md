@@ -117,7 +117,7 @@ pass pipeline:
 
 | File | Responsibility |
 |------|---------------|
-| `codegen.rs` | Struct definition, `ArchCodegen` impl, `delegate_to_impl!` |
+| `emit.rs` | Struct definition, `ArchCodegen` impl, `delegate_to_impl!` |
 | `alu.rs` | Integer arithmetic and bitwise operations |
 | `atomics.rs` | Atomic load/store/RMW/cmpxchg |
 | `calls.rs` | Function call emission, argument marshalling |

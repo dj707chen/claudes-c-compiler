@@ -8,7 +8,7 @@
 //! - Arithmetic conversion helpers: usual_arithmetic_conversions, promote_for_op, narrow_from_op
 
 use crate::frontend::parser::ast::{BinOp, Expr};
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrBinOp,
     IrConst,
@@ -16,7 +16,7 @@ use crate::ir::ir::{
     Value,
 };
 use crate::common::types::{AddressSpace, CType, IrType, widened_op_type};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     pub(super) fn lower_assign(&mut self, lhs: &Expr, rhs: &Expr) -> Operand {

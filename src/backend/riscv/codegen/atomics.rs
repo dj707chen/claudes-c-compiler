@@ -8,10 +8,10 @@
 //! zeros, count trailing zeros, byte swap, and population count for targets that
 //! lack the Zbb extension.
 
-use crate::ir::ir::{AtomicOrdering, AtomicRmwOp, Operand, Value};
+use crate::ir::reexports::{AtomicOrdering, AtomicRmwOp, Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::state::CodegenState;
-use super::codegen::RiscvCodegen;
+use super::emit::RiscvCodegen;
 
 impl RiscvCodegen {
     /// Get the AMO ordering suffix.

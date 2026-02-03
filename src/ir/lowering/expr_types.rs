@@ -15,9 +15,9 @@ use crate::frontend::parser::ast::{
     TypeSpecifier,
     UnaryOp,
 };
-use crate::ir::ir::IrConst;
+use crate::ir::reexports::IrConst;
 use crate::common::types::{AddressSpace, CType, IrType, target_int_ir_type};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 /// Promote small integer types to I32, matching C integer promotion rules.
 /// I8, U8, I16, U16 all promote to I32. All other types are returned unchanged.

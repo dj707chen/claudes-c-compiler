@@ -3,7 +3,7 @@
 //! Handles #pragma once, pack, push_macro/pop_macro, weak,
 //! redefine_extname, and GCC visibility directives.
 
-use super::preprocessor::Preprocessor;
+use super::pipeline::Preprocessor;
 
 impl Preprocessor {
     pub(super) fn handle_pragma(&mut self, rest: &str) -> Option<String> {

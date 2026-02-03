@@ -1,10 +1,10 @@
 //! ArmCodegen: prologue/epilogue and stack frame operations.
 
-use crate::ir::ir::{IrFunction, Value};
+use crate::ir::reexports::{IrFunction, Value};
 use crate::common::types::IrType;
 use crate::backend::generation::{calculate_stack_space_common, find_param_alloca};
 use crate::backend::call_abi::{ParamClass, classify_params};
-use super::codegen::{
+use super::emit::{
     ArmCodegen, callee_saved_name, ARM_CALLEE_SAVED, ARM_CALLER_SAVED, ARM_ARG_REGS,
 };
 
@@ -12,7 +12,7 @@ impl ArmCodegen {
     // ---- calculate_stack_space ----
 
     pub(super) fn calculate_stack_space_impl(&mut self, func: &IrFunction) -> i64 {
-        use crate::ir::ir::Instruction;
+        use crate::ir::reexports::Instruction;
         use crate::backend::regalloc::PhysReg;
 
         let mut asm_clobbered_regs: Vec<PhysReg> = Vec::new();

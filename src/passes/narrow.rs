@@ -28,7 +28,7 @@
 //! the same type can be narrowed, since sign/zero extension preserves
 //! the ordering of values.
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrBinOp,
     IrCmpOp,
@@ -618,7 +618,7 @@ fn try_narrow_const_for_cmp(c: &IrConst, target_ty: IrType) -> Option<IrConst> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::ir::{BasicBlock, BlockId, Terminator, Value};
+    use crate::ir::reexports::{BasicBlock, BlockId, Terminator, Value};
 
     fn make_func_with_blocks(blocks: Vec<BasicBlock>) -> IrFunction {
         let mut func = IrFunction::new("test".to_string(), IrType::I32, vec![], false);

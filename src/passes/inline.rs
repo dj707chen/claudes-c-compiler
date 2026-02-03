@@ -9,7 +9,7 @@
 //! After inlining, subsequent passes (constant fold, DCE, CFG simplify) clean up
 //! the inlined code and eliminate dead branches.
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BasicBlock, BlockId, CallInfo, GlobalInit, IrFunction, IrModule, Instruction, Operand,
     Terminator, Value, IrConst, IrBinOp,
 };

@@ -1,9 +1,9 @@
 //! RiscvCodegen: 128-bit integer operations.
 
-use crate::ir::ir::{IrCmpOp, Operand, Value};
+use crate::ir::reexports::{IrCmpOp, Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::state::StackSlot;
-use super::codegen::RiscvCodegen;
+use super::emit::RiscvCodegen;
 
 impl RiscvCodegen {
     // ---- i128 acc pair primitives ----

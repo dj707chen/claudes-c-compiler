@@ -15,7 +15,7 @@
 //! so the backend can emit correct symbol references in inline assembly.
 
 use crate::common::fx_hash::FxHashMap;
-use crate::ir::ir::{IrFunction, IrModule, Instruction, Operand, Value};
+use crate::ir::reexports::{IrFunction, IrModule, Instruction, Operand, Value};
 
 /// Resolve InlineAsm input symbols across all functions in the module.
 pub(crate) fn resolve_inline_asm_symbols(module: &mut IrModule) {
@@ -47,7 +47,7 @@ fn resolve_in_function(func: &mut IrFunction) {
                 Instruction::GetElementPtr { dest, base, offset, .. } => {
                     value_defs.insert(dest.0, DefInfo::Gep(*base, *offset));
                 }
-                Instruction::BinOp { dest, op: crate::ir::ir::IrBinOp::Add, lhs, rhs, .. } => {
+                Instruction::BinOp { dest, op: crate::ir::reexports::IrBinOp::Add, lhs, rhs, .. } => {
                     value_defs.insert(dest.0, DefInfo::Add(*lhs, *rhs));
                 }
                 Instruction::Cast { dest, src, .. } => {

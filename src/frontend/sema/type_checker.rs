@@ -31,7 +31,7 @@ use crate::frontend::parser::ast::{
     UnaryOp,
 };
 use super::type_context::TypeContext;
-use super::sema::FunctionInfo;
+use super::analysis::FunctionInfo;
 
 /// Determine the C type of an enum constant value, following GCC's promotion rules.
 /// GCC uses the progression: int -> unsigned int -> long long -> unsigned long long.

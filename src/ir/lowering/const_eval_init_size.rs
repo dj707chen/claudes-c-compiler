@@ -14,7 +14,7 @@ use crate::frontend::parser::ast::{
     InitializerItem,
 };
 use crate::common::types::{CType, IrType, StructLayout};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Compute the effective array size from an initializer list with potential designators.

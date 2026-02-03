@@ -1,8 +1,8 @@
 //! X86Codegen: comparison and select operations.
 
-use crate::ir::ir::{BlockId, IrCmpOp, IrConst, Operand, Value};
+use crate::ir::reexports::{BlockId, IrCmpOp, IrConst, Operand, Value};
 use crate::common::types::IrType;
-use super::codegen::{X86Codegen, phys_reg_name};
+use super::emit::{X86Codegen, phys_reg_name};
 
 impl X86Codegen {
     pub(super) fn emit_float_cmp_impl(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {

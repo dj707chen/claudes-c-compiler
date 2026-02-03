@@ -6,10 +6,10 @@
 //! atomic exclusive access instructions (ldxr/stxr) and atomic RMW operations.
 
 use std::fmt::Write;
-use crate::ir::ir::{AtomicOrdering, AtomicRmwOp};
+use crate::ir::reexports::{AtomicOrdering, AtomicRmwOp};
 use crate::common::types::IrType;
 use crate::backend::state::CodegenState;
-use super::codegen::ArmCodegen;
+use super::emit::ArmCodegen;
 
 impl ArmCodegen {
     pub(super) fn substitute_asm_operands_static(

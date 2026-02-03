@@ -20,7 +20,7 @@ use crate::frontend::parser::ast::{
     InitializerItem,
     TypeSpecifier,
 };
-use crate::ir::ir::{GlobalInit, IrConst, IrGlobal};
+use crate::ir::reexports::{GlobalInit, IrConst, IrGlobal};
 
 /// Kind of string literal for extract_string_literal helper.
 enum StringLitKind {
@@ -29,7 +29,7 @@ enum StringLitKind {
     Char16,
 }
 use crate::common::types::{IrType, StructLayout, RcLayout, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 use super::global_init_helpers as h;
 
 // =============================================================================

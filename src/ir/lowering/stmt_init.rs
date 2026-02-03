@@ -15,14 +15,14 @@ use crate::frontend::parser::ast::{
     ParamDecl,
     TypeSpecifier,
 };
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrConst,
     Operand,
     Value,
 };
 use crate::common::types::{AddressSpace, IrType, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 use super::definitions::{GlobalInfo, DeclAnalysis, FuncSig};
 
 impl Lowerer {

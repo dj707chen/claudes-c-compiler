@@ -2,8 +2,6 @@
 // Compiler functions naturally accumulate parameters (context, types, spans, flags).
 // Refactoring every one into a struct would add boilerplate without improving clarity.
 #![allow(clippy::too_many_arguments)]
-// We use mod.rs files that re-export from a same-named child module for organization.
-#![allow(clippy::module_inception)]
 // Intentional: separate branches for different semantic conditions that happen to
 // produce the same code today. Merging them would lose the conceptual distinction.
 #![allow(clippy::if_same_then_else)]

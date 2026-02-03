@@ -12,7 +12,7 @@ use crate::frontend::parser::ast::{
     TypeSpecifier,
 };
 use crate::common::types::{IrType, StructField, StructLayout, RcLayout, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
 

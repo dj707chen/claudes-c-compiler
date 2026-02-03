@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use super::macro_defs::MacroDef;
-use super::preprocessor::Preprocessor;
+use super::pipeline::Preprocessor;
 
 impl Preprocessor {
     /// Define standard predefined macros.

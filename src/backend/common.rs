@@ -11,7 +11,7 @@
 //! - Extra assembler/linker flags
 
 use std::process::Command;
-use crate::ir::ir::{
+use crate::ir::reexports::{
     GlobalInit,
     IrConst,
     IrGlobal,

@@ -1,9 +1,9 @@
 //! RiscvCodegen: type conversion/casting operations.
 
-use crate::ir::ir::{Operand, Value};
+use crate::ir::reexports::{Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::cast::{CastKind, classify_cast};
-use super::codegen::RiscvCodegen;
+use super::emit::RiscvCodegen;
 
 impl RiscvCodegen {
     pub(super) fn emit_cast_instrs_impl(&mut self, from_ty: IrType, to_ty: IrType) {

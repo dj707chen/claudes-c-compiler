@@ -74,7 +74,7 @@ tokenized. It also populates side-channel data:
 
 ### Files
 
-`preprocessor.rs`, `macro_defs.rs`, `conditionals.rs`, `expr_eval.rs`,
+`pipeline.rs`, `macro_defs.rs`, `conditionals.rs`, `expr_eval.rs`,
 `includes.rs`, `builtin_macros.rs`, `predefined_macros.rs`, `pragmas.rs`,
 `text_processing.rs`, `utils.rs`.
 
@@ -120,7 +120,7 @@ a byte slice without rejecting arbitrary source files.
 
 ### Files
 
-`lexer.rs`, `token.rs`.
+`scan.rs`, `token.rs`.
 
 For detailed per-file documentation, see [lexer/README.md](lexer/README.md).
 
@@ -143,7 +143,7 @@ stream and produces a typed AST rooted at `TranslationUnit`.
 
 ### Internal organization
 
-The parser is split across six `impl Parser` blocks: the core in `parser.rs`
+The parser is split across six `impl Parser` blocks: the core in `parse.rs`
 and five extension files, each extending the same `Parser` struct with
 `pub(super)` methods:
 
@@ -176,7 +176,7 @@ as `Option<String>` or `Option<usize>`.
 
 ### Files
 
-`parser.rs`, `expressions.rs`, `types.rs`, `statements.rs`, `declarations.rs`,
+`parse.rs`, `expressions.rs`, `types.rs`, `statements.rs`, `declarations.rs`,
 `declarators.rs`, `ast.rs`.
 
 For detailed per-file documentation, see [parser/README.md](parser/README.md).
@@ -226,7 +226,7 @@ and the lowerer. It holds:
 
 ### Files
 
-`sema.rs`, `builtins.rs`, `type_context.rs`, `type_checker.rs`, `const_eval.rs`.
+`analysis.rs`, `builtins.rs`, `type_context.rs`, `type_checker.rs`, `const_eval.rs`.
 
 For detailed per-file documentation, see [sema/README.md](sema/README.md).
 

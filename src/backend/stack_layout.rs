@@ -24,7 +24,7 @@
 //! - `filter_available_regs`: callee-saved register filtering
 //! - `find_param_alloca`: parameter alloca lookup
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrConst,
     IrFunction,

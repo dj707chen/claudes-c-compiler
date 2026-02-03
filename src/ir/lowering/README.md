@@ -10,7 +10,7 @@ handles every C language construct. The `mem2reg` pass later promotes allocas to
 | `definitions.rs` | Shared data structures: `VarInfo`, `LocalInfo`, `GlobalInfo`, `DeclAnalysis`, `LValue`, `SwitchFrame`, `FuncSig`, `FunctionMeta`, `ParamKind`, `IrParamBuildResult` |
 | `func_state.rs` | `FunctionBuildState` (per-function build state) and `FuncScopeFrame` (undo-log scope tracking for locals/statics/consts) |
 | `func_lowering.rs` | Function lowering pipeline orchestration |
-| `lowering.rs` | `Lowerer` struct, `lower()` entry point, `DeclAnalysis` computation, IR emission helpers |
+| `lower.rs` | `Lowerer` struct, `lower()` entry point, `DeclAnalysis` computation, IR emission helpers |
 | `stmt.rs` | Statement lowering: thin `lower_stmt` dispatcher delegates to per-statement helpers |
 | `stmt_init.rs` | Local variable init helpers: expr-init, list-init, extern/func-decl handling, array init dispatch |
 | `stmt_return.rs` | Return statement: sret, two-reg struct, complex decomposition, scalar returns |

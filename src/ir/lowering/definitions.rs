@@ -6,7 +6,7 @@
 //! metadata, and typedef helpers.
 
 use crate::common::fx_hash::FxHashMap;
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BlockId,
     GlobalInit,
     IrConst,

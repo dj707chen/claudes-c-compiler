@@ -8,7 +8,7 @@
 //! lowering) are responsible for determining width/signedness from their own
 //! type systems (CType vs IrType) before calling these shared functions.
 
-use crate::ir::ir::IrConst;
+use crate::ir::reexports::IrConst;
 use crate::frontend::parser::ast::BinOp;
 
 // === Low-level arithmetic primitives ===

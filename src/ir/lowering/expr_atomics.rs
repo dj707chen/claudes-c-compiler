@@ -10,7 +10,7 @@
 //! - Helper: parse_ordering, emit_post_rmw_compute, emit_atomic_xchg, etc.
 
 use crate::frontend::parser::ast::Expr;
-use crate::ir::ir::{
+use crate::ir::reexports::{
     AtomicOrdering,
     AtomicRmwOp,
     Instruction,
@@ -22,7 +22,7 @@ use crate::ir::ir::{
     Value,
 };
 use crate::common::types::{AddressSpace, IrType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Try to lower a GCC atomic builtin (__atomic_* or __sync_*).

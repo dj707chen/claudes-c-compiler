@@ -11,13 +11,13 @@
 //! - Frame/return address intrinsics
 //! - SSE scalar float math (sqrt, fabs) for F32/F64
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     IntrinsicOp,
     IrConst,
     Operand,
     Value,
 };
-use super::codegen::X86Codegen;
+use super::emit::X86Codegen;
 
 impl X86Codegen {
     /// Load a float operand into %xmm0. Handles both Value operands (from stack)

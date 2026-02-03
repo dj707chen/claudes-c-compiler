@@ -16,9 +16,9 @@ use crate::frontend::parser::ast::{
     Initializer,
     InitializerItem,
 };
-use crate::ir::ir::{GlobalInit};
+use crate::ir::reexports::{GlobalInit};
 use crate::common::types::{AddressSpace, IrType, CType, InitFieldResolution};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 use super::global_init_helpers as h;
 
 impl Lowerer {

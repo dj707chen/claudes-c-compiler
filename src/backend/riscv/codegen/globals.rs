@@ -1,7 +1,7 @@
 //! RiscvCodegen: global address loading, PIC-relative.
 
-use crate::ir::ir::Value;
-use super::codegen::RiscvCodegen;
+use crate::ir::reexports::Value;
+use super::emit::RiscvCodegen;
 
 impl RiscvCodegen {
     pub(super) fn emit_global_addr_impl(&mut self, dest: &Value, name: &str) {

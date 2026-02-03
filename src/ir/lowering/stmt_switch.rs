@@ -6,7 +6,7 @@
 //! for GNU case ranges).
 
 use crate::frontend::parser::ast::{Expr, Stmt};
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BlockId,
     Instruction,
     IrCmpOp,
@@ -16,7 +16,7 @@ use crate::ir::ir::{
     Value,
 };
 use crate::common::types::{AddressSpace, IrType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 use super::definitions::SwitchFrame;
 
 impl Lowerer {
@@ -168,7 +168,7 @@ impl Lowerer {
             let and_result = self.fresh_value();
             self.emit(Instruction::BinOp {
                 dest: and_result,
-                op: crate::ir::ir::IrBinOp::And,
+                op: crate::ir::reexports::IrBinOp::And,
                 lhs: Operand::Value(ge_result),
                 rhs: Operand::Value(le_result),
                 ty: IrType::I32,

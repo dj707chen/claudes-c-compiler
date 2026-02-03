@@ -6,7 +6,7 @@
 
 use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
-use super::parser::Parser;
+use super::parse::Parser;
 
 impl Parser {
     pub(super) fn parse_compound_stmt(&mut self) -> CompoundStmt {

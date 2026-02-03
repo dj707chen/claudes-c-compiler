@@ -10,14 +10,14 @@
 //! - Goto label resolution
 
 use crate::frontend::parser::ast::{AsmOperand, Expr};
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BlockId,
     Instruction,
     Operand,
     Value,
 };
 use crate::common::types::{AddressSpace, IrType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 use super::definitions::LValue;
 use crate::backend::inline_asm::{constraint_has_immediate_alt, constraint_is_memory_only, constraint_needs_address};
 
@@ -484,7 +484,7 @@ impl Lowerer {
     /// using the global address expression evaluator. Returns strings like
     /// `"boot_cpu_data"` or `"boot_cpu_data+9"`.
     fn extract_symbol_from_global_addr_expr(&self, expr: &Expr) -> Option<String> {
-        use crate::ir::ir::GlobalInit;
+        use crate::ir::reexports::GlobalInit;
         let init = self.eval_global_addr_expr(expr)?;
         match init {
             GlobalInit::GlobalAddr(name) => Some(name),

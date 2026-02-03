@@ -17,11 +17,11 @@ use crate::frontend::parser::ast::{
     TypeSpecifier,
     UnaryOp,
 };
-use crate::ir::ir::{GlobalInit, IrConst};
+use crate::ir::reexports::{GlobalInit, IrConst};
 use crate::common::types::{CType, IrType};
 use crate::common::const_arith;
 use crate::common::const_eval as shared_const_eval;
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Look up a pre-computed constant value from sema's ConstMap.

@@ -1,8 +1,8 @@
 //! ArmCodegen: comparison operations.
 
-use crate::ir::ir::{IrCmpOp, Operand, Value};
+use crate::ir::reexports::{IrCmpOp, Operand, Value};
 use crate::common::types::IrType;
-use super::codegen::{ArmCodegen, arm_int_cond_code, arm_invert_cond_code};
+use super::emit::{ArmCodegen, arm_int_cond_code, arm_invert_cond_code};
 
 impl ArmCodegen {
     pub(super) fn emit_float_cmp_impl(&mut self, dest: &Value, op: IrCmpOp, lhs: &Operand, rhs: &Operand, ty: IrType) {

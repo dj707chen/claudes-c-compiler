@@ -7,8 +7,7 @@
 // - instruction: Instruction, Terminator, BasicBlock, BlockId, Value, Operand, CallInfo
 // - module: IrModule, IrFunction, IrParam, IrGlobal, GlobalInit
 //
-// All types are re-exported here so existing `use crate::ir::ir::*` imports
-// continue to work unchanged.
+// All types are re-exported here so `use crate::ir::reexports::*` imports work.
 pub use super::constants::*;
 pub use super::ops::*;
 pub use super::intrinsics::*;

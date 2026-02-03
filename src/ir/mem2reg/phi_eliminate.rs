@@ -36,7 +36,7 @@
 //! the phi copies and branches unconditionally to the target.
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BasicBlock,
     BlockId,
     Instruction,

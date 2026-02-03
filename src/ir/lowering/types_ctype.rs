@@ -14,7 +14,7 @@ use crate::frontend::parser::ast::{
     TypeSpecifier,
 };
 use crate::common::types::{AddressSpace, StructField, StructLayout, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Convert a CType back to a TypeSpecifier (for typeof and __auto_type resolution).

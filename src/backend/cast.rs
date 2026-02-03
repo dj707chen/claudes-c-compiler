@@ -7,7 +7,7 @@
 //! mapping for F128 soft-float arithmetic and comparisons (ARM, RISC-V).
 
 use crate::common::types::IrType;
-use crate::ir::ir::{IrBinOp, IrCmpOp, IrConst, Operand};
+use crate::ir::reexports::{IrBinOp, IrCmpOp, IrConst, Operand};
 
 /// Classification of type casts. All four backends use the same control flow
 /// to decide which kind of cast to emit; only the actual instructions differ.

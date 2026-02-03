@@ -8,12 +8,12 @@
 //! mnemonics, S0-relative addressing). The shared orchestration logic lives
 //! in `backend/f128_softfloat.rs`.
 
-use crate::ir::ir::{Operand, Value};
+use crate::ir::reexports::{Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::state::{StackSlot, SlotAddr};
 use crate::backend::traits::ArchCodegen;
 use crate::backend::f128_softfloat::F128SoftFloat;
-use super::codegen::{RiscvCodegen, callee_saved_name};
+use super::emit::{RiscvCodegen, callee_saved_name};
 
 impl F128SoftFloat for RiscvCodegen {
     fn state(&mut self) -> &mut crate::backend::state::CodegenState {

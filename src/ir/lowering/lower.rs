@@ -27,7 +27,7 @@ use crate::frontend::parser::ast::{
     TypeSpecifier,
 };
 use crate::frontend::sema::{FunctionInfo, ExprTypeMap, ConstMap};
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BasicBlock,
     BlockId,
     CallInfo,

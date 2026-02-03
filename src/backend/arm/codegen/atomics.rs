@@ -1,8 +1,8 @@
 //! ArmCodegen: atomic operations.
 
-use crate::ir::ir::{AtomicOrdering, AtomicRmwOp, Operand, Value};
+use crate::ir::reexports::{AtomicOrdering, AtomicRmwOp, Operand, Value};
 use crate::common::types::IrType;
-use super::codegen::ArmCodegen;
+use super::emit::ArmCodegen;
 
 impl ArmCodegen {
     pub(super) fn emit_atomic_rmw_impl(&mut self, dest: &Value, op: AtomicRmwOp, ptr: &Operand, val: &Operand, ty: IrType, ordering: AtomicOrdering) {

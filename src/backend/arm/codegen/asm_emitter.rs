@@ -1,7 +1,7 @@
 //! AArch64 InlineAsmEmitter implementation: constraint classification, scratch
 //! register allocation, operand loading/storing, and template substitution.
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BlockId,
     IrConst,
     Operand,
@@ -11,7 +11,7 @@ use crate::common::types::IrType;
 use crate::backend::state::CodegenState;
 use crate::backend::inline_asm::{InlineAsmEmitter, AsmOperandKind, AsmOperand};
 use crate::backend::regalloc::PhysReg;
-use super::codegen::{ArmCodegen, is_arm_fp_reg};
+use super::emit::{ArmCodegen, is_arm_fp_reg};
 
 /// AArch64 scratch registers for inline asm (caller-saved temporaries).
 pub(super) const ARM_GP_SCRATCH: &[&str] = &["x9", "x10", "x11", "x12", "x13", "x14", "x15", "x19", "x20", "x21"];

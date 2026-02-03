@@ -296,7 +296,7 @@ typically branch to a single logical target at a time.
 | File | Purpose |
 |------|---------|
 | `mod.rs` | Module declaration and public re-exports of `promote_allocas`, `promote_allocas_with_params`, and `eliminate_phis`. |
-| `mem2reg.rs` | SSA construction: alloca identification, phi insertion via iterated dominance frontiers, and variable renaming via dominator-tree DFS. |
+| `promote.rs` | SSA construction: alloca identification, phi insertion via iterated dominance frontiers, and variable renaming via dominator-tree DFS. |
 | `phi_eliminate.rs` | Phi elimination: conflict detection, two-phase copy emission, critical edge splitting via trampoline blocks, and final IR rewriting. |
 
 Both passes depend on shared infrastructure in `ir::analysis` for CFG construction,

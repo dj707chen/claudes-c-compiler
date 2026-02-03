@@ -11,7 +11,7 @@ use crate::frontend::parser::ast::{
     Stmt,
     TypeSpecifier,
 };
-use crate::ir::ir::{
+use crate::ir::reexports::{
     GlobalInit,
     Instruction,
     IrBinOp,
@@ -22,7 +22,7 @@ use crate::ir::ir::{
     Value,
 };
 use crate::common::types::{AddressSpace, IrType, CType, StructLayout, target_int_ir_type};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 use super::definitions::{LocalInfo, GlobalInfo, DeclAnalysis, FuncSig};
 use crate::frontend::sema::type_context::extract_fptr_typedef_info;
 

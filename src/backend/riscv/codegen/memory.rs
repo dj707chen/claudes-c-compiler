@@ -1,9 +1,9 @@
 //! RiscvCodegen: memory operations (load, store, memcpy, GEP, stack).
 
-use crate::ir::ir::{Operand, Value};
+use crate::ir::reexports::{Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::state::{StackSlot, SlotAddr};
-use super::codegen::{RiscvCodegen, callee_saved_name};
+use super::emit::{RiscvCodegen, callee_saved_name};
 
 impl RiscvCodegen {
     // ---- Store/Load overrides ----

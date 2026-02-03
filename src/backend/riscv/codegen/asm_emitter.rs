@@ -1,7 +1,7 @@
 //! RISC-V InlineAsmEmitter implementation: constraint classification, scratch
 //! register allocation, operand loading/storing, and template substitution.
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BlockId,
     IrConst,
     Operand,
@@ -10,7 +10,7 @@ use crate::ir::ir::{
 use crate::common::types::IrType;
 use crate::backend::state::CodegenState;
 use crate::backend::inline_asm::{InlineAsmEmitter, AsmOperandKind, AsmOperand};
-use super::codegen::RiscvCodegen;
+use super::emit::RiscvCodegen;
 use super::inline_asm::{RvConstraintKind, classify_rv_constraint};
 
 /// RISC-V scratch registers for inline asm.
@@ -107,7 +107,7 @@ impl InlineAsmEmitter for RiscvCodegen {
                 // stack (which may be stale for register-allocated values).
                 if let Some(&phys) = self.reg_assignments.get(&v.0) {
                     let tmp_reg = self.assign_scratch_reg(&AsmOperandKind::GpReg, excluded);
-                    let src_name = super::codegen::callee_saved_name(phys);
+                    let src_name = super::emit::callee_saved_name(phys);
                     self.state.emit_fmt(format_args!("    mv {}, {}", tmp_reg, src_name));
                     op.mem_addr = format!("0({})", tmp_reg);
                     return true;
@@ -204,7 +204,7 @@ impl InlineAsmEmitter for RiscvCodegen {
                 // register-allocated (e.g., "+A" for AMO instructions).
                 if !self.state.is_alloca(v.0) && !is_fp {
                     if let Some(&phys) = self.reg_assignments.get(&v.0) {
-                        let src_name = super::codegen::callee_saved_name(phys);
+                        let src_name = super::emit::callee_saved_name(phys);
                         self.state.emit_fmt(format_args!("    mv {}, {}", reg, src_name));
                         return;
                     }
@@ -244,7 +244,7 @@ impl InlineAsmEmitter for RiscvCodegen {
                     } else {
                         // Non-alloca: pointer may live in a register
                         if let Some(&phys) = self.reg_assignments.get(&ptr.0) {
-                            let src = super::codegen::callee_saved_name(phys);
+                            let src = super::emit::callee_saved_name(phys);
                             self.state.emit_fmt(format_args!("    mv {}, {}", reg, src));
                         } else {
                             self.emit_load_from_s0(&reg, slot.0, "ld");
@@ -264,7 +264,7 @@ impl InlineAsmEmitter for RiscvCodegen {
         } else if let Some(&phys) = self.reg_assignments.get(&ptr.0) {
             // No stack slot (copy-alias eliminated), but value lives in a
             // callee-saved register.  Load it into the operand register.
-            let src = super::codegen::callee_saved_name(phys);
+            let src = super::emit::callee_saved_name(phys);
             self.state.emit_fmt(format_args!("    mv {}, {}", reg, src));
         }
     }
@@ -321,7 +321,7 @@ impl InlineAsmEmitter for RiscvCodegen {
                         .find(|&&c| !all_output_regs.contains(&c))
                         .copied()
                         .unwrap_or("t0");
-                    let src_name = super::codegen::callee_saved_name(phys);
+                    let src_name = super::emit::callee_saved_name(phys);
                     self.state.emit_fmt(format_args!("    mv {}, {}", scratch, src_name));
                     self.state.emit_fmt(format_args!("    {} {}, 0({})", store_op, reg, scratch));
                 } else if let Some(slot) = slot {
@@ -351,7 +351,7 @@ impl InlineAsmEmitter for RiscvCodegen {
                         .find(|&&c| !all_output_regs.contains(&c) && c != reg.as_str())
                         .copied()
                         .unwrap_or(if reg != "t0" { "t0" } else { "t1" });
-                    let src_name = super::codegen::callee_saved_name(phys);
+                    let src_name = super::emit::callee_saved_name(phys);
                     self.state.emit_fmt(format_args!("    mv {}, {}", scratch, src_name));
                     self.state.emit_fmt(format_args!("    sd {}, 0({})", reg, scratch));
                 } else if let Some(slot) = slot {

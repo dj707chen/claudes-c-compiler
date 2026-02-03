@@ -34,7 +34,7 @@
 //!   `x % -C == x % C` (in C, the sign of the remainder follows the dividend).
 
 use crate::common::types::IrType;
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrBinOp,
     IrConst,

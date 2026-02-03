@@ -62,7 +62,7 @@
 //! - select Const(nonzero), a, b => a (constant true condition)
 
 use crate::common::types::IrType;
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IntrinsicOp,
     IrBinOp,
@@ -1617,7 +1617,7 @@ fn simplify_math_call(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::ir::CallInfo;
+    use crate::ir::reexports::CallInfo;
 
     // === Test helpers ===
 

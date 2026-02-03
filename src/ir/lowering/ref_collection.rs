@@ -20,7 +20,7 @@ use crate::frontend::parser::ast::{
     Stmt,
     TranslationUnit,
 };
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Returns true if a function definition can be skipped when unreferenced.

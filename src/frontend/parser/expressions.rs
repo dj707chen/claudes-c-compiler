@@ -14,7 +14,7 @@
 
 use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
-use super::parser::Parser;
+use super::parse::Parser;
 
 /// C operator precedence levels (loosest to tightest binding).
 /// Used by the table-driven binary expression parser.

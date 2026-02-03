@@ -11,10 +11,10 @@
 //! emit_load_operand path that assumes values fit in a single register.
 
 use crate::backend::traits::ArchCodegen;
-use crate::ir::ir::{Operand, Value};
+use crate::ir::reexports::{Operand, Value};
 use crate::common::types::IrType;
 use crate::emit;
-use super::codegen::I686Codegen;
+use super::emit::I686Codegen;
 
 impl I686Codegen {
     /// Override emit_cast to handle F64 source/destination specially on i686.

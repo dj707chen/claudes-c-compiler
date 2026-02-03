@@ -5,7 +5,7 @@
 //! balancing checks, and directive line splitting.
 
 use super::utils::{skip_literal_bytes, copy_literal_bytes_raw};
-use super::preprocessor::Preprocessor;
+use super::pipeline::Preprocessor;
 
 /// Mapping from output line numbers to original source line numbers.
 ///

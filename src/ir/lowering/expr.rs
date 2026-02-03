@@ -14,7 +14,7 @@ use crate::frontend::parser::ast::{
     Expr,
     UnaryOp,
 };
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrBinOp,
     IrCmpOp,
@@ -23,7 +23,7 @@ use crate::ir::ir::{
     Value,
 };
 use crate::common::types::{AddressSpace, IrType, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 use super::definitions::GlobalInfo;
 
 impl Lowerer {

@@ -25,7 +25,7 @@
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use crate::common::types::IrType;
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrConst,
     IrFunction,

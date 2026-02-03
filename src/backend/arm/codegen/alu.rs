@@ -1,8 +1,8 @@
 //! ArmCodegen: ALU operations (integer arithmetic, bitwise, unary).
 
-use crate::ir::ir::{IrBinOp, Operand, Value};
+use crate::ir::reexports::{IrBinOp, Operand, Value};
 use crate::common::types::IrType;
-use super::codegen::{ArmCodegen, callee_saved_name, callee_saved_name_32, arm_alu_mnemonic};
+use super::emit::{ArmCodegen, callee_saved_name, callee_saved_name_32, arm_alu_mnemonic};
 
 impl ArmCodegen {
     pub(super) fn emit_float_neg_impl(&mut self, ty: IrType) {

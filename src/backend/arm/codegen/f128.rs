@@ -14,12 +14,12 @@
 //! - f128_load_sources tracks which alloca/offset each F128 value was loaded
 //!   from, enabling full-precision reloads for comparisons and casts.
 
-use crate::ir::ir::{Operand, Value};
+use crate::ir::reexports::{Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::state::{StackSlot, SlotAddr};
 use crate::backend::traits::ArchCodegen;
 use crate::backend::f128_softfloat::F128SoftFloat;
-use super::codegen::{ArmCodegen, callee_saved_name};
+use super::emit::{ArmCodegen, callee_saved_name};
 
 impl F128SoftFloat for ArmCodegen {
     fn state(&mut self) -> &mut crate::backend::state::CodegenState {

@@ -33,7 +33,7 @@
 //! or memory operations). This ensures the Select semantics (evaluate both
 //! operands) match the original branch semantics.
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BasicBlock,
     BlockId,
     Instruction,
@@ -659,7 +659,7 @@ fn apply_diamond(func: &mut IrFunction, diamond: &DiamondInfo) -> bool {
 mod tests {
     use super::*;
     use crate::common::types::AddressSpace;
-    use crate::ir::ir::{IrBinOp, IrConst};
+    use crate::ir::reexports::{IrBinOp, IrConst};
 
     #[test]
     fn test_simple_diamond_conversion() {

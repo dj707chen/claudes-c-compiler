@@ -1,9 +1,9 @@
 //! ArmCodegen: cast operations.
 
-use crate::ir::ir::{Operand, Value};
+use crate::ir::reexports::{Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::cast::{CastKind, classify_cast};
-use super::codegen::ArmCodegen;
+use super::emit::ArmCodegen;
 
 impl ArmCodegen {
     pub(super) fn emit_cast_instrs_impl(&mut self, from_ty: IrType, to_ty: IrType) {

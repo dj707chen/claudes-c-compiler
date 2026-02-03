@@ -4,7 +4,7 @@
 //! replacing the instruction with the computed constant. This eliminates
 //! redundant computation and enables further optimizations (DCE, etc.).
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrBinOp,
     IrCmpOp,

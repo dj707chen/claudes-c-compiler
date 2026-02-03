@@ -1,8 +1,8 @@
 //! RiscvCodegen: comparisons, fused cmp+branch, select.
 
-use crate::ir::ir::{IrCmpOp, Operand, Value};
+use crate::ir::reexports::{IrCmpOp, Operand, Value};
 use crate::common::types::IrType;
-use super::codegen::RiscvCodegen;
+use super::emit::RiscvCodegen;
 
 impl RiscvCodegen {
     // ---- Float comparison ----

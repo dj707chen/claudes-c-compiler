@@ -3,11 +3,11 @@
 //! Functions for loading/storing F128 values, converting between x87 80-bit
 //! extended precision and other types, and emitting x86-specific cast instructions.
 
-use crate::ir::ir::{IrConst, Operand, Value};
+use crate::ir::reexports::{IrConst, Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::cast::{CastKind, classify_cast};
 use crate::backend::traits::ArchCodegen;
-use super::codegen::X86Codegen;
+use super::emit::X86Codegen;
 
 impl X86Codegen {
     /// Prepare %rcx to point at a SlotAddr, applying the given byte offset.

@@ -1,10 +1,10 @@
 //! X86Codegen: function call operations.
 
-use crate::ir::ir::{IrConst, Operand, Value};
+use crate::ir::reexports::{IrConst, Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::call_abi::{CallAbiConfig, CallArgClass, compute_stack_push_bytes};
 use crate::backend::generation::is_i128_type;
-use super::codegen::{X86Codegen, X86_ARG_REGS};
+use super::emit::{X86Codegen, X86_ARG_REGS};
 
 impl X86Codegen {
     pub(super) fn call_abi_config_impl(&self) -> CallAbiConfig {
@@ -48,7 +48,7 @@ impl X86Codegen {
                                 }
                                 _ => {
                                     let f64_val = c.to_f64().unwrap_or(0.0);
-                                    crate::ir::ir::f64_to_x87_bytes(f64_val)
+                                    crate::ir::reexports::f64_to_x87_bytes(f64_val)
                                 }
                             };
                             let lo = u64::from_le_bytes(x87_bytes[0..8].try_into().unwrap());

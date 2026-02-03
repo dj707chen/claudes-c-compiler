@@ -1,8 +1,8 @@
 //! X86Codegen: global address, label address, TLS global address operations.
 
-use crate::ir::ir::{Operand, Value};
+use crate::ir::reexports::{Operand, Value};
 use crate::common::types::IrType;
-use super::codegen::X86Codegen;
+use super::emit::X86Codegen;
 
 impl X86Codegen {
     pub(super) fn emit_global_addr_impl(&mut self, dest: &Value, name: &str) {

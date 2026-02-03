@@ -12,7 +12,7 @@ use crate::common::source::Span;
 use crate::common::types::AddressSpace;
 use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
-use super::parser::{ModeKind, ParsedDeclAttrs, Parser};
+use super::parse::{ModeKind, ParsedDeclAttrs, Parser};
 
 /// Context for declaration-level attributes that flow from `parse_external_decl`
 /// into `parse_declaration_rest` and `parse_function_def`.

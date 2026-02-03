@@ -26,7 +26,7 @@
 //! folding, DCE, and CFG simplification clean up the dead code.
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
-use crate::ir::ir::{IrConst, IrModule, Instruction, Operand, Terminator};
+use crate::ir::reexports::{IrConst, IrModule, Instruction, Operand, Terminator};
 
 /// Run interprocedural constant propagation on the module.
 ///
@@ -206,7 +206,7 @@ fn find_constant_return_functions(module: &IrModule) -> FxHashMap<String, IrCons
 /// no inline asm, no atomics, etc. This is intentionally conservative: the target
 /// use case is kernel config stubs that return literal constants without any
 /// memory access.
-fn is_side_effect_free(func: &crate::ir::ir::IrFunction) -> bool {
+fn is_side_effect_free(func: &crate::ir::reexports::IrFunction) -> bool {
     for block in &func.blocks {
         for inst in &block.instructions {
             match inst {

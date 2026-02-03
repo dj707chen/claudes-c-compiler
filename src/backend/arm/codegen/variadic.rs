@@ -1,8 +1,8 @@
 //! ArmCodegen: variadic function operations (va_arg, va_start, va_copy).
 
-use crate::ir::ir::Value;
+use crate::ir::reexports::Value;
 use crate::common::types::IrType;
-use super::codegen::{ArmCodegen, callee_saved_name};
+use super::emit::{ArmCodegen, callee_saved_name};
 
 impl ArmCodegen {
     pub(super) fn emit_va_arg_impl(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType) {

@@ -1,8 +1,8 @@
 //! RiscvCodegen: va_arg, va_start, va_copy operations.
 
-use crate::ir::ir::Value;
+use crate::ir::reexports::Value;
 use crate::common::types::IrType;
-use super::codegen::{RiscvCodegen, callee_saved_name};
+use super::emit::{RiscvCodegen, callee_saved_name};
 
 impl RiscvCodegen {
     pub(super) fn emit_va_arg_impl(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType) {

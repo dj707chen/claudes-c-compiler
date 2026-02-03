@@ -1,9 +1,9 @@
 //! I686Codegen: ALU operations (integer arithmetic, bitwise, shifts).
 
-use crate::ir::ir::{IrBinOp, Operand, Value};
+use crate::ir::reexports::{IrBinOp, Operand, Value};
 use crate::common::types::IrType;
 use crate::emit;
-use super::codegen::{I686Codegen, alu_mnemonic, shift_mnemonic};
+use super::emit::{I686Codegen, alu_mnemonic, shift_mnemonic};
 
 impl I686Codegen {
     pub(super) fn emit_float_neg_impl(&mut self, ty: IrType) {

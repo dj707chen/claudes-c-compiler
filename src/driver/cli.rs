@@ -10,7 +10,7 @@
 //! ignored (matching GCC's behavior for unrecognized `-f` and `-m` flags),
 //! which is critical for build system compatibility.
 
-use super::driver::{Driver, CompileMode, CliDefine};
+use super::pipeline::{Driver, CompileMode, CliDefine};
 use crate::backend::Target;
 use crate::common::error::ColorMode;
 

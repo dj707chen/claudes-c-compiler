@@ -9,7 +9,7 @@ use crate::frontend::parser::ast::{
     PostfixOp,
     UnaryOp,
 };
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrBinOp,
     IrCmpOp,
@@ -20,7 +20,7 @@ use crate::ir::ir::{
     Value,
 };
 use crate::common::types::{AddressSpace, IrType, CType, widened_op_type};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     // -----------------------------------------------------------------------

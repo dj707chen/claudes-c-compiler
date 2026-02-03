@@ -3,12 +3,12 @@
 //! On i686, "i128" operations actually operate on 64-bit values using eax:edx pairs.
 //! This module also contains the i64 bit-manipulation helpers.
 
-use crate::ir::ir::{IrConst, IrCmpOp, Operand, Value};
+use crate::ir::reexports::{IrConst, IrCmpOp, Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::state::StackSlot;
 use crate::backend::traits::ArchCodegen;
 use crate::emit;
-use super::codegen::I686Codegen;
+use super::emit::I686Codegen;
 
 impl I686Codegen {
     pub(super) fn emit_sign_extend_acc_high_impl(&mut self) {
@@ -28,7 +28,7 @@ impl I686Codegen {
                     emit!(self.state, "    movl {}, %eax", sr0);
                     emit!(self.state, "    movl {}, %edx", sr4);
                 } else if let Some(phys) = self.reg_assignments.get(&v.0).copied() {
-                    let reg = super::codegen::phys_reg_name(phys);
+                    let reg = super::emit::phys_reg_name(phys);
                     emit!(self.state, "    movl %{}, %eax", reg);
                     self.state.emit("    xorl %edx, %edx");
                 }

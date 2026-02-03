@@ -1,11 +1,11 @@
 //! I686Codegen: function call operations (cdecl calling convention).
 
-use crate::ir::ir::{Operand, Value};
+use crate::ir::reexports::{Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::call_abi;
 use crate::emit;
 use crate::backend::traits::ArchCodegen;
-use super::codegen::I686Codegen;
+use super::emit::I686Codegen;
 use crate::backend::generation::is_i128_type;
 
 impl I686Codegen {

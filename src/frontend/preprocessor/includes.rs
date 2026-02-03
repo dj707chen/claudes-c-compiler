@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use super::macro_defs::{MacroDef, parse_define};
-use super::preprocessor::Preprocessor;
+use super::pipeline::Preprocessor;
 
 /// Maximum recursive inclusion depth, matching GCC's default of 200.
 /// Prevents infinite inclusion loops in files without `#pragma once`.
@@ -403,7 +403,7 @@ impl Preprocessor {
             // Compute approximate column of the include path for better diagnostics.
             // The include path token is at col (of '#') + len("include") + whitespace.
             let include_path_col = col + "include ".len();
-            self.errors.push(super::preprocessor::PreprocessorDiagnostic {
+            self.errors.push(super::pipeline::PreprocessorDiagnostic {
                 file: self.current_file(),
                 line: line_num,
                 col: include_path_col,

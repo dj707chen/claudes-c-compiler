@@ -22,7 +22,7 @@ use crate::common::types::CType;
 use crate::common::types::AddressSpace;
 use crate::common::const_arith;
 use crate::common::const_eval as shared_const_eval;
-use crate::ir::ir::IrConst;
+use crate::ir::reexports::IrConst;
 use crate::frontend::parser::ast::{
     BinOp,
     DerivedDeclarator,
@@ -34,7 +34,7 @@ use crate::frontend::parser::ast::{
     UnaryOp,
 };
 use super::type_context::TypeContext;
-use super::sema::FunctionInfo;
+use super::analysis::FunctionInfo;
 use crate::common::symbol_table::SymbolTable;
 use crate::common::fx_hash::FxHashMap;
 

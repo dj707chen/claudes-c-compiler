@@ -10,9 +10,9 @@ use crate::frontend::parser::ast::{
     Initializer,
     InitializerItem,
 };
-use crate::ir::ir::{GlobalInit, IrConst};
+use crate::ir::reexports::{GlobalInit, IrConst};
 use crate::common::types::{IrType, StructLayout, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 use super::global_init_helpers as h;
 
 /// Result of filling an array/FAM field in fill_struct_global_bytes,

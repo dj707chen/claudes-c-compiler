@@ -1,6 +1,6 @@
 //! I686Codegen: prologue/epilogue and stack frame operations.
 
-use crate::ir::ir::{IrFunction, Value};
+use crate::ir::reexports::{IrFunction, Value};
 use crate::common::types::IrType;
 use crate::backend::generation::{
     is_i128_type, calculate_stack_space_common, run_regalloc_and_merge_clobbers,
@@ -8,7 +8,7 @@ use crate::backend::generation::{
 };
 use crate::backend::call_abi::{ParamClass, classify_params};
 use crate::emit;
-use super::codegen::{
+use super::emit::{
     I686Codegen, phys_reg_name, i686_constraint_to_phys, i686_clobber_to_phys,
     I686_CALLEE_SAVED, I686_CALLEE_SAVED_WITH_EBP, I686_CALLER_SAVED,
 };

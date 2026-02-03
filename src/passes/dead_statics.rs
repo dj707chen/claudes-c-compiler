@@ -9,7 +9,7 @@
 //! live symbols, then removes unreachable static functions and globals.
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
-use crate::ir::ir::{GlobalInit, Instruction, IrModule};
+use crate::ir::reexports::{GlobalInit, Instruction, IrModule};
 
 /// Remove internal-linkage (static) functions and globals that are unreachable.
 ///

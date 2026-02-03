@@ -9,7 +9,7 @@
 use crate::common::types::AddressSpace;
 use crate::frontend::lexer::token::TokenKind;
 use super::ast::*;
-use super::parser::{ModeKind, Parser};
+use super::parse::{ModeKind, Parser};
 
 /// Result of parsing a parenthesized abstract declarator.
 pub(super) enum ParenAbstractDecl {

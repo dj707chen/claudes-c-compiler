@@ -5,7 +5,7 @@
 //! calling conventions (cdecl, ILP32).
 
 use std::borrow::Cow;
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BlockId,
     IrConst,
     Operand,
@@ -15,7 +15,7 @@ use crate::common::types::IrType;
 use crate::backend::state::CodegenState;
 use crate::backend::inline_asm::{InlineAsmEmitter, AsmOperandKind, AsmOperand};
 use crate::emit;
-use super::codegen::I686Codegen;
+use super::emit::I686Codegen;
 
 /// i686 scratch XMM registers (SSE available on most i686 targets).
 const I686_XMM_SCRATCH: &[&str] = &["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"];

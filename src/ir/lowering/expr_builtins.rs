@@ -9,7 +9,7 @@
 
 use crate::frontend::parser::ast::Expr;
 use crate::frontend::sema::builtins::{self, BuiltinKind, BuiltinIntrinsic};
-use crate::ir::ir::{
+use crate::ir::reexports::{
     CallInfo,
     Instruction,
     IntrinsicOp,
@@ -21,7 +21,7 @@ use crate::ir::ir::{
     Terminator,
 };
 use crate::common::types::{AddressSpace, IrType, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Determine the return type for creal/crealf/creall/cimag/cimagf/cimagl based on function name.

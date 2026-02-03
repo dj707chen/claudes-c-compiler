@@ -2,8 +2,8 @@
 //! (128-bit bitwise, byte compare, saturating subtract, pmovmskb) using scalar
 //! RISC-V instructions, plus hardware intrinsics (fences, CRC32, sqrt, fabs).
 
-use crate::ir::ir::{IntrinsicOp, Operand, Value};
-use super::codegen::RiscvCodegen;
+use crate::ir::reexports::{IntrinsicOp, Operand, Value};
+use super::emit::RiscvCodegen;
 
 impl RiscvCodegen {
     pub(super) fn emit_intrinsic_rv(&mut self, dest: &Option<Value>, op: &IntrinsicOp, dest_ptr: &Option<Value>, args: &[Operand]) {

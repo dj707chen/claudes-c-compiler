@@ -15,7 +15,7 @@ use crate::backend::state::{CodegenState, StackSlot};
 use crate::backend::regalloc::PhysReg;
 use crate::backend::generation::is_i128_type;
 use crate::backend::call_abi;
-use crate::ir::ir::{
+use crate::ir::reexports::{
     AtomicOrdering,
     AtomicRmwOp,
     BlockId,

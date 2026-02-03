@@ -1,8 +1,8 @@
 //! X86Codegen: variadic argument handling (va_arg, va_start, va_copy).
 
-use crate::ir::ir::Value;
+use crate::ir::reexports::Value;
 use crate::common::types::IrType;
-use super::codegen::{X86Codegen, phys_reg_name};
+use super::emit::{X86Codegen, phys_reg_name};
 
 impl X86Codegen {
     pub(super) fn emit_va_arg_impl(&mut self, dest: &Value, va_list_ptr: &Value, result_ty: IrType) {

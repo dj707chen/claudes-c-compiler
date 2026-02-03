@@ -63,7 +63,7 @@ macro_rules! delegate_to_impl {
     };
 }
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     AtomicOrdering,
     AtomicRmwOp,
     BlockId,

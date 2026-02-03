@@ -1,4 +1,4 @@
 pub(crate) mod token;
-pub(crate) mod lexer;
+pub(crate) mod scan;
 
-pub(crate) use lexer::Lexer;
+pub(crate) use scan::Lexer;

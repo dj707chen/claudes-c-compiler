@@ -1,10 +1,10 @@
 //! RiscvCodegen: call ABI operations.
 
-use crate::ir::ir::{IrConst, Operand, Value};
+use crate::ir::reexports::{IrConst, Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::call_abi::{CallAbiConfig, CallArgClass, compute_stack_arg_space};
 use crate::backend::generation::is_i128_type;
-use super::codegen::{RiscvCodegen, callee_saved_name, RISCV_ARG_REGS};
+use super::emit::{RiscvCodegen, callee_saved_name, RISCV_ARG_REGS};
 
 impl RiscvCodegen {
     pub(super) fn call_abi_config_impl(&self) -> CallAbiConfig {
@@ -124,7 +124,7 @@ impl RiscvCodegen {
                                     IrConst::LongDouble(_, f128_bytes) => *f128_bytes,
                                     _ => {
                                         let f64_val = c.to_f64().unwrap_or(0.0);
-                                        crate::ir::ir::f64_to_f128_bytes(f64_val)
+                                        crate::ir::reexports::f64_to_f128_bytes(f64_val)
                                     }
                                 };
                                 let lo = i64::from_le_bytes(bytes[0..8].try_into().unwrap());
@@ -255,7 +255,7 @@ impl RiscvCodegen {
                             IrConst::LongDouble(_, f128_bytes) => *f128_bytes,
                             _ => {
                                 let f64_val = c.to_f64().unwrap_or(0.0);
-                                crate::ir::ir::f64_to_f128_bytes(f64_val)
+                                crate::ir::reexports::f64_to_f128_bytes(f64_val)
                             }
                         };
                         let lo = i64::from_le_bytes(bytes[0..8].try_into().unwrap());

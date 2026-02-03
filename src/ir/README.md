@@ -9,7 +9,7 @@ between the C language AST and the platform-specific backend code generators.
 The IR subsystem has three components:
 
 1. **Core IR types** -- data structures that define the in-memory representation
-   of a compiled translation unit (`ir.rs`, `module.rs`, `instruction.rs`,
+   of a compiled translation unit (`reexports.rs`, `module.rs`, `instruction.rs`,
    `ops.rs`, `constants.rs`, `intrinsics.rs`, `analysis.rs`).
 2. **Lowering** (`lowering/`) -- translates the AST into alloca-based IR where
    every local variable lives in a stack slot.
@@ -523,7 +523,7 @@ GVN's dominator-tree-ordered traversal.
 | File                        | Purpose                                                    |
 |-----------------------------|------------------------------------------------------------|
 | `mod.rs`                    | Module declarations                                        |
-| `ir.rs`                     | Re-export hub for all IR types                             |
+| `reexports.rs`                     | Re-export hub for all IR types                             |
 | `module.rs`                 | `IrModule`, `IrFunction`, `IrParam`, `IrGlobal`, `GlobalInit` |
 | `instruction.rs`            | `Instruction`, `Terminator`, `BasicBlock`, `BlockId`, `Value`, `Operand`, `CallInfo` |
 | `ops.rs`                    | `IrBinOp`, `IrUnaryOp`, `IrCmpOp`, `AtomicRmwOp`, `AtomicOrdering` with eval methods |

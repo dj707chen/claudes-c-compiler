@@ -31,7 +31,7 @@ Parser AST ─────> SemanticAnalyzer.analyze(&ast)
 
 | File | Responsibility |
 |---|---|
-| `sema.rs` | Main pass: AST walk, declaration/statement/expression analysis, `-Wreturn-type`, implicit declarations |
+| `analysis.rs` | Main pass: AST walk, declaration/statement/expression analysis, `-Wreturn-type`, implicit declarations |
 | `type_context.rs` | `TypeContext` -- module-level type state (struct layouts, typedefs, enum constants, ctype cache) with undo-log scope management |
 | `type_checker.rs` | `ExprTypeChecker` -- expression-level CType inference using only sema-available state |
 | `const_eval.rs` | `SemaConstEval` -- compile-time constant evaluation returning `IrConst` values |

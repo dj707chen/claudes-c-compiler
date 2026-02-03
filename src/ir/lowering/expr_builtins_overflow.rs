@@ -10,7 +10,7 @@
 //! without storing the result.
 
 use crate::frontend::parser::ast::{Expr};
-use crate::ir::ir::{
+use crate::ir::reexports::{
     Instruction,
     IrBinOp,
     IrCmpOp,
@@ -19,7 +19,7 @@ use crate::ir::ir::{
     Value,
 };
 use crate::common::types::{AddressSpace, IrType, CType, target_int_ir_type, target_is_32bit};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Lower __builtin_{add,sub,mul}_overflow(a, b, result_ptr) and type-specific variants.

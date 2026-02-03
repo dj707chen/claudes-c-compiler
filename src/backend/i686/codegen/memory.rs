@@ -1,11 +1,11 @@
 //! I686Codegen: memory operations (load, store, memcpy, GEP, stack).
 
-use crate::ir::ir::{Operand, Value};
+use crate::ir::reexports::{Operand, Value};
 use crate::common::types::IrType;
 use crate::backend::state::{StackSlot, SlotAddr};
 use crate::backend::traits::ArchCodegen;
 use crate::emit;
-use super::codegen::{I686Codegen, phys_reg_name};
+use super::emit::{I686Codegen, phys_reg_name};
 
 impl I686Codegen {
     // ---- Store/Load overrides ----

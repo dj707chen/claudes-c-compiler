@@ -1,7 +1,7 @@
 //! x86-64 InlineAsmEmitter implementation: constraint classification, register
 //! allocation, operand loading/storing, and template substitution for inline asm.
 
-use crate::ir::ir::{
+use crate::ir::reexports::{
     BlockId,
     IrConst,
     Operand,
@@ -10,7 +10,7 @@ use crate::ir::ir::{
 use crate::common::types::IrType;
 use crate::backend::state::CodegenState;
 use crate::backend::inline_asm::{InlineAsmEmitter, AsmOperandKind, AsmOperand};
-use super::codegen::X86Codegen;
+use super::emit::X86Codegen;
 
 /// x86-64 scratch registers for inline asm "r" constraints (caller-saved, not rax/rsp/rbp).
 const X86_GP_SCRATCH: &[&str] = &["rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"];

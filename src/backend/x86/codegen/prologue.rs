@@ -1,11 +1,11 @@
 //! X86Codegen: prologue, epilogue, parameter storage.
 
-use crate::ir::ir::{IrFunction, Instruction, Value};
+use crate::ir::reexports::{IrFunction, Instruction, Value};
 use crate::common::types::IrType;
 use crate::backend::call_abi::{ParamClass, classify_params};
 use crate::backend::generation::{calculate_stack_space_common, find_param_alloca};
 use crate::backend::regalloc::PhysReg;
-use super::codegen::{X86Codegen, X86_CALLEE_SAVED, X86_CALLER_SAVED, phys_reg_name,
+use super::emit::{X86Codegen, X86_CALLEE_SAVED, X86_CALLER_SAVED, phys_reg_name,
                      collect_inline_asm_callee_saved_x86, X86_ARG_REGS};
 
 impl X86Codegen {

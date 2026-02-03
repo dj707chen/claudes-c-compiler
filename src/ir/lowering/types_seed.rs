@@ -5,7 +5,7 @@
 //! for correct calling convention.
 
 use crate::common::types::{AddressSpace, IrType, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 use super::definitions::FuncSig;
 
 impl Lowerer {

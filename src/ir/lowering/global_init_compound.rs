@@ -16,9 +16,9 @@ use crate::frontend::parser::ast::{
     Initializer,
     InitializerItem,
 };
-use crate::ir::ir::{GlobalInit};
+use crate::ir::reexports::{GlobalInit};
 use crate::common::types::{IrType, StructLayout, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 use super::global_init_helpers as h;
 use h::{push_zero_bytes, push_bytes_as_elements};
 

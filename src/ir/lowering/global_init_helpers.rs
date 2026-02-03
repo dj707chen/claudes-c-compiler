@@ -187,18 +187,18 @@ pub(super) fn count_flat_init_scalars(ty: &CType, ctx: &dyn StructLayoutProvider
 
 /// Append `count` zero bytes as `GlobalInit::Scalar(IrConst::I8(0))` to `elements`.
 /// Used throughout global initialization for padding and zero-fill.
-pub(super) fn push_zero_bytes(elements: &mut Vec<crate::ir::ir::GlobalInit>, count: usize) {
+pub(super) fn push_zero_bytes(elements: &mut Vec<crate::ir::reexports::GlobalInit>, count: usize) {
     for _ in 0..count {
-        elements.push(crate::ir::ir::GlobalInit::Scalar(crate::ir::ir::IrConst::I8(0)));
+        elements.push(crate::ir::reexports::GlobalInit::Scalar(crate::ir::reexports::IrConst::I8(0)));
     }
 }
 
 /// Convert a byte buffer to GlobalInit elements by pushing each byte as I8.
 /// This is the standard bytes-to-compound conversion used throughout the
 /// compound initialization path when a sub-structure has no address fields.
-pub(super) fn push_bytes_as_elements(elements: &mut Vec<crate::ir::ir::GlobalInit>, bytes: &[u8]) {
+pub(super) fn push_bytes_as_elements(elements: &mut Vec<crate::ir::reexports::GlobalInit>, bytes: &[u8]) {
     for &b in bytes {
-        elements.push(crate::ir::ir::GlobalInit::Scalar(crate::ir::ir::IrConst::I8(b as i8)));
+        elements.push(crate::ir::reexports::GlobalInit::Scalar(crate::ir::reexports::IrConst::I8(b as i8)));
     }
 }
 
@@ -206,15 +206,15 @@ pub(super) fn push_bytes_as_elements(elements: &mut Vec<crate::ir::ir::GlobalIni
 /// Pushes each character as I8, followed by padding zeros up to `field_size`.
 /// Characters are mapped via `char as u8` (the internal string representation uses
 /// chars in U+0000..U+00FF to represent raw byte values from C string literals).
-pub(super) fn push_string_as_elements(elements: &mut Vec<crate::ir::ir::GlobalInit>, s: &str, field_size: usize) {
+pub(super) fn push_string_as_elements(elements: &mut Vec<crate::ir::reexports::GlobalInit>, s: &str, field_size: usize) {
     let s_chars: Vec<u8> = s.chars().map(|c| c as u8).collect();
     for (i, &b) in s_chars.iter().enumerate() {
         if i >= field_size { break; }
-        elements.push(crate::ir::ir::GlobalInit::Scalar(crate::ir::ir::IrConst::I8(b as i8)));
+        elements.push(crate::ir::reexports::GlobalInit::Scalar(crate::ir::reexports::IrConst::I8(b as i8)));
     }
     // null terminator + remaining zero fill
     for _ in s_chars.len()..field_size {
-        elements.push(crate::ir::ir::GlobalInit::Scalar(crate::ir::ir::IrConst::I8(0)));
+        elements.push(crate::ir::reexports::GlobalInit::Scalar(crate::ir::reexports::IrConst::I8(0)));
     }
 }
 

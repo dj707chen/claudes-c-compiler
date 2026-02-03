@@ -11,7 +11,7 @@
 //!     24 bytes, align 4  (i686)
 
 use crate::frontend::parser::ast::{BinOp, Expr, UnaryOp};
-use crate::ir::ir::{
+use crate::ir::reexports::{
     GlobalInit,
     Instruction,
     IrBinOp,
@@ -22,7 +22,7 @@ use crate::ir::ir::{
     Value,
 };
 use crate::common::types::{AddressSpace, IrType, CType};
-use super::lowering::Lowerer;
+use super::lower::Lowerer;
 
 impl Lowerer {
     /// Get the IR float type for a complex type's component.

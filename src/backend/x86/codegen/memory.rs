@@ -1,9 +1,9 @@
 //! X86Codegen: memory operations (load, store, memcpy, GEP, stack).
 
-use crate::ir::ir::{IrConst, Operand, Value};
+use crate::ir::reexports::{IrConst, Operand, Value};
 use crate::common::types::{AddressSpace, IrType};
 use crate::backend::state::{StackSlot, SlotAddr};
-use super::codegen::{X86Codegen, phys_reg_name};
+use super::emit::{X86Codegen, phys_reg_name};
 
 impl X86Codegen {
     // ---- Store/Load overrides ----

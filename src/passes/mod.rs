@@ -27,7 +27,7 @@ mod resolve_asm;
 pub(crate) mod simplify;
 
 use crate::ir::analysis::CfgAnalysis;
-use crate::ir::ir::{IrFunction, IrModule};
+use crate::ir::reexports::{IrFunction, IrModule};
 
 /// Run a per-function pass only on functions in the visit set.
 ///

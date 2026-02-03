@@ -6,8 +6,8 @@ use crate::frontend::parser::ast::{
     ForInit,
     Stmt,
 };
-use crate::ir::ir::{BlockId, Instruction, Terminator};
-use super::lowering::Lowerer;
+use crate::ir::reexports::{BlockId, Instruction, Terminator};
+use super::lower::Lowerer;
 
 impl Lowerer {
     pub(super) fn lower_if_stmt(&mut self, cond: &Expr, then_stmt: &Stmt, else_stmt: Option<&Stmt>) {
