@@ -1,0 +1,9 @@
+Fix all clippy::module_inception warnings and remove crate-level suppression.
+
+There are 12 instances where a mod.rs declares a submodule with the same name as its parent
+directory (e.g., codegen/mod.rs declares `mod codegen;` pointing to codegen/codegen.rs).
+
+Fix: rename each <name>/<name>.rs to a more descriptive name (e.g., core.rs, impl.rs, etc.)
+and update the mod declarations and any use paths accordingly.
+
+Status: in_progress
