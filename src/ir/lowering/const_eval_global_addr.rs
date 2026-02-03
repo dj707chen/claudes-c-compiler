@@ -583,8 +583,11 @@ impl Lowerer {
     /// This is needed for patterns like `.open_fds = init_files.open_fds_init` in the
     /// Linux kernel, where `open_fds_init` is a `unsigned long[1]` array field.
     fn resolve_member_access_array_decay(&self, expr: &Expr) -> Option<GlobalInit> {
-        // Use resolve_inner_as_global_addr to get the address of the field
-        let addr = self.resolve_inner_as_global_addr(expr)?;
+        // Use resolve_inner_as_global_addr to get the address of the field,
+        // falling back to resolve_chained_member_access for complex chains
+        // involving PointerMemberAccess (e.g., (&g.member)->field.array_field)
+        let addr = self.resolve_inner_as_global_addr(expr)
+            .or_else(|| self.resolve_chained_member_access(expr))?;
         // Now check if the field type is an array (needs decay)
         // Walk the member access chain to find the final field type
         let field_ty = self.get_member_access_field_type(expr)?;
@@ -623,6 +626,21 @@ impl Lowerer {
                 // then get layout of a's type (must be struct/union)
                 let base_layout = self.get_struct_layout_of_expr(base)?;
                 let (_offset, field_ty) = base_layout.field_offset(field, &*self.types.borrow_struct_layouts())?;
+                match &field_ty {
+                    CType::Struct(key) | CType::Union(key) => {
+                        self.types.borrow_struct_layouts().get(&**key).map(|rc| (**rc).clone())
+                    }
+                    _ => None,
+                }
+            }
+            // (&struct_expr)->field: dereference is a no-op for &expr, resolve field type
+            Expr::PointerMemberAccess(base, field, _) => {
+                // The base should be &something; get the pointee's struct layout
+                let pointee_layout = match base.as_ref() {
+                    Expr::AddressOf(inner, _) => self.get_struct_layout_of_expr(inner)?,
+                    _ => return None,
+                };
+                let (_offset, field_ty) = pointee_layout.field_offset(field, &*self.types.borrow_struct_layouts())?;
                 match &field_ty {
                     CType::Struct(key) | CType::Union(key) => {
                         self.types.borrow_struct_layouts().get(&**key).map(|rc| (**rc).clone())
@@ -675,7 +693,7 @@ impl Lowerer {
                 // This is equivalent to global.field so treat it as a member chain entry
                 Expr::PointerMemberAccess(base, field, _) => {
                     fields.push(field.clone());
-                    // The base must be &global_identifier
+                    // The base must be &global_identifier or &global.member
                     match base.as_ref() {
                         Expr::AddressOf(inner, _) => {
                             match inner.as_ref() {
@@ -685,6 +703,29 @@ impl Lowerer {
                                     let base_offset: i64 = 0;
                                     let start_layout = ginfo.struct_layout.clone()?;
                                     return self.apply_field_chain_offsets(&global_name, base_offset, &start_layout, &fields);
+                                }
+                                // Handle &(g.member)->field pattern:
+                                // e.g., (&(g._main_interpreter))->dtoa.preallocated
+                                // Resolve inner member access to get the global + offset,
+                                // then continue applying remaining fields from there.
+                                Expr::MemberAccess(_, _, _) => {
+                                    if let Some(init) = self.resolve_chained_member_access(inner) {
+                                        let (global_name, base_off) = match &init {
+                                            GlobalInit::GlobalAddr(name) => (name.clone(), 0i64),
+                                            GlobalInit::GlobalAddrOffset(name, off) => (name.clone(), *off),
+                                            _ => return None,
+                                        };
+                                        // Get the struct layout for the member access result type
+                                        let member_ty = self.get_member_access_field_type(inner)?;
+                                        let start_layout = match &member_ty {
+                                            CType::Struct(key) | CType::Union(key) => {
+                                                self.types.borrow_struct_layouts().get(&**key).cloned()?
+                                            }
+                                            _ => return None,
+                                        };
+                                        return self.apply_field_chain_offsets(&global_name, base_off, &start_layout, &fields);
+                                    }
+                                    return None;
                                 }
                                 _ => return None,
                             }

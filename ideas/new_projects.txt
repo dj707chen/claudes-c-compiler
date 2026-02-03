@@ -12,3 +12,4 @@ LuaJIT: PASS (x86 - fixed by adding .eh_frame/CFI generation)
 postgres: PASS (x86 backend: all 237 regression tests pass)
 Emacs_Lisp_core: PASS x86 only (i686 has pre-existing codegen crash in signal_or_quit; no arm/riscv check scripts)
 QuickJS: PASS (x86; fixed is_all_ones i128 truncation bug in simplify pass)
+CPython: PASS (x86) - fixed AVX2 intrinsics, nested struct global init with PointerMemberAccess

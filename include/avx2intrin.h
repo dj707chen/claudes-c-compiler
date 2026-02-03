@@ -628,4 +628,188 @@ _mm256_unpackhi_epi64(__m256i __a, __m256i __b)
     return (__m256i){ { __a.__val[1], __b.__val[1], __a.__val[3], __b.__val[3] } };
 }
 
+/* === Additional intrinsics for CPython HACL Blake2b SIMD256 === */
+
+/* _mm256_set_epi64x: set 4 x 64-bit integers (high-to-low) */
+static __inline__ __m256i __attribute__((__always_inline__))
+_mm256_set_epi64x(long long __e3, long long __e2, long long __e1, long long __e0)
+{
+    return (__m256i){ { __e0, __e1, __e2, __e3 } };
+}
+
+/* _mm256_set_m128i: combine two __m128i into __m256i (lo, hi) */
+static __inline__ __m256i __attribute__((__always_inline__))
+_mm256_set_m128i(__m128i __hi, __m128i __lo)
+{
+    __m256i __r;
+    long long *__p = (long long *)&__r;
+    long long *__lo_p = (long long *)&__lo;
+    long long *__hi_p = (long long *)&__hi;
+    __p[0] = __lo_p[0]; __p[1] = __lo_p[1];
+    __p[2] = __hi_p[0]; __p[3] = __hi_p[1];
+    return __r;
+}
+
+/* _mm256_cmpeq_epi64: compare 64-bit integers for equality */
+static __inline__ __m256i __attribute__((__always_inline__))
+_mm256_cmpeq_epi64(__m256i __a, __m256i __b)
+{
+    __m256i __r;
+    long long *__pa = (long long *)&__a;
+    long long *__pb = (long long *)&__b;
+    long long *__pr = (long long *)&__r;
+    for (int __i = 0; __i < 4; __i++)
+        __pr[__i] = (__pa[__i] == __pb[__i]) ? -1LL : 0LL;
+    return __r;
+}
+
+/* _mm256_cmpgt_epi32: compare signed 32-bit integers for greater-than */
+static __inline__ __m256i __attribute__((__always_inline__))
+_mm256_cmpgt_epi32(__m256i __a, __m256i __b)
+{
+    __m256i __r;
+    int *__pa = (int *)&__a;
+    int *__pb = (int *)&__b;
+    int *__pr = (int *)&__r;
+    for (int __i = 0; __i < 8; __i++)
+        __pr[__i] = (__pa[__i] > __pb[__i]) ? -1 : 0;
+    return __r;
+}
+
+/* _mm256_cmpgt_epi64: compare signed 64-bit integers for greater-than */
+static __inline__ __m256i __attribute__((__always_inline__))
+_mm256_cmpgt_epi64(__m256i __a, __m256i __b)
+{
+    __m256i __r;
+    long long *__pa = (long long *)&__a;
+    long long *__pb = (long long *)&__b;
+    long long *__pr = (long long *)&__r;
+    for (int __i = 0; __i < 4; __i++)
+        __pr[__i] = (__pa[__i] > __pb[__i]) ? -1LL : 0LL;
+    return __r;
+}
+
+/* _mm256_extract_epi8: extract 8-bit integer */
+static __inline__ int __attribute__((__always_inline__))
+_mm256_extract_epi8(__m256i __a, int __imm)
+{
+    unsigned char *__p = (unsigned char *)&__a;
+    return (int)__p[__imm & 31];
+}
+
+/* _mm256_extract_epi32: extract 32-bit integer */
+static __inline__ int __attribute__((__always_inline__))
+_mm256_extract_epi32(__m256i __a, int __imm)
+{
+    int *__p = (int *)&__a;
+    return __p[__imm & 7];
+}
+
+/* _mm256_extract_epi64: extract 64-bit integer */
+static __inline__ long long __attribute__((__always_inline__))
+_mm256_extract_epi64(__m256i __a, int __imm)
+{
+    long long *__p = (long long *)&__a;
+    return __p[__imm & 3];
+}
+
+/* _mm256_insert_epi8: insert 8-bit integer */
+static __inline__ __m256i __attribute__((__always_inline__))
+_mm256_insert_epi8(__m256i __a, int __val, int __imm)
+{
+    unsigned char *__p = (unsigned char *)&__a;
+    __p[__imm & 31] = (unsigned char)__val;
+    return __a;
+}
+
+/* _mm256_insert_epi32: insert 32-bit integer */
+static __inline__ __m256i __attribute__((__always_inline__))
+_mm256_insert_epi32(__m256i __a, int __val, int __imm)
+{
+    int *__p = (int *)&__a;
+    __p[__imm & 7] = __val;
+    return __a;
+}
+
+/* _mm256_insert_epi64: insert 64-bit integer */
+static __inline__ __m256i __attribute__((__always_inline__))
+_mm256_insert_epi64(__m256i __a, long long __val, int __imm)
+{
+    long long *__p = (long long *)&__a;
+    __p[__imm & 3] = __val;
+    return __a;
+}
+
+/* _mm256_sub_epi64: subtract 64-bit integers */
+static __inline__ __m256i __attribute__((__always_inline__))
+_mm256_sub_epi64(__m256i __a, __m256i __b)
+{
+    return (__m256i){ { __a.__val[0] - __b.__val[0], __a.__val[1] - __b.__val[1],
+                        __a.__val[2] - __b.__val[2], __a.__val[3] - __b.__val[3] } };
+}
+
+/* _mm256_mul_epu32: multiply unsigned 32-bit integers, produce 64-bit results */
+static __inline__ __m256i __attribute__((__always_inline__))
+_mm256_mul_epu32(__m256i __a, __m256i __b)
+{
+    __m256i __r;
+    unsigned int *__pa = (unsigned int *)&__a;
+    unsigned int *__pb = (unsigned int *)&__b;
+    unsigned long long *__pr = (unsigned long long *)&__r;
+    __pr[0] = (unsigned long long)__pa[0] * __pb[0];
+    __pr[1] = (unsigned long long)__pa[2] * __pb[2];
+    __pr[2] = (unsigned long long)__pa[4] * __pb[4];
+    __pr[3] = (unsigned long long)__pa[6] * __pb[6];
+    return __r;
+}
+
+/* _mm256_mullo_epi32: multiply signed 32-bit integers, keep low 32 bits */
+static __inline__ __m256i __attribute__((__always_inline__))
+_mm256_mullo_epi32(__m256i __a, __m256i __b)
+{
+    __m256i __r;
+    int *__pa = (int *)&__a;
+    int *__pb = (int *)&__b;
+    int *__pr = (int *)&__r;
+    for (int __i = 0; __i < 8; __i++)
+        __pr[__i] = __pa[__i] * __pb[__i];
+    return __r;
+}
+
+/* _mm256_slli_si256: byte shift left within 128-bit lanes */
+static __inline__ __m256i __attribute__((__always_inline__))
+_mm256_slli_si256(__m256i __a, int __imm)
+{
+    __m256i __r;
+    unsigned char *__src = (unsigned char *)&__a;
+    unsigned char *__dst = (unsigned char *)&__r;
+    int __shift = __imm & 0xff;
+    if (__shift > 16) __shift = 16;
+    /* Lane 0 (bytes 0-15) */
+    for (int __i = 0; __i < 16; __i++)
+        __dst[__i] = (__i >= __shift) ? __src[__i - __shift] : 0;
+    /* Lane 1 (bytes 16-31) */
+    for (int __i = 0; __i < 16; __i++)
+        __dst[16 + __i] = (__i >= __shift) ? __src[16 + __i - __shift] : 0;
+    return __r;
+}
+
+/* _mm256_srli_si256: byte shift right within 128-bit lanes */
+static __inline__ __m256i __attribute__((__always_inline__))
+_mm256_srli_si256(__m256i __a, int __imm)
+{
+    __m256i __r;
+    unsigned char *__src = (unsigned char *)&__a;
+    unsigned char *__dst = (unsigned char *)&__r;
+    int __shift = __imm & 0xff;
+    if (__shift > 16) __shift = 16;
+    /* Lane 0 (bytes 0-15) */
+    for (int __i = 0; __i < 16; __i++)
+        __dst[__i] = (__i + __shift < 16) ? __src[__i + __shift] : 0;
+    /* Lane 1 (bytes 16-31) */
+    for (int __i = 0; __i < 16; __i++)
+        __dst[16 + __i] = (__i + __shift < 16) ? __src[16 + __i + __shift] : 0;
+    return __r;
+}
+
 #endif /* _AVX2INTRIN_H_INCLUDED */

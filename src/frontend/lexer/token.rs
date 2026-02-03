@@ -361,7 +361,8 @@ impl std::fmt::Display for TokenKind {
 impl TokenKind {
     /// Convert a keyword string to its token kind.
     /// When `gnu_extensions` is false (strict C standard mode, e.g. -std=c99),
-    /// bare GNU keywords like `typeof` and `asm` are treated as identifiers.
+    /// bare GNU keywords like `asm` are treated as identifiers.
+    /// The `typeof` keyword is always recognized (matching GCC/Clang behavior).
     /// The double-underscore forms (`__typeof__`, `__asm__`) are always keywords.
     ///
     /// Performance: Uses a two-stage filter to quickly reject non-keywords.
@@ -432,8 +433,7 @@ impl TokenKind {
             "_Noreturn" | "__noreturn__" => Some(TokenKind::Noreturn),
             "_Static_assert" | "static_assert" => Some(TokenKind::StaticAssert),
             "_Thread_local" | "__thread" => Some(TokenKind::ThreadLocal),
-            "typeof" if gnu_extensions => Some(TokenKind::Typeof),
-            "__typeof__" | "__typeof" => Some(TokenKind::Typeof),
+            "typeof" | "__typeof__" | "__typeof" => Some(TokenKind::Typeof),
             "asm" if gnu_extensions => Some(TokenKind::Asm),
             "__asm__" | "__asm" => Some(TokenKind::Asm),
             "__attribute__" | "__attribute" => Some(TokenKind::Attribute),
