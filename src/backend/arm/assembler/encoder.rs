@@ -252,12 +252,24 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
         "ldrsh" => encode_ldrs(operands, 0b01),
         "ldp" => encode_ldp_stp(operands, true),
         "stp" => encode_ldp_stp(operands, false),
-        "ldxr" => encode_ldxr_stxr(operands, true),
-        "stxr" => encode_ldxr_stxr(operands, false),
-        "ldaxr" => encode_ldaxr_stlxr(operands, true),
-        "stlxr" => encode_ldaxr_stlxr(operands, false),
-        "ldar" => encode_ldar_stlr(operands, true),
-        "stlr" => encode_ldar_stlr(operands, false),
+        "ldxr" => encode_ldxr_stxr(operands, true, None),
+        "stxr" => encode_ldxr_stxr(operands, false, None),
+        "ldxrb" => encode_ldxr_stxr(operands, true, Some(0b00)),
+        "stxrb" => encode_ldxr_stxr(operands, false, Some(0b00)),
+        "ldxrh" => encode_ldxr_stxr(operands, true, Some(0b01)),
+        "stxrh" => encode_ldxr_stxr(operands, false, Some(0b01)),
+        "ldaxr" => encode_ldaxr_stlxr(operands, true, None),
+        "stlxr" => encode_ldaxr_stlxr(operands, false, None),
+        "ldaxrb" => encode_ldaxr_stlxr(operands, true, Some(0b00)),
+        "stlxrb" => encode_ldaxr_stlxr(operands, false, Some(0b00)),
+        "ldaxrh" => encode_ldaxr_stlxr(operands, true, Some(0b01)),
+        "stlxrh" => encode_ldaxr_stlxr(operands, false, Some(0b01)),
+        "ldar" => encode_ldar_stlr(operands, true, None),
+        "stlr" => encode_ldar_stlr(operands, false, None),
+        "ldarb" => encode_ldar_stlr(operands, true, Some(0b00)),
+        "stlrb" => encode_ldar_stlr(operands, false, Some(0b00)),
+        "ldarh" => encode_ldar_stlr(operands, true, Some(0b01)),
+        "stlrh" => encode_ldar_stlr(operands, false, Some(0b01)),
 
         // Address computation
         "adrp" => encode_adrp(operands),
@@ -282,9 +294,20 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
         // NEON/SIMD
         "cnt" => encode_cnt(operands),
         "uaddlv" => encode_uaddlv(operands),
+        "cmeq" => encode_neon_three_same(operands, 0b01110, 0b10001, false),
+        "uqsub" => encode_neon_three_same(operands, 0b11110, 0b00101, false),
+        "sqsub" => encode_neon_three_same(operands, 0b01110, 0b00101, false),
+        "ushr" => encode_neon_shift_imm(operands, true),  // unsigned shift right
+        "ext" => encode_neon_ext(operands),
+        "addv" => encode_neon_addv(operands),
+        "umov" => encode_neon_umov(operands),
+        "dup" => encode_neon_dup(operands),
 
         // System
         "nop" => Ok(EncodeResult::Word(0xd503201f)),
+        "yield" => Ok(EncodeResult::Word(0xd503203f)),
+        "clrex" => Ok(EncodeResult::Word(0xd503305f)),
+        "dc" => encode_dc(operands, raw_operands),
         "dmb" => encode_dmb(operands),
         "dsb" => encode_dsb(operands),
         "isb" => Ok(EncodeResult::Word(0xd5033fdf)),
@@ -356,6 +379,61 @@ fn sf_bit(is_64: bool) -> u32 {
 fn encode_mov(operands: &[Operand]) -> Result<EncodeResult, String> {
     if operands.len() < 2 {
         return Err("mov requires 2 operands".to_string());
+    }
+
+    // NEON register-to-register move: mov v1.16b, v0.16b -> ORR v1.16b, v0.16b, v0.16b
+    if let (Some(Operand::RegArrangement { reg: rd_name, arrangement: arr_d }),
+            Some(Operand::RegArrangement { reg: rm_name, arrangement: _arr_m })) =
+        (operands.get(0), operands.get(1))
+    {
+        let rd = parse_reg_num(rd_name).ok_or("invalid NEON rd")?;
+        let rm = parse_reg_num(rm_name).ok_or("invalid NEON rm")?;
+        let q: u32 = if arr_d == "16b" { 1 } else { 0 };
+        // ORR Vd.T, Vm.T, Vm.T: 0 Q 0 01110 10 1 Rm 0 00111 Rn Rd
+        let word = (q << 30) | (0b001110 << 24) | (0b10 << 22) | (1 << 21)
+            | (rm << 16) | (0b000111 << 10) | (rm << 5) | rd;
+        return Ok(EncodeResult::Word(word));
+    }
+
+    // NEON lane insert: mov v0.d[1], x1 -> INS Vd.D[index], Xn
+    if let (Some(Operand::RegLane { reg: vd_name, elem_size, index }),
+            Some(Operand::Reg(rn_name))) =
+        (operands.get(0), operands.get(1))
+    {
+        let vd = parse_reg_num(vd_name).ok_or("invalid NEON vd")?;
+        let rn = parse_reg_num(rn_name).ok_or("invalid rn")?;
+        // INS Vd.Ts[index], Rn
+        // Encoding: 0 1 0 0 1110 000 imm5 0 0011 1 Rn Rd
+        // imm5 encoding depends on element size and index
+        let imm5 = match elem_size.as_str() {
+            "b" => ((*index & 0xF) << 1) | 0b00001,
+            "h" => ((*index & 0x7) << 2) | 0b00010,
+            "s" => ((*index & 0x3) << 3) | 0b00100,
+            "d" => ((*index & 0x1) << 4) | 0b01000,
+            _ => return Err(format!("unsupported element size for ins: {}", elem_size)),
+        };
+        let word = (0b01001110000u32 << 21) | (imm5 << 16) | (0b000111 << 10) | (rn << 5) | vd;
+        return Ok(EncodeResult::Word(word));
+    }
+
+    // NEON lane extract: mov x0, v0.d[1] -> UMOV Xd, Vn.D[index]
+    if let (Some(Operand::Reg(rd_name)),
+            Some(Operand::RegLane { reg: vn_name, elem_size, index })) =
+        (operands.get(0), operands.get(1))
+    {
+        let rd = parse_reg_num(rd_name).ok_or("invalid rd")?;
+        let vn = parse_reg_num(vn_name).ok_or("invalid NEON vn")?;
+        // UMOV Rd, Vn.Ts[index]
+        // Encoding: 0 Q 0 0 1110 000 imm5 0 0111 1 Rn Rd
+        let (q, imm5) = match elem_size.as_str() {
+            "b" => (0u32, ((*index & 0xF) << 1) | 0b00001),
+            "h" => (0, ((*index & 0x7) << 2) | 0b00010),
+            "s" => (0, ((*index & 0x3) << 3) | 0b00100),
+            "d" => (1, ((*index & 0x1) << 4) | 0b01000),
+            _ => return Err(format!("unsupported element size for umov: {}", elem_size)),
+        };
+        let word = (q << 30) | (0b001110000u32 << 21) | (imm5 << 16) | (0b001111 << 10) | (vn << 5) | rd;
+        return Ok(EncodeResult::Word(word));
     }
 
     // mov Xd, #imm -> movz or movn
@@ -609,6 +687,11 @@ fn encode_logical(operands: &[Operand], opc: u32) -> Result<EncodeResult, String
         return Err("logical op requires 3 operands".to_string());
     }
 
+    // NEON vector form: ORR/AND/EOR Vd.T, Vn.T, Vm.T
+    if let Some(Operand::RegArrangement { .. }) = operands.get(0) {
+        return encode_neon_logical(operands, opc);
+    }
+
     let (rd, is_64) = get_reg(operands, 0)?;
     let (rn, _) = get_reg(operands, 1)?;
     let sf = sf_bit(is_64);
@@ -727,6 +810,10 @@ fn encode_bitmask_imm(val: u64, is_64: bool) -> Option<(u32, u32, u32)> {
 // ── MUL/DIV ──────────────────────────────────────────────────────────────
 
 fn encode_mul(operands: &[Operand]) -> Result<EncodeResult, String> {
+    // NEON vector form: MUL Vd.T, Vn.T, Vm.T
+    if let Some(Operand::RegArrangement { .. }) = operands.get(0) {
+        return encode_neon_mul(operands);
+    }
     // MUL Rd, Rn, Rm is MADD Rd, Rn, Rm, XZR
     let (rd, is_64) = get_reg(operands, 0)?;
     let (rn, _) = get_reg(operands, 1)?;
@@ -1530,41 +1617,42 @@ fn encode_ldp_stp(operands: &[Operand], is_load: bool) -> Result<EncodeResult, S
 
 // ── Exclusive loads/stores ───────────────────────────────────────────────
 
-fn encode_ldxr_stxr(operands: &[Operand], is_load: bool) -> Result<EncodeResult, String> {
+/// Encode LDXR/STXR and byte/halfword variants.
+/// `forced_size`: None = auto-detect from register width, Some(0b00) = byte, Some(0b01) = halfword
+fn encode_ldxr_stxr(operands: &[Operand], is_load: bool, forced_size: Option<u32>) -> Result<EncodeResult, String> {
     if is_load {
-        // LDXR Rt, [Rn]
         let (rt, is_64) = get_reg(operands, 0)?;
         let rn = match operands.get(1) {
             Some(Operand::Mem { base, .. }) => parse_reg_num(base).ok_or("invalid base")?,
             _ => return Err("ldxr needs memory operand".to_string()),
         };
-        let size = if is_64 { 0b11 } else { 0b10 };
+        let size = forced_size.unwrap_or(if is_64 { 0b11 } else { 0b10 });
         let word = (size << 30) | (0b001000010 << 21) | (0b11111 << 16) | (0 << 15)
             | (0b11111 << 10) | (rn << 5) | rt;
         Ok(EncodeResult::Word(word))
     } else {
-        // STXR Ws, Rt, [Rn]
         let (ws, _) = get_reg(operands, 0)?;
         let (rt, is_64) = get_reg(operands, 1)?;
         let rn = match operands.get(2) {
             Some(Operand::Mem { base, .. }) => parse_reg_num(base).ok_or("invalid base")?,
             _ => return Err("stxr needs memory operand".to_string()),
         };
-        let size = if is_64 { 0b11 } else { 0b10 };
+        let size = forced_size.unwrap_or(if is_64 { 0b11 } else { 0b10 });
         let word = (size << 30) | (0b001000000 << 21) | (ws << 16) | (0 << 15)
             | (0b11111 << 10) | (rn << 5) | rt;
         Ok(EncodeResult::Word(word))
     }
 }
 
-fn encode_ldaxr_stlxr(operands: &[Operand], is_load: bool) -> Result<EncodeResult, String> {
+/// Encode LDAXR/STLXR and byte/halfword variants.
+fn encode_ldaxr_stlxr(operands: &[Operand], is_load: bool, forced_size: Option<u32>) -> Result<EncodeResult, String> {
     if is_load {
         let (rt, is_64) = get_reg(operands, 0)?;
         let rn = match operands.get(1) {
             Some(Operand::Mem { base, .. }) => parse_reg_num(base).ok_or("invalid base")?,
             _ => return Err("ldaxr needs memory operand".to_string()),
         };
-        let size = if is_64 { 0b11 } else { 0b10 };
+        let size = forced_size.unwrap_or(if is_64 { 0b11 } else { 0b10 });
         let word = (size << 30) | (0b001000010 << 21) | (0b11111 << 16) | (1 << 15)
             | (0b11111 << 10) | (rn << 5) | rt;
         Ok(EncodeResult::Word(word))
@@ -1575,20 +1663,21 @@ fn encode_ldaxr_stlxr(operands: &[Operand], is_load: bool) -> Result<EncodeResul
             Some(Operand::Mem { base, .. }) => parse_reg_num(base).ok_or("invalid base")?,
             _ => return Err("stlxr needs memory operand".to_string()),
         };
-        let size = if is_64 { 0b11 } else { 0b10 };
+        let size = forced_size.unwrap_or(if is_64 { 0b11 } else { 0b10 });
         let word = (size << 30) | (0b001000000 << 21) | (ws << 16) | (1 << 15)
             | (0b11111 << 10) | (rn << 5) | rt;
         Ok(EncodeResult::Word(word))
     }
 }
 
-fn encode_ldar_stlr(operands: &[Operand], is_load: bool) -> Result<EncodeResult, String> {
+/// Encode LDAR/STLR and byte/halfword variants.
+fn encode_ldar_stlr(operands: &[Operand], is_load: bool, forced_size: Option<u32>) -> Result<EncodeResult, String> {
     let (rt, is_64) = get_reg(operands, 0)?;
     let rn = match operands.get(1) {
         Some(Operand::Mem { base, .. }) => parse_reg_num(base).ok_or("invalid base")?,
         _ => return Err("ldar/stlr needs memory operand".to_string()),
     };
-    let size = if is_64 { 0b11 } else { 0b10 };
+    let size = forced_size.unwrap_or(if is_64 { 0b11 } else { 0b10 });
     let l = if is_load { 1u32 } else { 0 };
     // LDAR/STLR: size 001000 1 L 0 11111 1 11111 Rn Rt
     let word = (size << 30) | (0b001000 << 24) | (1 << 23) | (l << 22) | (0 << 21)
@@ -2128,4 +2217,242 @@ fn encode_crc32(mnemonic: &str, operands: &[Operand]) -> Result<EncodeResult, St
     let word = (sf << 31) | (0b0011010110 << 21) | (rm << 16) | (0b010 << 13)
         | (c_bit << 12) | (sz << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
+}
+
+// ── NEON three-same register operations ──────────────────────────────────
+
+/// Get Q bit and size from arrangement specifier.
+fn neon_arr_to_q_size(arr: &str) -> Result<(u32, u32), String> {
+    match arr {
+        "8b" => Ok((0, 0b00)),
+        "16b" => Ok((1, 0b00)),
+        "4h" => Ok((0, 0b01)),
+        "8h" => Ok((1, 0b01)),
+        "2s" => Ok((0, 0b10)),
+        "4s" => Ok((1, 0b10)),
+        "2d" => Ok((1, 0b11)),
+        _ => Err(format!("unsupported NEON arrangement: {}", arr)),
+    }
+}
+
+/// Encode NEON three-same-register instructions: CMEQ, UQSUB, SQSUB, etc.
+/// `prefix_bits` and `opcode` encode the specific instruction.
+fn encode_neon_three_same(operands: &[Operand], prefix: u32, opcode: u32, _u_bit: bool) -> Result<EncodeResult, String> {
+    if operands.len() < 3 {
+        return Err("NEON three-same requires 3 operands".to_string());
+    }
+    let (rd, arr_d) = get_neon_reg(operands, 0)?;
+    let (rn, _arr_n) = get_neon_reg(operands, 1)?;
+    let (rm, _arr_m) = get_neon_reg(operands, 2)?;
+
+    let (q, size) = neon_arr_to_q_size(&arr_d)?;
+
+    // Generic three-same encoding: 0 Q U prefix size 1 Rm opcode 1 Rn Rd
+    // The exact bit layout depends on the instruction, but the caller passes
+    // the top bits (prefix includes the U bit) and opcode.
+    // Layout: 0 Q fffff size 1 Rm oooo 1 Rn Rd
+    //         31 30 29-24   22 21 20-16 15-11 10  9-5  4-0
+    let word = (q << 30) | (prefix << 24) | (size << 22) | (1 << 21)
+        | (rm << 16) | (opcode << 11) | (1 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+
+/// Encode NEON logical operations: ORR/AND/EOR Vd.T, Vn.T, Vm.T
+fn encode_neon_logical(operands: &[Operand], opc: u32) -> Result<EncodeResult, String> {
+    let (rd, arr_d) = get_neon_reg(operands, 0)?;
+    let (rn, _arr_n) = get_neon_reg(operands, 1)?;
+    let (rm, _arr_m) = get_neon_reg(operands, 2)?;
+
+    let q: u32 = if arr_d == "16b" { 1 } else { 0 };
+
+    // NEON logical three-same:
+    // ORR: 0 Q 0 01110 10 1 Rm 000111 Rn Rd  (opc=0b01 -> size=10)
+    // AND: 0 Q 0 01110 00 1 Rm 000111 Rn Rd  (opc=0b00 -> size=00)
+    // EOR: 0 Q 1 01110 00 1 Rm 000111 Rn Rd  (opc=0b10 -> size=00, U=1)
+    // BIC: 0 Q 0 01110 01 1 Rm 000111 Rn Rd  (would be opc=0b01 with N=1... but not needed)
+    let (u_bit, size_bits): (u32, u32) = match opc {
+        0b00 => (0, 0b00),  // AND
+        0b01 => (0, 0b10),  // ORR
+        0b10 => (1, 0b00),  // EOR
+        0b11 => (1, 0b00),  // ANDS - not valid for NEON, fall back
+        _ => return Err("unsupported NEON logical opc".to_string()),
+    };
+
+    let word = (q << 30) | (u_bit << 29) | (0b01110 << 24) | (size_bits << 22)
+        | (1 << 21) | (rm << 16) | (0b000111 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+
+/// Encode NEON MUL Vd.T, Vn.T, Vm.T
+fn encode_neon_mul(operands: &[Operand]) -> Result<EncodeResult, String> {
+    let (rd, arr_d) = get_neon_reg(operands, 0)?;
+    let (rn, _) = get_neon_reg(operands, 1)?;
+    let (rm, _) = get_neon_reg(operands, 2)?;
+    let (q, size) = neon_arr_to_q_size(&arr_d)?;
+
+    // MUL (vector): 0 Q 0 01110 size 1 Rm 10011 1 Rn Rd
+    let word = (q << 30) | (0b001110 << 24) | (size << 22) | (1 << 21)
+        | (rm << 16) | (0b100111 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+
+/// Encode NEON USHR Vd.T, Vn.T, #shift (unsigned shift right immediate)
+fn encode_neon_shift_imm(operands: &[Operand], _is_unsigned: bool) -> Result<EncodeResult, String> {
+    if operands.len() < 3 {
+        return Err("ushr requires 3 operands".to_string());
+    }
+    let (rd, arr_d) = get_neon_reg(operands, 0)?;
+    let (rn, _) = get_neon_reg(operands, 1)?;
+    let shift = get_imm(operands, 2)?;
+
+    let (q, _size) = neon_arr_to_q_size(&arr_d)?;
+
+    // USHR: 0 Q 1 011110 immh:immb 00000 1 Rn Rd
+    // For .16b (bytes, size=8): immh = 0001, immb = 8-shift (3 bits)
+    // For .8h (halfwords, size=16): immh = 001x
+    // For .4s (words, size=32): immh = 01xx
+    // For .2d (doublewords, size=64): immh = 1xxx
+    // immh:immb = (element_size * 2 - shift)
+    let (elem_bits, immh_immb) = match arr_d.as_str() {
+        "8b" | "16b" => (8u32, (16 - shift as u32) & 0xF),   // immh:immb is 4 bits for 8-bit elems
+        "4h" | "8h" => (16, (32 - shift as u32) & 0x1F),
+        "2s" | "4s" => (32, (64 - shift as u32) & 0x3F),
+        "2d" => (64, (128 - shift as u32) & 0x7F),
+        _ => return Err(format!("unsupported USHR arrangement: {}", arr_d)),
+    };
+    let _ = elem_bits;
+
+    // Full encoding: 0 Q 1 011110 immh:immb 000001 Rn Rd
+    let word = (q << 30) | (1 << 29) | (0b011110 << 23) | (immh_immb << 16)
+        | (0b000001 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+
+/// Encode NEON EXT Vd.T, Vn.T, Vm.T, #index
+fn encode_neon_ext(operands: &[Operand]) -> Result<EncodeResult, String> {
+    if operands.len() < 4 {
+        return Err("ext requires 4 operands".to_string());
+    }
+    let (rd, arr_d) = get_neon_reg(operands, 0)?;
+    let (rn, _) = get_neon_reg(operands, 1)?;
+    let (rm, _) = get_neon_reg(operands, 2)?;
+    let index = get_imm(operands, 3)? as u32;
+
+    let q: u32 = if arr_d == "16b" { 1 } else { 0 };
+
+    // EXT Vd.T, Vn.T, Vm.T, #index
+    // Encoding: 0 Q 10 1110 00 0 Rm 0 imm4 0 Rn Rd
+    let word = (q << 30) | (0b101110 << 24) | (0b00 << 22) | (0 << 21)
+        | (rm << 16) | (0 << 15) | ((index & 0xF) << 11) | (0 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+
+/// Encode NEON ADDV: add across vector lanes
+fn encode_neon_addv(operands: &[Operand]) -> Result<EncodeResult, String> {
+    if operands.len() < 2 {
+        return Err("addv requires 2 operands".to_string());
+    }
+    let (rd, _) = get_neon_reg(operands, 0)?;
+    let (rn, arr_n) = get_neon_reg(operands, 1)?;
+
+    let (q, size) = neon_arr_to_q_size(&arr_n)?;
+
+    // ADDV: 0 Q 0 01110 size 11000 11011 10 Rn Rd
+    let word = (q << 30) | (0b001110 << 24) | (size << 22) | (0b11000 << 17)
+        | (0b110111 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+
+/// Encode NEON UMOV: move element to GP register
+fn encode_neon_umov(operands: &[Operand]) -> Result<EncodeResult, String> {
+    if operands.len() < 2 {
+        return Err("umov requires 2 operands".to_string());
+    }
+    let (rd, is_64) = get_reg(operands, 0)?;
+
+    // Second operand should be a RegLane (v0.b[0])
+    match operands.get(1) {
+        Some(Operand::RegLane { reg, elem_size, index }) => {
+            let rn = parse_reg_num(reg).ok_or("invalid NEON register")?;
+            let q = if is_64 { 1u32 } else { 0 };
+
+            let imm5 = match elem_size.as_str() {
+                "b" => ((*index & 0xF) << 1) | 0b00001,
+                "h" => ((*index & 0x7) << 2) | 0b00010,
+                "s" => ((*index & 0x3) << 3) | 0b00100,
+                "d" => ((*index & 0x1) << 4) | 0b01000,
+                _ => return Err(format!("unsupported umov element size: {}", elem_size)),
+            };
+
+            // UMOV Rd, Vn.Ts[index]: 0 Q 0 01110 000 imm5 0 0111 1 Rn Rd
+            let word = (q << 30) | (0b001110000u32 << 21) | (imm5 << 16)
+                | (0b001111 << 10) | (rn << 5) | rd;
+            Ok(EncodeResult::Word(word))
+        }
+        _ => Err("umov: expected register lane operand".to_string()),
+    }
+}
+
+/// Encode NEON DUP: broadcast GP register to all vector lanes
+fn encode_neon_dup(operands: &[Operand]) -> Result<EncodeResult, String> {
+    if operands.len() < 2 {
+        return Err("dup requires 2 operands".to_string());
+    }
+    let (rd, arr_d) = get_neon_reg(operands, 0)?;
+
+    // DUP Vd.T, Rn (general form - broadcast GP reg to vector)
+    if let Some(Operand::Reg(rn_name)) = operands.get(1) {
+        let rn = parse_reg_num(rn_name).ok_or("invalid rn")?;
+        let (q, _) = neon_arr_to_q_size(&arr_d)?;
+
+        // imm5 encoding for element size:
+        // .8b/.16b: imm5 = 00001
+        // .4h/.8h:  imm5 = 00010
+        // .2s/.4s:  imm5 = 00100
+        // .2d:      imm5 = 01000
+        let imm5 = match arr_d.as_str() {
+            "8b" | "16b" => 0b00001u32,
+            "4h" | "8h" => 0b00010,
+            "2s" | "4s" => 0b00100,
+            "2d" => 0b01000,
+            _ => return Err(format!("unsupported dup arrangement: {}", arr_d)),
+        };
+
+        // DUP Vd.T, Rn: 0 Q 0 01110 000 imm5 0 0001 1 Rn Rd
+        let word = (q << 30) | (0b001110000u32 << 21) | (imm5 << 16)
+            | (0b000011 << 10) | (rn << 5) | rd;
+        return Ok(EncodeResult::Word(word));
+    }
+
+    Err("unsupported dup operands".to_string())
+}
+
+/// Encode DC (data cache) instruction: dc civac, Xt
+fn encode_dc(operands: &[Operand], raw_operands: &str) -> Result<EncodeResult, String> {
+    // Check for the operation type in the operands or raw string
+    let op = match operands.get(0) {
+        Some(Operand::Symbol(s)) => s.to_lowercase(),
+        _ => raw_operands.to_lowercase(),
+    };
+
+    if op.contains("civac") {
+        // Find the register operand (second operand)
+        let rt = match operands.get(1) {
+            Some(Operand::Reg(name)) => parse_reg_num(name).ok_or("invalid register for dc")?,
+            _ => {
+                // Fallback: last operand
+                if let Some(Operand::Reg(name)) = operands.last() {
+                    parse_reg_num(name).ok_or("invalid register for dc")?
+                } else {
+                    0
+                }
+            }
+        };
+        // DC CIVAC: sys #3, c7, c14, #1, Xt
+        // Encoding: 1101 0101 0000 1 011 0111 1110 001 Rt
+        let word = 0xd50b7e20 | rt;
+        return Ok(EncodeResult::Word(word));
+    }
+
+    Err(format!("unsupported dc variant: {}", raw_operands))
 }

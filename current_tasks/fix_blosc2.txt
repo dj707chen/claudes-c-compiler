@@ -1,9 +1,0 @@
-Fix blosc2 project: 32-bit unsigned multiply truncation bug
-
-The compiler generates 64-bit imul for uint32_t multiplications but fails to
-truncate the result back to 32 bits before using it in subsequent operations
-(like shift). This causes incorrect hash values in blosclz_compress.
-
-Root cause: When a 32-bit unsigned multiply result is immediately used in a
-shift expression like `(seq * 2654435761U) >> (32U - hashlog)`, the compiler
-sometimes omits the 32-bit truncation between the multiply and shift.

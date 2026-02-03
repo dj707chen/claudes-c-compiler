@@ -35,9 +35,9 @@ use crate::ir::analysis;
 /// compute the same value (assuming their operands are equivalent).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ExprKey {
-    BinOp { op: IrBinOp, lhs: VNOperand, rhs: VNOperand },
-    UnaryOp { op: IrUnaryOp, src: VNOperand },
-    Cmp { op: IrCmpOp, lhs: VNOperand, rhs: VNOperand },
+    BinOp { op: IrBinOp, lhs: VNOperand, rhs: VNOperand, ty: IrType },
+    UnaryOp { op: IrUnaryOp, src: VNOperand, ty: IrType },
+    Cmp { op: IrCmpOp, lhs: VNOperand, rhs: VNOperand, ty: IrType },
     Cast { src: VNOperand, from_ty: IrType, to_ty: IrType },
     Gep { base: VNOperand, offset: VNOperand, ty: IrType },
     /// Load CSE key: two loads from the same pointer with the same type
@@ -183,7 +183,7 @@ impl GvnState {
     /// the instruction is not eligible for value numbering.
     fn make_expr_key(&mut self, inst: &Instruction) -> Option<(ExprKey, Value)> {
         match inst {
-            Instruction::BinOp { dest, op, lhs, rhs, .. } => {
+            Instruction::BinOp { dest, op, lhs, rhs, ty } => {
                 let lhs_vn = self.operand_to_vn(lhs);
                 let rhs_vn = self.operand_to_vn(rhs);
 
@@ -194,16 +194,16 @@ impl GvnState {
                     (lhs_vn, rhs_vn)
                 };
 
-                Some((ExprKey::BinOp { op: *op, lhs: lhs_vn, rhs: rhs_vn }, *dest))
+                Some((ExprKey::BinOp { op: *op, lhs: lhs_vn, rhs: rhs_vn, ty: *ty }, *dest))
             }
-            Instruction::UnaryOp { dest, op, src, .. } => {
+            Instruction::UnaryOp { dest, op, src, ty } => {
                 let src_vn = self.operand_to_vn(src);
-                Some((ExprKey::UnaryOp { op: *op, src: src_vn }, *dest))
+                Some((ExprKey::UnaryOp { op: *op, src: src_vn, ty: *ty }, *dest))
             }
-            Instruction::Cmp { dest, op, lhs, rhs, .. } => {
+            Instruction::Cmp { dest, op, lhs, rhs, ty } => {
                 let lhs_vn = self.operand_to_vn(lhs);
                 let rhs_vn = self.operand_to_vn(rhs);
-                Some((ExprKey::Cmp { op: *op, lhs: lhs_vn, rhs: rhs_vn }, *dest))
+                Some((ExprKey::Cmp { op: *op, lhs: lhs_vn, rhs: rhs_vn, ty: *ty }, *dest))
             }
             Instruction::Cast { dest, src, from_ty, to_ty } => {
                 // Don't CSE casts to/from 128-bit types (complex codegen)

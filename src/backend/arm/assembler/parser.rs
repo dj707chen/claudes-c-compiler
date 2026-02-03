@@ -44,6 +44,8 @@ pub enum Operand {
     Expr(String),
     /// NEON register with arrangement specifier: v0.8b, v0.16b, v0.4s, etc.
     RegArrangement { reg: String, arrangement: String },
+    /// NEON register with lane index: v0.d[1], v0.b[0], v0.s[2], etc.
+    RegLane { reg: String, elem_size: String, index: u32 },
 }
 
 /// A parsed assembly statement.
@@ -316,6 +318,29 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
             return Ok(Operand::Cond(lower));
         }
         _ => {}
+    }
+
+    // NEON register with lane index: v0.d[1], v0.b[0], v0.s[2], etc.
+    if let Some(dot_pos) = s.find('.') {
+        let reg_part = &s[..dot_pos];
+        let arr_part = &s[dot_pos + 1..];
+        if is_register(reg_part) {
+            if let Some(bracket_pos) = arr_part.find('[') {
+                if arr_part.ends_with(']') {
+                    let elem_size = arr_part[..bracket_pos].to_lowercase();
+                    let idx_str = &arr_part[bracket_pos + 1..arr_part.len() - 1];
+                    if let Ok(idx) = idx_str.parse::<u32>() {
+                        if matches!(elem_size.as_str(), "b" | "h" | "s" | "d") {
+                            return Ok(Operand::RegLane {
+                                reg: reg_part.to_string(),
+                                elem_size,
+                                index: idx,
+                            });
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // NEON register with arrangement: v0.8b, v0.16b, v0.4s, v0.2d, etc.
