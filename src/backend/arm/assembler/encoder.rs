@@ -1777,37 +1777,167 @@ fn encode_fcmp(operands: &[Operand]) -> Result<EncodeResult, String> {
     Ok(EncodeResult::Word(word))
 }
 
-fn encode_fcvt(_operands: &[Operand], _is_signed: bool) -> Result<EncodeResult, String> {
-    // TODO: implement FCVTZS/FCVTZU properly
-    Ok(EncodeResult::Word(0xd503201f)) // NOP placeholder
+fn encode_fcvt(operands: &[Operand], is_signed: bool) -> Result<EncodeResult, String> {
+    // FCVTZS/FCVTZU: float-to-integer conversion (round toward zero)
+    // Encoding: sf 00 11110 ftype 1 11 opcode 000000 Rn Rd
+    // sf: 0=W dest, 1=X dest
+    // ftype: 00=S source, 01=D source
+    // rmode: 11 (toward zero)
+    // opcode: 000=signed (FCVTZS), 001=unsigned (FCVTZU)
+    if operands.len() < 2 {
+        return Err("fcvtzs/fcvtzu requires 2 operands".to_string());
+    }
+    let (rd, rd_is_64) = get_reg(operands, 0)?;
+    let (rn, _) = get_reg(operands, 1)?;
+
+    let src_name = match &operands[1] {
+        Operand::Reg(name) => name.to_lowercase(),
+        _ => return Err("fcvtzs/fcvtzu: expected register source".to_string()),
+    };
+    let ftype: u32 = if src_name.starts_with('d') { 0b01 } else { 0b00 };
+    let sf: u32 = if rd_is_64 { 1 } else { 0 };
+    let opcode: u32 = if is_signed { 0b000 } else { 0b001 };
+
+    let word = (sf << 31) | (0b00 << 29) | (0b11110 << 24) | (ftype << 22)
+        | (1 << 21) | (0b11 << 19) | (opcode << 16) | (0b000000 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
 }
 
-fn encode_ucvtf(_operands: &[Operand]) -> Result<EncodeResult, String> {
-    // TODO: implement UCVTF properly
-    Ok(EncodeResult::Word(0xd503201f)) // NOP placeholder
+fn encode_ucvtf(operands: &[Operand]) -> Result<EncodeResult, String> {
+    encode_int_to_float(operands, false)
 }
 
-fn encode_scvtf(_operands: &[Operand]) -> Result<EncodeResult, String> {
-    // TODO: implement SCVTF properly
-    Ok(EncodeResult::Word(0xd503201f)) // NOP placeholder
+fn encode_scvtf(operands: &[Operand]) -> Result<EncodeResult, String> {
+    encode_int_to_float(operands, true)
 }
 
-fn encode_fcvt_precision(_operands: &[Operand]) -> Result<EncodeResult, String> {
-    // FCVT Sd, Dn or FCVT Dd, Sn (precision conversion)
-    // TODO: implement properly
-    Ok(EncodeResult::Word(0xd503201f)) // NOP placeholder
+fn encode_int_to_float(operands: &[Operand], is_signed: bool) -> Result<EncodeResult, String> {
+    // SCVTF/UCVTF: integer-to-float conversion
+    // Encoding: sf 00 11110 ftype 1 00 opcode 000000 Rn Rd
+    // sf: 0=W source, 1=X source
+    // ftype: 00=S dest, 01=D dest
+    // opcode: 010=signed (SCVTF), 011=unsigned (UCVTF)
+    if operands.len() < 2 {
+        return Err("scvtf/ucvtf requires 2 operands".to_string());
+    }
+    let (rd, _) = get_reg(operands, 0)?;
+    let (rn, rn_is_64) = get_reg(operands, 1)?;
+
+    let dst_name = match &operands[0] {
+        Operand::Reg(name) => name.to_lowercase(),
+        _ => return Err("scvtf/ucvtf: expected register dest".to_string()),
+    };
+    let ftype: u32 = if dst_name.starts_with('d') { 0b01 } else { 0b00 };
+    let sf: u32 = if rn_is_64 { 1 } else { 0 };
+    let opcode: u32 = if is_signed { 0b010 } else { 0b011 };
+
+    let word = (sf << 31) | (0b00 << 29) | (0b11110 << 24) | (ftype << 22)
+        | (1 << 21) | (0b00 << 19) | (opcode << 16) | (0b000000 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+
+fn encode_fcvt_precision(operands: &[Operand]) -> Result<EncodeResult, String> {
+    // FCVT: float precision conversion (e.g., FCVT Dd, Sn or FCVT Sd, Dn)
+    // Encoding: 0 00 11110 ftype 1 0001 opc 10000 Rn Rd
+    // ftype: source precision (00=S, 01=D, 11=H)
+    // opc: dest precision (00=S, 01=D, 11=H)
+    if operands.len() < 2 {
+        return Err("fcvt requires 2 operands".to_string());
+    }
+    let (rd, _) = get_reg(operands, 0)?;
+    let (rn, _) = get_reg(operands, 1)?;
+
+    let dst_name = match &operands[0] {
+        Operand::Reg(name) => name.to_lowercase(),
+        _ => return Err("fcvt: expected register dest".to_string()),
+    };
+    let src_name = match &operands[1] {
+        Operand::Reg(name) => name.to_lowercase(),
+        _ => return Err("fcvt: expected register source".to_string()),
+    };
+
+    let ftype: u32 = match src_name.chars().next() {
+        Some('s') => 0b00,
+        Some('d') => 0b01,
+        Some('h') => 0b11,
+        _ => return Err(format!("fcvt: unsupported source type: {}", src_name)),
+    };
+    let opc: u32 = match dst_name.chars().next() {
+        Some('s') => 0b00,
+        Some('d') => 0b01,
+        Some('h') => 0b11,
+        _ => return Err(format!("fcvt: unsupported dest type: {}", dst_name)),
+    };
+
+    let word = (0b00011110 << 24) | (ftype << 22) | (1 << 21) | (0b0001 << 17)
+        | (opc << 15) | (0b10000 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
 }
 
 // ── NEON/SIMD ────────────────────────────────────────────────────────────
 
-fn encode_cnt(_operands: &[Operand]) -> Result<EncodeResult, String> {
-    // TODO: implement CNT (popcount) properly
-    Ok(EncodeResult::Word(0xd503201f)) // NOP placeholder
+/// Helper to extract register number from a RegArrangement operand
+fn get_neon_reg(operands: &[Operand], idx: usize) -> Result<(u32, String), String> {
+    match operands.get(idx) {
+        Some(Operand::RegArrangement { reg, arrangement }) => {
+            let num = parse_reg_num(reg)
+                .ok_or_else(|| format!("invalid NEON register: {}", reg))?;
+            Ok((num, arrangement.clone()))
+        }
+        Some(Operand::Reg(name)) => {
+            let num = parse_reg_num(name)
+                .ok_or_else(|| format!("invalid register: {}", name))?;
+            Ok((num, String::new()))
+        }
+        other => Err(format!("expected NEON register at operand {}, got {:?}", idx, other)),
+    }
 }
 
-fn encode_uaddlv(_operands: &[Operand]) -> Result<EncodeResult, String> {
-    // TODO: implement UADDLV properly
-    Ok(EncodeResult::Word(0xd503201f)) // NOP placeholder
+fn encode_cnt(operands: &[Operand]) -> Result<EncodeResult, String> {
+    // CNT Vd.<T>, Vn.<T>
+    // Encoding: 0 Q 00 1110 size 10 0000 0101 10 Rn Rd
+    // Only valid for .8b (Q=0) and .16b (Q=1)
+    if operands.len() < 2 {
+        return Err("cnt requires 2 operands".to_string());
+    }
+    let (rd, arr_d) = get_neon_reg(operands, 0)?;
+    let (rn, _arr_n) = get_neon_reg(operands, 1)?;
+
+    let q: u32 = if arr_d == "16b" { 1 } else { 0 }; // .8b -> Q=0, .16b -> Q=1
+
+    // 0 Q 00 1110 00 10 0000 0101 10 Rn Rd
+    let word = (q << 30) | (0b001110 << 24) | (0b00 << 22) | (0b100000 << 16)
+        | (0b010110 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+
+fn encode_uaddlv(operands: &[Operand]) -> Result<EncodeResult, String> {
+    // UADDLV Vd, Vn.<T>
+    // Encoding: 0 Q 1 01110 size 11 0000 0011 10 Rn Rd
+    // For .8b: Q=0, size=00, result in Hd
+    // For .16b: Q=1, size=00, result in Hd
+    // For .4h: Q=0, size=01, result in Sd
+    // For .8h: Q=1, size=01, result in Sd
+    // For .4s: Q=1, size=10, result in Dd
+    if operands.len() < 2 {
+        return Err("uaddlv requires 2 operands".to_string());
+    }
+    let (rd, _) = get_neon_reg(operands, 0)?;
+    let (rn, arr) = get_neon_reg(operands, 1)?;
+
+    let (q, size): (u32, u32) = match arr.as_str() {
+        "8b" => (0, 0b00),
+        "16b" => (1, 0b00),
+        "4h" => (0, 0b01),
+        "8h" => (1, 0b01),
+        "4s" => (1, 0b10),
+        _ => return Err(format!("uaddlv: unsupported arrangement: {}", arr)),
+    };
+
+    // 0 Q 1 01110 size 11 0000 0011 10 Rn Rd
+    let word = (q << 30) | (0b1 << 29) | (0b01110 << 24) | (size << 22)
+        | (0b11 << 20) | (0b0000 << 16) | (0b001110 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
 }
 
 // ── System instructions ──────────────────────────────────────────────────

@@ -42,6 +42,8 @@ pub enum Operand {
     Label(String),
     /// Raw expression (for things we can't fully parse yet)
     Expr(String),
+    /// NEON register with arrangement specifier: v0.8b, v0.16b, v0.4s, etc.
+    RegArrangement { reg: String, arrangement: String },
 }
 
 /// A parsed assembly statement.
@@ -314,6 +316,22 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
             return Ok(Operand::Cond(lower));
         }
         _ => {}
+    }
+
+    // NEON register with arrangement: v0.8b, v0.16b, v0.4s, v0.2d, etc.
+    if let Some(dot_pos) = s.find('.') {
+        let reg_part = &s[..dot_pos];
+        let arr_part = &s[dot_pos + 1..];
+        if is_register(reg_part) {
+            let arr_lower = arr_part.to_lowercase();
+            if matches!(arr_lower.as_str(), "8b" | "16b" | "4h" | "8h" | "2s" | "4s" | "1d" | "2d"
+                | "b" | "h" | "s" | "d") {
+                return Ok(Operand::RegArrangement {
+                    reg: reg_part.to_string(),
+                    arrangement: arr_lower,
+                });
+            }
+        }
     }
 
     // Register
