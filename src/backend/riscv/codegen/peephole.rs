@@ -710,7 +710,7 @@ fn gsf_invalidate_all(slots: &mut Vec<(i32, SlotMapping)>, reg_slots: &mut [Vec<
 
 /// Invalidate slot mappings whose byte range overlaps [store_off, store_off + store_size).
 fn gsf_invalidate_overlapping(
-    slots: &mut Vec<(i32, SlotMapping)>,
+    slots: &mut [(i32, SlotMapping)],
     reg_slots: &mut [Vec<i32>],
     store_off: i32,
     store_size: i32,
@@ -733,7 +733,7 @@ fn gsf_invalidate_overlapping(
 }
 
 /// Invalidate all slot mappings backed by a specific register.
-fn gsf_invalidate_reg(slots: &mut Vec<(i32, SlotMapping)>, reg_slots: &mut [Vec<i32>], reg: u8) {
+fn gsf_invalidate_reg(slots: &mut [(i32, SlotMapping)], reg_slots: &mut [Vec<i32>], reg: u8) {
     let r = reg as usize;
     if r >= reg_slots.len() {
         return;

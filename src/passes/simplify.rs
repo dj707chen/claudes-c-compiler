@@ -167,7 +167,7 @@ pub(crate) fn simplify_function(func: &mut IrFunction) -> usize {
 }
 
 /// Store a definition in a flat Vec, bounds-checked.
-fn set_def<T>(defs: &mut Vec<Option<T>>, id: u32, val: T) {
+fn set_def<T>(defs: &mut [Option<T>], id: u32, val: T) {
     let idx = id as usize;
     if idx < defs.len() {
         defs[idx] = Some(val);

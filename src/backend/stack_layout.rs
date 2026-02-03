@@ -1758,7 +1758,7 @@ fn assign_tier2_liveness_packed_slots(
 /// Pack values with known live intervals into shared stack slots using a min-heap.
 /// O(N log S) where N = values and S = slots.
 fn pack_values_into_slots(
-    values: &mut Vec<(u32, u32, u32)>,
+    values: &mut [(u32, u32, u32)],
     state: &mut super::state::CodegenState,
     non_local_space: &mut i64,
     slot_size: i64,

@@ -782,7 +782,7 @@ fn resolve_tied_and_types(
 /// build GCC operand numbering, and apply segment prefixes.
 fn finalize_operands_and_build_gcc_map(
     emitter: &mut dyn InlineAsmEmitter,
-    operands: &mut Vec<AsmOperand>,
+    operands: &mut [AsmOperand],
     outputs: &[(String, Value, Option<String>)],
     inputs: &[(String, Operand, Option<String>)],
     specific_regs: &[String],

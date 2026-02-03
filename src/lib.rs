@@ -19,9 +19,6 @@
 // Methods like to_ir_type() on Copy types take &self for consistency with non-Copy
 // siblings and trait method signatures.
 #![allow(clippy::wrong_self_convention)]
-// &mut Vec parameters in internal helpers are often mutated via push/extend, not just
-// slice operations, or need to match trait signatures.
-#![allow(clippy::ptr_arg)]
 
 pub(crate) mod common;
 pub(crate) mod frontend;

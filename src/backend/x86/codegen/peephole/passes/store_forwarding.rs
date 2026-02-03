@@ -136,7 +136,7 @@ fn deactivate_entry(entry: &mut SlotEntry, reg_offsets: &mut [SmallVec; 16]) {
 
 /// Invalidate slot mappings at a given offset.
 fn invalidate_slots_at(
-    slot_entries: &mut Vec<SlotEntry>, reg_offsets: &mut [SmallVec; 16],
+    slot_entries: &mut [SlotEntry], reg_offsets: &mut [SmallVec; 16],
     offset: i32, access_size: i32,
 ) {
     for entry in slot_entries.iter_mut().filter(|e| e.active) {
@@ -255,7 +255,7 @@ fn gsf_handle_store(
 fn gsf_handle_load(
     store: &mut LineStore, infos: &mut [LineInfo], i: usize,
     load_reg: RegId, load_offset: i32, load_size: MoveSize,
-    slot_entries: &mut Vec<SlotEntry>, reg_offsets: &mut [SmallVec; 16],
+    slot_entries: &mut [SlotEntry], reg_offsets: &mut [SmallVec; 16],
 ) -> bool {
     let mut changed = false;
     let mapping = slot_entries.iter().rev()
