@@ -1359,10 +1359,18 @@ impl SemanticAnalyzer {
             Expr::Cast(_, inner, _) => {
                 self.analyze_expr(inner);
             }
-            Expr::Sizeof(arg, _) => {
+            Expr::Sizeof(arg, span) => {
                 // sizeof is unevaluated context, but identifiers must still be declared
-                if let SizeofArg::Expr(inner) = arg.as_ref() {
-                    self.analyze_expr(inner);
+                match arg.as_ref() {
+                    SizeofArg::Expr(inner) => {
+                        self.analyze_expr(inner);
+                    }
+                    SizeofArg::Type(ts) => {
+                        // Check for sizeof on incomplete struct/union types.
+                        // sizeof(struct X) where struct X has no definition is an error.
+                        // (Pointers to incomplete types are fine.)
+                        self.check_sizeof_incomplete_type(ts, *span);
+                    }
                 }
             }
             Expr::Alignof(..) | Expr::GnuAlignof(..) => {} // alignof(type) - no expr to check
@@ -1517,6 +1525,40 @@ impl SemanticAnalyzer {
                     self.analyze_initializer(&item.init);
                 }
             }
+        }
+    }
+
+    /// Check if a sizeof type argument refers to an incomplete struct/union.
+    /// Reports an error like GCC: "invalid application of 'sizeof' to incomplete type"
+    fn check_sizeof_incomplete_type(&self, ts: &TypeSpecifier, span: Span) {
+        match ts {
+            TypeSpecifier::Struct(Some(tag), None, _, _, _) => {
+                // Reference to a named struct with no inline body.
+                // Check if it was previously defined (key format: "struct.tag").
+                let key = format!("struct.{}", tag);
+                if !self.defined_structs.borrow().contains(key.as_str()) {
+                    self.diagnostics.borrow_mut().error(
+                        format!("storage size of 'struct {}' isn't known", tag),
+                        span,
+                    );
+                }
+            }
+            TypeSpecifier::Union(Some(tag), None, _, _, _) => {
+                let key = format!("union.{}", tag);
+                if !self.defined_structs.borrow().contains(key.as_str()) {
+                    self.diagnostics.borrow_mut().error(
+                        format!("storage size of 'union {}' isn't known", tag),
+                        span,
+                    );
+                }
+            }
+            // Pointers to incomplete types are fine - sizeof gives pointer size
+            TypeSpecifier::Pointer(_, _) => {}
+            // Arrays of incomplete element types - check the element type
+            TypeSpecifier::Array(elem, _) => {
+                self.check_sizeof_incomplete_type(elem, span);
+            }
+            _ => {}
         }
     }
 

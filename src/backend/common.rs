@@ -52,6 +52,19 @@ pub struct LinkerConfig {
 pub fn assemble_with_extra(config: &AssemblerConfig, asm_text: &str, output_path: &str, extra_dynamic_args: &[String]) -> Result<(), String> {
     use crate::common::temp_files::TempFile;
 
+    // Check MY_ASM env var to allow overriding the assembler command.
+    let custom_asm = std::env::var("MY_ASM").ok();
+
+    // If MY_ASM=builtin, use the built-in x86-64 assembler (when available for this target).
+    if custom_asm.as_deref() == Some("builtin") {
+        if config.command == "gcc" {
+            // x86-64: use native assembler
+            return assemble_builtin_x86(asm_text, output_path);
+        }
+        // For other architectures, fall through to external assembler
+        // TODO: Add built-in assembler support for other architectures
+    }
+
     let keep_asm = std::env::var("CCC_KEEP_ASM").is_ok();
 
     // Create an RAII-guarded temp file for the assembly source.
@@ -74,8 +87,6 @@ pub fn assemble_with_extra(config: &AssemblerConfig, asm_text: &str, output_path
     std::fs::write(asm_file.path(), asm_text)
         .map_err(|e| format!("Failed to write assembly: {}", e))?;
 
-    // Check MY_ASM env var to allow overriding the assembler command.
-    let custom_asm = std::env::var("MY_ASM").ok();
     let asm_command = custom_asm.as_deref().unwrap_or(config.command);
 
     let mut cmd = Command::new(asm_command);
@@ -94,6 +105,14 @@ pub fn assemble_with_extra(config: &AssemblerConfig, asm_text: &str, output_path
         return Err(format!("Assembly failed ({}): {}", asm_command, stderr));
     }
 
+    Ok(())
+}
+
+/// Assemble x86-64 assembly text using the built-in native assembler.
+fn assemble_builtin_x86(asm_text: &str, output_path: &str) -> Result<(), String> {
+    let elf_bytes = crate::backend::x86::assembler::assemble(asm_text)?;
+    std::fs::write(output_path, &elf_bytes)
+        .map_err(|e| format!("Failed to write object file: {}", e))?;
     Ok(())
 }
 
