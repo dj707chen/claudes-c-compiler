@@ -1,0 +1,8 @@
+Docs cleanup: remove testing pipeline references and verify external project tracker
+
+Tasks:
+- Remove ideas/new_projects.txt (external project testing tracker, not part of main repo)
+- Clean up ideas/docs_verified_2026_01_29.txt to remove verify/testing pipeline references
+- Remove test suite / unit test references from main README
+- Verify subsystem README accuracy against current code
+- Polish documentation
