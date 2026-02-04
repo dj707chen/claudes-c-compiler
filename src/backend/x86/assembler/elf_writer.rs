@@ -115,7 +115,7 @@ struct SymbolInfo {
 }
 
 /// Builds an ELF relocatable object file from parsed assembly items.
-pub struct ObjectBuilder {
+pub struct ElfWriter {
     sections: Vec<Section>,
     symbols: Vec<SymbolInfo>,
     /// Map from section name to index in `sections`.
@@ -138,9 +138,9 @@ pub struct ObjectBuilder {
     aliases: HashMap<String, String>,
 }
 
-impl ObjectBuilder {
+impl ElfWriter {
     pub fn new() -> Self {
-        ObjectBuilder {
+        ElfWriter {
             sections: Vec::new(),
             symbols: Vec::new(),
             section_map: HashMap::new(),
@@ -502,7 +502,7 @@ impl ObjectBuilder {
         self.resolve_internal_relocations();
 
         // Build the ELF file
-        let mut elf = ElfWriter::new();
+        let mut elf = ElfByteWriter::new();
         elf.write_object(&self.sections, &self.symbols, &self.aliases, &self.label_positions)
     }
 
@@ -685,14 +685,14 @@ impl ObjectBuilder {
     }
 }
 
-/// Low-level ELF file writer.
-struct ElfWriter {
+/// Low-level ELF byte serializer.
+struct ElfByteWriter {
     output: Vec<u8>,
 }
 
-impl ElfWriter {
+impl ElfByteWriter {
     fn new() -> Self {
-        ElfWriter { output: Vec::new() }
+        ElfByteWriter { output: Vec::new() }
     }
 
     fn write_object(

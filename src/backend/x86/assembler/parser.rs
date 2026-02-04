@@ -188,7 +188,7 @@ pub enum Displacement {
 }
 
 /// Parse assembly text into a list of AsmItems.
-pub fn parse(text: &str) -> Result<Vec<AsmItem>, String> {
+pub fn parse_asm(text: &str) -> Result<Vec<AsmItem>, String> {
     let mut items = Vec::new();
 
     for (line_num, line) in text.lines().enumerate() {

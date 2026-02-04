@@ -1,5 +1,0 @@
-Harmonize assembler API consistency across x86, ARM, and RISC-V:
-- Rename x86 elf.rs -> elf_writer.rs, ObjectBuilder -> ElfWriter
-- Change x86 assemble() signature to match ARM/RISC-V (take output_path)
-- Rename x86 parser::parse() -> parse_asm() for consistency
-- Harmonize module visibility (pub(crate) -> pub)

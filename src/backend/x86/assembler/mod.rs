@@ -5,18 +5,26 @@
 //! that our codegen actually emits.
 //!
 //! Architecture:
-//! - `parser.rs`: Tokenize and parse AT&T syntax assembly text into `AsmItem`s
-//! - `encoder.rs`: Encode x86-64 instructions into machine code bytes
-//! - `elf.rs`: Write ELF relocatable object files (.o)
+//! - `parser.rs`     – Tokenize + parse AT&T syntax assembly text into `AsmItem` items
+//! - `encoder.rs`    – Encode x86-64 instructions into machine code bytes
+//! - `elf_writer.rs` – Write ELF object files with sections, symbols, and relocations
 
-pub(crate) mod parser;
-pub(crate) mod encoder;
-pub(crate) mod elf;
+pub mod parser;
+pub mod encoder;
+pub mod elf_writer;
 
-/// Assemble AT&T syntax x86-64 assembly text into an ELF .o file.
-/// Returns the ELF object file contents as bytes.
-pub fn assemble(asm_text: &str) -> Result<Vec<u8>, String> {
-    let items = parser::parse(asm_text)?;
-    let obj = elf::ObjectBuilder::new();
-    obj.build(&items)
+use parser::parse_asm;
+use elf_writer::ElfWriter;
+
+/// Assemble AT&T syntax x86-64 assembly text into an ELF object file.
+///
+/// This is the main entry point, called when MY_ASM is set to use the
+/// built-in assembler instead of the external `gcc`.
+pub fn assemble(asm_text: &str, output_path: &str) -> Result<(), String> {
+    let items = parse_asm(asm_text)?;
+    let obj = ElfWriter::new();
+    let elf_bytes = obj.build(&items)?;
+    std::fs::write(output_path, &elf_bytes)
+        .map_err(|e| format!("Failed to write object file: {}", e))?;
+    Ok(())
 }
