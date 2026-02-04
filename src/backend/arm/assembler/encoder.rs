@@ -2889,7 +2889,8 @@ fn encode_neon_pmul(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rm, _) = get_neon_reg(operands, 2)?;
     let q: u32 = if arr_d == "16b" { 1 } else { 0 };
     // PMUL: 0 Q 1 01110 00 1 Rm 10011 1 Rn Rd (size=00 for bytes, U=1)
-    let word = (q << 30) | (1 << 29) | (0b01110 << 24) | (0b00 << 22) | (1 << 21)
+    // PMUL encoding: size=00 (bytes) is implicit (zero bits at [23:22])
+    let word = (q << 30) | (1 << 29) | (0b01110 << 24) | (1 << 21)
         | (rm << 16) | (0b100111 << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
@@ -3082,7 +3083,7 @@ fn encode_neon_ins(operands: &[Operand]) -> Result<EncodeResult, String> {
             let (imm5, imm4) = match dst_size.as_str() {
                 "b" => (
                     ((*dst_idx & 0xF) << 1) | 0b00001,
-                    (*src_idx & 0xF) << 0,
+                    *src_idx & 0xF,
                 ),
                 "h" => (
                     ((*dst_idx & 0x7) << 2) | 0b00010,

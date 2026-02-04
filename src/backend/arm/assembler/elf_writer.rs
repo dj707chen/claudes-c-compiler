@@ -637,8 +637,8 @@ impl ElfWriter {
                         // ADR: op immlo[1:0] 10000 immhi[18:0] Rd
                         // immlo is bits [30:29], immhi is bits [23:5]
                         let imm = pc_offset as i32;
-                        let immlo = ((imm as u32) & 0x3) as u32;
-                        let immhi = (((imm as u32) >> 2) & 0x7FFFF) as u32;
+                        let immlo = (imm as u32) & 0x3;
+                        let immhi = ((imm as u32) >> 2) & 0x7FFFF;
                         word |= (immlo << 29) | (immhi << 5);
                     }
                     275 => {
@@ -648,8 +648,8 @@ impl ElfWriter {
                         let target_page = (target_offset as i64) & !0xFFF;
                         let page_off = target_page - pc_page;
                         let imm = (page_off >> 12) as i32;
-                        let immlo = ((imm as u32) & 0x3) as u32;
-                        let immhi = (((imm as u32) >> 2) & 0x7FFFF) as u32;
+                        let immlo = (imm as u32) & 0x3;
+                        let immhi = ((imm as u32) >> 2) & 0x7FFFF;
                         word |= (immlo << 29) | (immhi << 5);
                     }
                     _ => {

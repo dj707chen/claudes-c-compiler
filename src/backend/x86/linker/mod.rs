@@ -410,10 +410,10 @@ fn load_shared_library(
                 // both must be in our dynsym so the dynamic linker redirects all refs).
                 let bind = dsym.info >> 4;
                 let stype = dsym.info & 0xf;
-                if bind == STB_WEAK && stype == STT_OBJECT {
-                    if !matched_weak_objects.contains(&(dsym.value, dsym.size)) {
-                        matched_weak_objects.push((dsym.value, dsym.size));
-                    }
+                if bind == STB_WEAK && stype == STT_OBJECT
+                    && !matched_weak_objects.contains(&(dsym.value, dsym.size))
+                {
+                    matched_weak_objects.push((dsym.value, dsym.size));
                 }
             }
         }
@@ -422,16 +422,16 @@ fn load_shared_library(
     if !matched_weak_objects.is_empty() {
         for dsym in &dyn_syms {
             let stype = dsym.info & 0xf;
-            if stype == STT_OBJECT && matched_weak_objects.contains(&(dsym.value, dsym.size)) {
-                if !globals.contains_key(&dsym.name) {
-                    // Register the alias (e.g. __environ for environ)
-                    globals.insert(dsym.name.clone(), GlobalSymbol {
-                        value: 0, size: dsym.size, info: dsym.info,
-                        defined_in: None, from_lib: Some(soname.clone()),
-                        plt_idx: None, got_idx: None,
-                        section_idx: SHN_UNDEF, is_dynamic: true, copy_reloc: false, lib_sym_value: dsym.value,
-                    });
-                }
+            if stype == STT_OBJECT && matched_weak_objects.contains(&(dsym.value, dsym.size))
+                && !globals.contains_key(&dsym.name)
+            {
+                // Register the alias (e.g. __environ for environ)
+                globals.insert(dsym.name.clone(), GlobalSymbol {
+                    value: 0, size: dsym.size, info: dsym.info,
+                    defined_in: None, from_lib: Some(soname.clone()),
+                    plt_idx: None, got_idx: None,
+                    section_idx: SHN_UNDEF, is_dynamic: true, copy_reloc: false, lib_sym_value: dsym.value,
+                });
             }
         }
     }
@@ -498,10 +498,10 @@ fn resolve_dynamic_symbols(
                     // Track WEAK STT_OBJECT matches for alias registration
                     let bind = dsym.info >> 4;
                     let stype = dsym.info & 0xf;
-                    if bind == STB_WEAK && stype == STT_OBJECT {
-                        if !matched_weak_objects.contains(&(dsym.value, dsym.size)) {
-                            matched_weak_objects.push((dsym.value, dsym.size));
-                        }
+                    if bind == STB_WEAK && stype == STT_OBJECT
+                        && !matched_weak_objects.contains(&(dsym.value, dsym.size))
+                    {
+                        matched_weak_objects.push((dsym.value, dsym.size));
                     }
                 }
             }
@@ -510,16 +510,16 @@ fn resolve_dynamic_symbols(
         if !matched_weak_objects.is_empty() {
             for dsym in &dyn_syms {
                 let stype = dsym.info & 0xf;
-                if stype == STT_OBJECT && matched_weak_objects.contains(&(dsym.value, dsym.size)) {
-                    if !globals.contains_key(&dsym.name) {
-                        lib_needed = true;
-                        globals.insert(dsym.name.clone(), GlobalSymbol {
-                            value: 0, size: dsym.size, info: dsym.info,
-                            defined_in: None, from_lib: Some(soname.clone()),
-                            plt_idx: None, got_idx: None,
-                            section_idx: SHN_UNDEF, is_dynamic: true, copy_reloc: false, lib_sym_value: dsym.value,
-                        });
-                    }
+                if stype == STT_OBJECT && matched_weak_objects.contains(&(dsym.value, dsym.size))
+                    && !globals.contains_key(&dsym.name)
+                {
+                    lib_needed = true;
+                    globals.insert(dsym.name.clone(), GlobalSymbol {
+                        value: 0, size: dsym.size, info: dsym.info,
+                        defined_in: None, from_lib: Some(soname.clone()),
+                        plt_idx: None, got_idx: None,
+                        section_idx: SHN_UNDEF, is_dynamic: true, copy_reloc: false, lib_sym_value: dsym.value,
+                    });
                 }
             }
         }

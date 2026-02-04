@@ -1200,7 +1200,7 @@ pub fn parse_string_literal(s: &str) -> Result<Vec<u8>, String> {
                     Some('b') => bytes.push(8),  // backspace
                     Some('f') => bytes.push(12), // form feed
                     Some('v') => bytes.push(11), // vertical tab
-                    Some(c) if c >= '0' && c <= '7' => {
+                    Some(c) if ('0'..='7').contains(&c) => {
                         // Octal escape: \N, \NN, or \NNN (up to 3 digits)
                         let mut val = c as u32 - '0' as u32;
                         for _ in 0..2 {
