@@ -1,17 +1,17 @@
-# CCC -- Claude's C Compiler
+# CCC — Claude's C Compiler
 
 A C compiler written entirely from scratch in Rust, targeting x86-64, i686,
-AArch64, and RISC-V 64. Zero compiler-specific dependencies -- the frontend,
+AArch64, and RISC-V 64. Zero compiler-specific dependencies — the frontend,
 SSA-based IR, optimizer, code generator, peephole optimizers, assembler,
 linker, and DWARF debug info generation are all implemented from scratch.
-The compiler produces ELF executables without any external toolchain.
+Claude's C Compiler produces ELF executables without any external toolchain.
 
 ## Prerequisites
 
-- **Rust** (stable, 2021 edition) -- install via [rustup](https://rustup.rs/)
-- **Linux host** -- the compiler targets Linux ELF executables and relies on
-  Linux system headers / C runtime libraries (glibc or musl) being installed on
-  the host
+- **Rust** (stable, 2021 edition) — install via [rustup](https://rustup.rs/)
+- **Linux host** — the compiler targets Linux ELF executables and relies on
+  Linux system headers / C runtime libraries (glibc or musl) being installed
+  on the host
 - For cross-compilation targets (ARM, RISC-V, i686), the corresponding
   cross-compilation sysroots should be installed (e.g.,
   `aarch64-linux-gnu-gcc`, `riscv64-linux-gnu-gcc`)
@@ -32,6 +32,42 @@ source. The target architecture is selected by the binary name at runtime:
 | `ccc-arm` | AArch64 |
 | `ccc-riscv` | RISC-V 64 |
 | `ccc-i686` | i686 (32-bit x86) |
+
+## Quick Start
+
+Compile and run a simple C program:
+
+```bash
+# Write a test program
+cat > hello.c << 'EOF'
+#include <stdio.h>
+int main(void) {
+    printf("Hello from CCC!\n");
+    return 0;
+}
+EOF
+
+# Compile and run (x86-64)
+./target/release/ccc -o hello hello.c
+./hello
+
+# Cross-compile for AArch64 and run under QEMU
+./target/release/ccc-arm -o hello-arm hello.c
+qemu-aarch64 -L /usr/aarch64-linux-gnu ./hello-arm
+```
+
+CCC works as a drop-in GCC replacement. Point your build system at it:
+
+```bash
+# Build a project with make
+make CC=/path/to/ccc-x86
+
+# Build a project with CMake
+cmake -DCMAKE_C_COMPILER=/path/to/ccc-x86 ..
+
+# Build a project with configure scripts
+./configure CC=/path/to/ccc-x86
+```
 
 ## Usage
 
@@ -88,40 +124,6 @@ cargo build --release --features gcc_m16
 
 When compiled with GCC fallback features enabled, `--version` shows which
 components use GCC (e.g., `Backend: gcc_assembler, gcc_linker`).
-
-## Getting Started
-
-Write a simple C program:
-
-```c
-// hello.c
-#include <stdio.h>
-
-int main(void) {
-    printf("Hello from Claude's C Compiler!\n");
-    return 0;
-}
-```
-
-Compile and run it:
-
-```bash
-./target/release/ccc -o hello hello.c
-./hello
-```
-
-The compiler works as a drop-in GCC replacement in most build systems:
-
-```bash
-# Use CCC with Make
-make CC=./target/release/ccc
-
-# Use CCC with CMake
-cmake -DCMAKE_C_COMPILER=./target/release/ccc ..
-
-# Use CCC with configure scripts
-./configure CC=./target/release/ccc
-```
 
 ## Status
 

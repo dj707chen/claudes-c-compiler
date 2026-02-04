@@ -2,7 +2,7 @@
 name = "ccc"
 version = "0.1.0"
 edition = "2021"
-description = "Claude's C Compiler -- a C compiler targeting x86-64, i686, ARM64, and RISC-V"
+description = "Claude's C Compiler — a C compiler targeting x86-64, i686, ARM64, and RISC-V"
 autobins = false
 
 [[bin]]
@@ -33,4 +33,3 @@ gcc_assembler = []
 # Allow GCC passthrough for -m16 mode (16-bit real-mode boot code).
 # When enabled and GCC is used, a prominent warning is printed.
 gcc_m16 = []
-
