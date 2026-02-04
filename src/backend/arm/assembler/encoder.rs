@@ -186,6 +186,7 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
         "eor" => encode_logical(operands, 0b10),
         "ands" => encode_logical(operands, 0b11),
         "orn" => encode_orn(operands),
+        "eon" => encode_eon(operands),
         "bics" => encode_bics(operands),
         "mul" => encode_mul(operands),
         "madd" => encode_madd(operands),
@@ -318,7 +319,7 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
         "ins" => encode_neon_ins(operands),
         "not" => encode_neon_not(operands),
         "movi" => encode_neon_movi(operands),
-        "bic" => encode_neon_bic(operands),
+        "bic" => encode_bic(operands),
         "bsl" => encode_neon_bsl(operands),
         "rev64" => encode_neon_rev64(operands),
         "tbl" => encode_neon_tbl(operands),
@@ -891,23 +892,25 @@ fn encode_bitmask_imm(val: u64, is_64: bool) -> Option<(u32, u32, u32)> {
         }
 
         // Find rotation: rotate elem right until the least significant bit is 1
-        // and the run of 1s starts at bit 0
-        let mut rotated = elem;
+        // and the run of 1s starts at bit 0.
+        // The `r` we find is the right-rotation from actual -> base.
+        // immr is the right-rotation from base -> actual = size - r (mod size).
+        let mut found_rotation = false;
         let mut rotation = 0u32;
-        // Rotate right until we find a 0->1 transition at bit 0
         for r in 0..size {
             let rot = ((elem >> r) | (elem << (size - r))) & mask;
             // Check if this is a contiguous run from bit 0
             let run = rot.trailing_ones();
             if run == ones {
-                rotated = rot;
-                rotation = r;
+                // r rotates actual -> base, so immr = size - r (mod size) rotates base -> actual
+                rotation = if r == 0 { 0 } else { size - r };
+                found_rotation = true;
                 break;
             }
         }
-
-        // Now rotated has `ones` consecutive 1s starting at bit 0
-        let _ = rotated;
+        if !found_rotation {
+            continue;
+        }
 
         // Encode the fields
         let n = if size == 64 { 1u32 } else { 0u32 };
@@ -2792,6 +2795,66 @@ fn encode_neon_movi(operands: &[Operand]) -> Result<EncodeResult, String> {
     }
 }
 
+/// Encode BIC instruction - disambiguates between scalar and NEON forms.
+/// Scalar register: BIC Xd, Xn, Xm [, shift #amount] -> AND NOT (opc=00, N=1)
+/// Scalar immediate: BIC Xd, Xn, #imm -> AND Xd, Xn, #~imm
+/// NEON vector: BIC Vd.T, Vn.T, Vm.T
+fn encode_bic(operands: &[Operand]) -> Result<EncodeResult, String> {
+    if operands.len() < 3 {
+        return Err("bic requires 3 operands".to_string());
+    }
+
+    // NEON vector form: BIC Vd.T, Vn.T, Vm.T
+    if let Some(Operand::RegArrangement { .. }) = operands.get(0) {
+        return encode_neon_bic(operands);
+    }
+
+    let (rd, is_64) = get_reg(operands, 0)?;
+    let (rn, _) = get_reg(operands, 1)?;
+    let sf = sf_bit(is_64);
+
+    // BIC Xd, Xn, #imm -> AND Xd, Xn, #~imm (bitmask immediate, inverted)
+    if let Some(Operand::Imm(imm)) = operands.get(2) {
+        let width = if is_64 { 64 } else { 32 };
+        let inverted = if is_64 {
+            !(*imm as u64)
+        } else {
+            (!(*imm as u32)) as u64
+        };
+        if let Some((n, immr, imms)) = encode_bitmask_imm(inverted, is_64) {
+            // AND Rd, Rn, #~imm: sf 00 100100 N immr imms Rn Rd
+            let word = (sf << 31) | (0b00 << 29) | (0b100100 << 23) | (n << 22) | (immr << 16) | (imms << 10) | (rn << 5) | rd;
+            return Ok(EncodeResult::Word(word));
+        }
+        return Err(format!("cannot encode bitmask immediate for bic: 0x{:x} (inverted: 0x{:x}, width: {})", imm, inverted, width));
+    }
+
+    // BIC Xd, Xn, Xm [, shift #amount]: sf 00 01010 shift 1 Rm imm6 Rn Rd (N=1)
+    if let Some(Operand::Reg(rm_name)) = operands.get(2) {
+        let rm = parse_reg_num(rm_name).ok_or("invalid rm register for bic")?;
+
+        let (shift_type, shift_amount) = if let Some(Operand::Shift { kind, amount }) = operands.get(3) {
+            let st = match kind.as_str() {
+                "lsl" => 0b00u32,
+                "lsr" => 0b01,
+                "asr" => 0b10,
+                "ror" => 0b11,
+                _ => 0b00,
+            };
+            (st, *amount)
+        } else {
+            (0, 0)
+        };
+
+        // BIC is AND with N=1 (bit 21): sf 00 01010 shift 1 Rm imm6 Rn Rd
+        let word = (sf << 31) | (0b00 << 29) | (0b01010 << 24) | (shift_type << 22) | (1 << 21)
+            | (rm << 16) | ((shift_amount as u32 & 0x3F) << 10) | (rn << 5) | rd;
+        return Ok(EncodeResult::Word(word));
+    }
+
+    Err("unsupported bic operands".to_string())
+}
+
 /// Encode NEON BIC (bitwise clear vector): BIC Vd.T, Vn.T, Vm.T
 fn encode_neon_bic(operands: &[Operand]) -> Result<EncodeResult, String> {
     if operands.len() < 3 {
@@ -3177,13 +3240,55 @@ fn encode_orn(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rm, _) = get_reg(operands, 2)?;
     let sf = sf_bit(is_64);
 
-    // ORN Rd, Rn, Rm: sf 01 01010 00 1 Rm 000000 Rn Rd
-    let word = (((sf << 31) | (0b01 << 29) | (0b01010 << 24)) | (1 << 21)
-        | (rm << 16)) | (rn << 5) | rd;
+    let (shift_type, shift_amount) = if let Some(Operand::Shift { kind, amount }) = operands.get(3) {
+        let st = match kind.as_str() {
+            "lsl" => 0b00u32,
+            "lsr" => 0b01,
+            "asr" => 0b10,
+            "ror" => 0b11,
+            _ => 0b00,
+        };
+        (st, *amount)
+    } else {
+        (0, 0)
+    };
+
+    // ORN Rd, Rn, Rm [, shift #amount]: sf 01 01010 shift 1 Rm imm6 Rn Rd
+    let word = (sf << 31) | (0b01 << 29) | (0b01010 << 24) | (shift_type << 22) | (1 << 21)
+        | (rm << 16) | ((shift_amount as u32 & 0x3F) << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
-/// Encode BICS (bitwise clear, setting flags): BICS Rd, Rn, Rm
+/// Encode EON (exclusive OR NOT): EON Rd, Rn, Rm [, shift #amount]
+fn encode_eon(operands: &[Operand]) -> Result<EncodeResult, String> {
+    if operands.len() < 3 {
+        return Err("eon requires 3 operands".to_string());
+    }
+    let (rd, is_64) = get_reg(operands, 0)?;
+    let (rn, _) = get_reg(operands, 1)?;
+    let (rm, _) = get_reg(operands, 2)?;
+    let sf = sf_bit(is_64);
+
+    let (shift_type, shift_amount) = if let Some(Operand::Shift { kind, amount }) = operands.get(3) {
+        let st = match kind.as_str() {
+            "lsl" => 0b00u32,
+            "lsr" => 0b01,
+            "asr" => 0b10,
+            "ror" => 0b11,
+            _ => 0b00,
+        };
+        (st, *amount)
+    } else {
+        (0, 0)
+    };
+
+    // EON Rd, Rn, Rm [, shift #amount]: sf 10 01010 shift 1 Rm imm6 Rn Rd (opc=10, N=1)
+    let word = (sf << 31) | (0b10 << 29) | (0b01010 << 24) | (shift_type << 22) | (1 << 21)
+        | (rm << 16) | ((shift_amount as u32 & 0x3F) << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+
+/// Encode BICS (bitwise clear, setting flags): BICS Rd, Rn, Rm [, shift #amount]
 fn encode_bics(operands: &[Operand]) -> Result<EncodeResult, String> {
     if operands.len() < 3 {
         return Err("bics requires 3 operands".to_string());
@@ -3193,9 +3298,22 @@ fn encode_bics(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rm, _) = get_reg(operands, 2)?;
     let sf = sf_bit(is_64);
 
-    // BICS Rd, Rn, Rm: sf 11 01010 00 1 Rm 000000 Rn Rd
-    let word = (((sf << 31) | (0b11 << 29) | (0b01010 << 24)) | (1 << 21)
-        | (rm << 16)) | (rn << 5) | rd;
+    let (shift_type, shift_amount) = if let Some(Operand::Shift { kind, amount }) = operands.get(3) {
+        let st = match kind.as_str() {
+            "lsl" => 0b00u32,
+            "lsr" => 0b01,
+            "asr" => 0b10,
+            "ror" => 0b11,
+            _ => 0b00,
+        };
+        (st, *amount)
+    } else {
+        (0, 0)
+    };
+
+    // BICS Rd, Rn, Rm [, shift #amount]: sf 11 01010 shift 1 Rm imm6 Rn Rd
+    let word = (sf << 31) | (0b11 << 29) | (0b01010 << 24) | (shift_type << 22) | (1 << 21)
+        | (rm << 16) | ((shift_amount as u32 & 0x3F) << 10) | (rn << 5) | rd;
     Ok(EncodeResult::Word(word))
 }
 
