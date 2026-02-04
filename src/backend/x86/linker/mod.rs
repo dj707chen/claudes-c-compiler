@@ -185,16 +185,33 @@ pub fn link_builtin(
         }
     }
 
-    // Load needed libraries
-    for lib_name in needed_libs {
-        if let Some(lib_path) = resolve_lib(lib_name, &all_lib_paths) {
-            load_file(&lib_path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths)?;
-        }
-    }
+    // Load needed libraries using group resolution (like ld's --start-group/--end-group).
+    // This iterates all archives until no new objects are pulled in, handling circular
+    // dependencies between archives (e.g., libc.a needing symbols from libgcc.a and vice versa).
+    {
+        let mut all_lib_names: Vec<String> = needed_libs.iter().map(|s| s.to_string()).collect();
+        all_lib_names.extend(libs_to_load.iter().cloned());
 
-    for lib_name in &libs_to_load {
-        if let Some(lib_path) = resolve_lib(lib_name, &all_lib_paths) {
-            load_file(&lib_path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths)?;
+        let mut lib_paths_resolved: Vec<String> = Vec::new();
+        for lib_name in &all_lib_names {
+            if let Some(lib_path) = resolve_lib(lib_name, &all_lib_paths) {
+                if !lib_paths_resolved.contains(&lib_path) {
+                    lib_paths_resolved.push(lib_path);
+                }
+            }
+        }
+
+        // Group loading: iterate all archives until stable
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let prev_count = objects.len();
+            for lib_path in &lib_paths_resolved {
+                load_file(lib_path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths)?;
+            }
+            if objects.len() != prev_count {
+                changed = true;
+            }
         }
     }
 

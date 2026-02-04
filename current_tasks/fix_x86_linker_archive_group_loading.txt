@@ -1,0 +1,11 @@
+Fix x86-64 builtin linker archive group loading.
+
+The x86-64 builtin linker processes archives sequentially in a single pass,
+which can miss symbols due to circular dependencies between archives
+(e.g., libc.a needs symbols from libgcc.a and vice versa).
+
+The fix implements multi-pass archive group resolution (equivalent to
+ld's --start-group/--end-group), iterating all archives until no new
+objects are pulled in.
+
+This matches the fix already applied to the RISC-V and ARM linkers.

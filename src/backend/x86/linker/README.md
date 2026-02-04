@@ -241,8 +241,8 @@ precedence:
 2. User object files (compiler output)
 3. Extra object/archive files from user args (-Wl,...)
 4. CRT objects after (crtn.o)
-5. Needed libraries (-lc, -lm, etc.)
-6. Extra libraries from user -l flags
+5. All needed libraries in a group loop (-lc, -lm, -lgcc, user -l flags)
+   Iterates until no new objects are pulled in (handles circular dependencies)
 ```
 
 The `load_file()` function dispatches based on file format:
@@ -669,12 +669,18 @@ The `.gnu.hash` section is emitted as a minimal stub (28 bytes, 1 bucket,
 fall back to linear search for symbol lookup.  A real hash table would improve
 startup performance for executables with many dynamic symbols.
 
-### 5. Archive Selective Loading
+### 5. Archive Selective Loading (Group Resolution)
 
 Archives are loaded using the traditional Unix semantics: only members that
 define symbols satisfying currently-undefined references are pulled in.  The
 iteration continues until a fixed point is reached, handling chains of
 dependencies between archive members.
+
+All libraries (both default and user-specified) are loaded in a group loop,
+equivalent to `ld`'s `--start-group`/`--end-group`.  This handles circular
+dependencies between archives (e.g., `libc.a` needing `__letf2` from
+`libgcc.a` on architectures with software floating-point).  The outer loop
+re-scans all archives until no new objects are pulled in.
 
 ### 6. Copy Relocations for Dynamic Data Objects
 
