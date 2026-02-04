@@ -2015,20 +2015,30 @@ fn emit_int_data(out: &mut AsmOutput, val: i64, ty: IrType, ptr_dir: PtrDirectiv
 /// a pre-computed lookup table to convert bytes to decimal strings
 /// without fmt::Write overhead.
 pub fn emit_string_bytes(out: &mut AsmOutput, s: &str) {
-    out.buf.push_str("    .byte ");
-    let mut first = true;
+    // Chunk output into lines of at most 32 bytes each to avoid
+    // extremely long lines that can cause parser performance issues.
+    let mut count = 0;
     for c in s.chars() {
-        if !first {
+        if count % 32 == 0 {
+            if count > 0 {
+                out.buf.push('\n');
+            }
+            out.buf.push_str("    .byte ");
+        } else {
             out.buf.push_str(", ");
         }
-        first = false;
         push_u8_decimal(&mut out.buf, c as u8);
+        count += 1;
     }
     // Null terminator
-    if !first {
-        out.buf.push_str(", ");
+    if count % 32 == 0 {
+        if count > 0 {
+            out.buf.push('\n');
+        }
+        out.buf.push_str("    .byte 0\n");
+    } else {
+        out.buf.push_str(", 0\n");
     }
-    out.buf.push_str("0\n");
 }
 
 /// Append a u8 value as a decimal string directly into the buffer.

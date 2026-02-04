@@ -310,9 +310,24 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
         "fsub" => encode_fp_arith(operands, 0b0011),
         "fmul" => encode_fp_arith(operands, 0b0000),
         "fdiv" => encode_fp_arith(operands, 0b0001),
+        "fmax" => encode_fp_arith(operands, 0b0100),
+        "fmin" => encode_fp_arith(operands, 0b0101),
+        "fmaxnm" => encode_fp_arith(operands, 0b0110),
+        "fminnm" => encode_fp_arith(operands, 0b0111),
         "fneg" => encode_fneg(operands),
         "fabs" => encode_fabs(operands),
         "fsqrt" => encode_fsqrt(operands),
+        "frintn" => encode_fp_1src(operands, 0b001000),
+        "frintp" => encode_fp_1src(operands, 0b001001),
+        "frintm" => encode_fp_1src(operands, 0b001010),
+        "frintz" => encode_fp_1src(operands, 0b001011),
+        "frinta" => encode_fp_1src(operands, 0b001100),
+        "frintx" => encode_fp_1src(operands, 0b001110),
+        "frinti" => encode_fp_1src(operands, 0b001111),
+        "fmadd" => encode_fmadd_fmsub(operands, false),
+        "fmsub" => encode_fmadd_fmsub(operands, true),
+        "fnmadd" => encode_fnmadd_fnmsub(operands, false),
+        "fnmsub" => encode_fnmadd_fnmsub(operands, true),
         "fcmp" => encode_fcmp(operands),
         "fcvtzs" => encode_fcvt_rounding(operands, 0b11, 0b000), // toward zero, signed
         "fcvtzu" => encode_fcvt_rounding(operands, 0b11, 0b001), // toward zero, unsigned
@@ -2170,6 +2185,51 @@ fn encode_fsqrt(operands: &[Operand]) -> Result<EncodeResult, String> {
     Ok(EncodeResult::Word(word))
 }
 
+/// Encode FP 1-source ops: FRINTN/P/M/Z/A/X/I
+/// Format: 0 00 11110 ftype 1 opcode 10000 Rn Rd
+fn encode_fp_1src(operands: &[Operand], opcode: u32) -> Result<EncodeResult, String> {
+    let (rd, _) = get_reg(operands, 0)?;
+    let (rn, _) = get_reg(operands, 1)?;
+    let rd_name = match &operands[0] { Operand::Reg(r) => r.to_lowercase(), _ => String::new() };
+    let is_double = rd_name.starts_with('d');
+    let ftype = if is_double { 0b01u32 } else { 0b00 };
+    let word = (0b00011110u32 << 24) | (ftype << 22) | (1 << 21)
+        | (opcode << 15) | (0b10000 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+
+/// Encode FMADD/FMSUB: Rd = Ra +/- (Rn * Rm)
+/// Format: 0 00 11111 ftype 0 Rm o1 Ra Rn Rd
+fn encode_fmadd_fmsub(operands: &[Operand], is_sub: bool) -> Result<EncodeResult, String> {
+    let (rd, _) = get_reg(operands, 0)?;
+    let (rn, _) = get_reg(operands, 1)?;
+    let (rm, _) = get_reg(operands, 2)?;
+    let (ra, _) = get_reg(operands, 3)?;
+    let rd_name = match &operands[0] { Operand::Reg(r) => r.to_lowercase(), _ => String::new() };
+    let is_double = rd_name.starts_with('d');
+    let ftype = if is_double { 0b01u32 } else { 0b00 };
+    let o1 = if is_sub { 1u32 } else { 0 };
+    let word = (0b00011111u32 << 24) | (ftype << 22) | (rm << 16)
+        | (o1 << 15) | (ra << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+
+/// Encode FNMADD/FNMSUB: Rd = -Ra +/- (Rn * Rm)
+/// Format: 0 00 11111 ftype 1 Rm o1 Ra Rn Rd
+fn encode_fnmadd_fnmsub(operands: &[Operand], is_sub: bool) -> Result<EncodeResult, String> {
+    let (rd, _) = get_reg(operands, 0)?;
+    let (rn, _) = get_reg(operands, 1)?;
+    let (rm, _) = get_reg(operands, 2)?;
+    let (ra, _) = get_reg(operands, 3)?;
+    let rd_name = match &operands[0] { Operand::Reg(r) => r.to_lowercase(), _ => String::new() };
+    let is_double = rd_name.starts_with('d');
+    let ftype = if is_double { 0b01u32 } else { 0b00 };
+    let o1 = if is_sub { 1u32 } else { 0 };
+    let word = (0b00011111u32 << 24) | (ftype << 22) | (1 << 21) | (rm << 16)
+        | (o1 << 15) | (ra << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+
 fn encode_fcmp(operands: &[Operand]) -> Result<EncodeResult, String> {
     let (rn, _) = get_reg(operands, 0)?;
     let rn_name = match &operands[0] { Operand::Reg(r) => r.to_lowercase(), _ => String::new() };
@@ -2415,6 +2475,7 @@ fn encode_mrs(operands: &[Operand]) -> Result<EncodeResult, String> {
         "tpidr_el0" => 0xde82u32, // 11 011 1101 0000 010
         "cntfrq_el0" => 0xdf00,
         "cntvct_el0" => 0xdf02,
+        "dczid_el0" => 0xd807, // S3_3_C0_C0_7: o0=1 011 0000 0000 111
         "fpcr" => 0xda20,
         "fpsr" => 0xda21,
         "nzcv" => 0xda10,
@@ -3815,22 +3876,26 @@ fn encode_dc(operands: &[Operand], raw_operands: &str) -> Result<EncodeResult, S
         _ => raw_operands.to_lowercase(),
     };
 
-    if op.contains("civac") {
-        // Find the register operand (second operand)
-        let rt = match operands.get(1) {
-            Some(Operand::Reg(name)) => parse_reg_num(name).ok_or("invalid register for dc")?,
-            _ => {
-                // Fallback: last operand
-                if let Some(Operand::Reg(name)) = operands.last() {
-                    parse_reg_num(name).ok_or("invalid register for dc")?
-                } else {
-                    0
-                }
+    // Find the register operand (second operand or last operand)
+    let rt = match operands.get(1) {
+        Some(Operand::Reg(name)) => parse_reg_num(name).ok_or("invalid register for dc")?,
+        _ => {
+            if let Some(Operand::Reg(name)) = operands.last() {
+                parse_reg_num(name).ok_or("invalid register for dc")?
+            } else {
+                0
             }
-        };
+        }
+    };
+
+    if op.contains("civac") {
         // DC CIVAC: sys #3, c7, c14, #1, Xt
-        // Encoding: 1101 0101 0000 1 011 0111 1110 001 Rt
         let word = 0xd50b7e20 | rt;
+        return Ok(EncodeResult::Word(word));
+    }
+    if op.contains("zva") {
+        // DC ZVA: sys #3, c7, c4, #1, Xt
+        let word = 0xd50b7420 | rt;
         return Ok(EncodeResult::Word(word));
     }
 

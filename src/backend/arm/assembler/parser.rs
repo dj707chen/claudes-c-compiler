@@ -178,6 +178,16 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
             continue;
         }
 
+        // Skip C preprocessor line markers: # <number> "filename" [flags...]
+        // These are emitted when .S files are preprocessed before assembly.
+        if line.starts_with("# ") {
+            let rest = line[2..].trim_start();
+            if rest.bytes().next().map_or(false, |b| b.is_ascii_digit()) {
+                statements.push(AsmStatement::Empty);
+                continue;
+            }
+        }
+
         // Handle ';' as statement separator (GAS syntax).
         // Split the line on ';' and parse each part independently.
         let parts = split_on_semicolons(line);
@@ -225,30 +235,48 @@ fn split_on_semicolons(line: &str) -> Vec<&str> {
 }
 
 fn strip_comment(line: &str) -> &str {
-    // Handle // comments
-    if let Some(pos) = line.find("//") {
-        // Make sure it's not inside a string
-        let before = &line[..pos];
-        if before.matches('"').count().is_multiple_of(2) {
-            return &line[..pos];
+    // Scan character by character, tracking string state to find comments
+    // outside of string literals. This correctly handles escaped quotes (\")
+    // inside strings (e.g. .asciz "a\"b//c" should not strip at //).
+    let bytes = line.as_bytes();
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        if in_string {
+            if bytes[i] == b'\\' {
+                i += 2; // skip escaped character
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
         }
-    }
-    // Handle @ comments (GAS ARM comment character)
-    if let Some(pos) = line.find('@') {
-        // Don't strip @object, @function, @progbits, @nobits, @tls_object, @note
-        let after = &line[pos + 1..];
-        if !after.starts_with("object")
-            && !after.starts_with("function")
-            && !after.starts_with("progbits")
-            && !after.starts_with("nobits")
-            && !after.starts_with("tls_object")
-            && !after.starts_with("note")
-        {
-            let before = &line[..pos];
-            if before.matches('"').count().is_multiple_of(2) {
-                return &line[..pos];
+        // Not in string
+        if bytes[i] == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        // Check for // comment
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            return &line[..i];
+        }
+        // Check for @ comment (GAS ARM comment character)
+        if bytes[i] == b'@' {
+            let after = &line[i + 1..];
+            if !after.starts_with("object")
+                && !after.starts_with("function")
+                && !after.starts_with("progbits")
+                && !after.starts_with("nobits")
+                && !after.starts_with("tls_object")
+                && !after.starts_with("note")
+            {
+                return &line[..i];
             }
         }
+        i += 1;
     }
     line
 }
@@ -716,13 +744,24 @@ fn parse_memory_operand(s: &str) -> Result<Operand, String> {
 
     let second = parts[1].trim();
 
-    // [base, #imm]
+    // [base, #imm] or [base, imm] (bare immediate without # prefix)
     if let Some(imm_str) = second.strip_prefix('#') {
         let offset = parse_int_literal(imm_str)?;
         if has_writeback {
             return Ok(Operand::MemPreIndex { base, offset });
         }
         return Ok(Operand::Mem { base, offset });
+    }
+
+    // Handle bare immediate without # prefix (e.g., [sp, -16]! or [x0, 8])
+    // Check if the second operand starts with a digit or minus sign followed by a digit
+    if second.starts_with('-') || second.starts_with('+') || second.bytes().next().map_or(false, |b| b.is_ascii_digit()) {
+        if let Ok(offset) = parse_int_literal(second) {
+            if has_writeback {
+                return Ok(Operand::MemPreIndex { base, offset });
+            }
+            return Ok(Operand::Mem { base, offset });
+        }
     }
 
     // [base, :lo12:symbol]
@@ -838,6 +877,28 @@ fn parse_int_literal(s: &str) -> Result<i64, String> {
         return Err("empty integer literal".to_string());
     }
 
+    // Check if this is a simple expression with +, -, * operators (e.g., "176+8+8")
+    // We need to be careful not to break hex parsing (0x...) or negative numbers
+    if s.contains('+') || (s.contains('-') && !s.starts_with('-') && !s.starts_with("0x") && !s.starts_with("0X"))
+        || (s.starts_with('-') && s[1..].contains('+'))
+        || (s.starts_with('-') && s[1..].contains('-'))
+        || s.contains('*')
+    {
+        if let Ok(val) = eval_simple_expr(s) {
+            return Ok(val);
+        }
+    }
+
+    parse_single_int(s)
+}
+
+/// Parse a single integer value (no arithmetic expressions)
+fn parse_single_int(s: &str) -> Result<i64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty integer literal".to_string());
+    }
+
     let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
         (true, rest)
     } else {
@@ -860,6 +921,47 @@ fn parse_int_literal(s: &str) -> Result<i64, String> {
     } else {
         Ok(val as i64)
     }
+}
+
+/// Evaluate a simple arithmetic expression with +, -, * operators (left-to-right)
+/// Supports expressions like "176+8+8", "0x100-0x10"
+fn eval_simple_expr(s: &str) -> Result<i64, String> {
+    let s = s.trim();
+    // Tokenize: split on +, -, * while keeping the operators
+    let mut terms: Vec<(char, String)> = Vec::new();
+    let mut start = 0;
+    let mut op = '+'; // implicit leading +
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    // Handle leading minus as part of the first number
+    if i < bytes.len() && bytes[i] == b'-' {
+        i += 1;
+    }
+    while i < bytes.len() {
+        if (bytes[i] == b'+' || bytes[i] == b'-' || bytes[i] == b'*') && i > start {
+            terms.push((op, s[start..i].to_string()));
+            op = bytes[i] as char;
+            start = i + 1;
+            i = start;
+        } else {
+            i += 1;
+        }
+    }
+    if start < s.len() {
+        terms.push((op, s[start..].to_string()));
+    }
+
+    let mut result: i64 = 0;
+    for (operator, val_str) in &terms {
+        let val = parse_single_int(val_str)?;
+        match operator {
+            '+' => result += val,
+            '-' => result -= val,
+            '*' => result *= val,
+            _ => return Err(format!("unexpected operator '{}' in expression", operator)),
+        }
+    }
+    Ok(result)
 }
 
 fn is_register(s: &str) -> bool {

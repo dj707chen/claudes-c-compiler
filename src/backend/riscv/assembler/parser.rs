@@ -232,19 +232,39 @@ fn split_on_semicolons(line: &str) -> Vec<&str> {
 }
 
 fn strip_comment(line: &str) -> &str {
-    // Handle # comments (GAS RISC-V comment character)
-    if let Some(pos) = line.find('#') {
-        let before = &line[..pos];
-        if before.matches('"').count().is_multiple_of(2) {
-            return &line[..pos];
+    // Scan character by character, tracking string state to find comments
+    // outside of string literals. This correctly handles escaped quotes (\")
+    // inside strings (e.g. .asciz "a\"b#c" should not strip at #).
+    let bytes = line.as_bytes();
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        if in_string {
+            if bytes[i] == b'\\' {
+                i += 2; // skip escaped character
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
         }
-    }
-    // Handle // comments
-    if let Some(pos) = line.find("//") {
-        let before = &line[..pos];
-        if before.matches('"').count().is_multiple_of(2) {
-            return &line[..pos];
+        // Not in string
+        if bytes[i] == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
         }
+        // Check for # comment (GAS RISC-V comment character)
+        if bytes[i] == b'#' {
+            return &line[..i];
+        }
+        // Check for // comment
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            return &line[..i];
+        }
+        i += 1;
     }
     line
 }
