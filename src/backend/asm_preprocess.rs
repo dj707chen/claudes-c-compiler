@@ -30,12 +30,37 @@ pub enum CommentStyle {
 
 /// Strip C-style `/* ... */` comments from assembly text, handling multi-line spans.
 /// Preserves newlines inside comments so line numbers remain correct for error messages.
+/// String-aware: does not strip `/* */` inside quoted string literals (e.g. `.asciz` data).
 pub fn strip_c_comments(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut i = 0;
+    let mut in_string = false;
+    let mut escape = false;
     while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+        if in_string {
+            if escape {
+                escape = false;
+                result.push(bytes[i] as char);
+                i += 1;
+                continue;
+            }
+            if bytes[i] == b'\\' {
+                escape = true;
+                result.push(bytes[i] as char);
+                i += 1;
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+            }
+            // Newlines end the string context (unterminated string on this line)
+            if bytes[i] == b'\n' {
+                in_string = false;
+            }
+            result.push(bytes[i] as char);
+            i += 1;
+        } else if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
             i += 2;
             while i + 1 < bytes.len() {
                 if bytes[i] == b'*' && bytes[i + 1] == b'/' {
@@ -48,6 +73,9 @@ pub fn strip_c_comments(text: &str) -> String {
                 i += 1;
             }
         } else {
+            if bytes[i] == b'"' {
+                in_string = true;
+            }
             result.push(bytes[i] as char);
             i += 1;
         }
@@ -534,7 +562,26 @@ mod tests {
     #[test]
     fn test_strip_c_comments() {
         assert_eq!(strip_c_comments("a /* b */ c"), "a  c");
-        assert_eq!(strip_c_comments("a /* b\nc */ d"), "a \nd");
+        assert_eq!(strip_c_comments("a /* b\nc */ d"), "a \n d");
+    }
+
+    #[test]
+    fn test_strip_c_comments_preserves_strings() {
+        // /* inside a quoted string must not be treated as a comment
+        assert_eq!(
+            strip_c_comments(r#".asciz "hello/*world*/end""#),
+            r#".asciz "hello/*world*/end""#
+        );
+        // Escaped quotes inside strings should not end the string
+        assert_eq!(
+            strip_c_comments(r#".asciz "a\"/*b*/c""#),
+            r#".asciz "a\"/*b*/c""#
+        );
+        // /* outside strings should still be stripped
+        assert_eq!(
+            strip_c_comments(r#".asciz "hello" /* comment */ .byte 1"#),
+            r#".asciz "hello"  .byte 1"#
+        );
     }
 
     #[test]

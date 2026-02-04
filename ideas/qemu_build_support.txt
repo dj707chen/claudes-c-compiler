@@ -1,18 +1,23 @@
 QEMU Build Support Status
 =========================
 
-Summary: QEMU 10.2.50 can be compiled (1700+ C files) and linked using ccc-x86
-without any gcc wrapper workarounds. --version, -cpu help, and basic VM startup
-work correctly. Must use --enable-slirp for user networking support.
-Serial output from guest (kernel boot console) is not displayed - likely
-a miscompilation in the chardev/serial I/O path.
+Summary: QEMU 10.2.50 compiles, links, and runs correctly using ccc-x86.
+The emulator boots a Linux kernel with serial console output (console=ttyS0)
+working properly, including running busybox init from an initramfs.
+RISC-V softmmu target also compiles and links. ARM aarch64 target has
+compilation errors in translate-sve.c (1915 undeclared helper symbols).
 
 Build Status:
 - Configure: PASS
-- Compilation: PASS (all files including qapi-introspect.c compile natively)
+- Compilation: PASS (all 1806 files for x86_64-softmmu)
 - Linking: PASS
-- Runtime: PARTIAL - "--version", "-cpu help", and VM startup work (no crash),
-  but serial console output from the guest is missing (no output on -nographic)
+- Runtime: PASS - boots Linux kernel with serial output, runs busybox shell
+- Full make build: 2911/2913 targets succeed (2 test binaries fail to link)
+
+Supported Targets:
+- x86_64-softmmu: FULL PASS (compile, link, boot Linux, serial output works)
+- riscv64-softmmu: compile + link OK, runtime untested
+- aarch64-softmmu: FAIL (1915 undeclared helper symbols in translate-sve.c)
 
 Build Steps:
   1. Copy QEMU source to writable location (cp -r /deps/qemu /tmp/qemu_build)
@@ -23,9 +28,8 @@ Build Steps:
        --disable-opengl --disable-virglrenderer --disable-spice --disable-vte
        --disable-curses
   3. Build: ninja -j$(nproc) qemu-system-x86_64
-  Note: `make -j128` builds all targets including test libraries. One test file
-  (virtio-9p-client.c) fails due to __attribute__((common, weak)) interaction
-  with the assembler. Use `ninja qemu-system-x86_64` to build just the emulator.
+  4. Test: ./qemu-system-x86_64 -kernel bzImage -initrd initramfs.cpio.gz
+         -append "console=ttyS0 rdinit=/init" -nographic -no-reboot -m 256M
 
 Known Issues Fixed:
   1. __has_attribute macro aliasing (cleanup attribute) - FIXED
@@ -34,41 +38,25 @@ Known Issues Fixed:
   4. Compound literal array init (CPU double-registration) - FIXED
   5. Bool pointer array init (migration crash) - FIXED
   6. Preprocessor MAX_PENDING_NEWLINES too low for qapi-introspect.c - FIXED
-     The preprocessor's line accumulation limit for multi-line macro invocations
-     was 2000 lines, but QEMU's QLIT_QLIST() macro spans ~32000 lines.
-     Increased to 100,000.
   7. _Generic selection in global/static initializer arrays - FIXED
-     QEMU's OUTOP macro uses _Generic in designated initializers:
-       [INDEX_op_st32] = _Generic(outop_st, TCGOutOpStore: &outop_st.base)
-     The all_outop[] array was zero-initialized because _Generic was not
-     resolved in eval_const_expr, eval_global_addr_expr, array_needs_compound_init,
-     or collect_compound_init_element. This caused SIGILL in opcode_args_ct()
-     when tcg_target_op_def returned C_NotImplemented for basic TCG opcodes.
   8. xgetbv inline assembly instruction not handled - FIXED
-     QEMU's cpuinfo-i386.c uses `asm("xgetbv")` for AVX feature detection.
-     Added xgetbv (0F 01 D0) and xsetbv (0F 01 D1) to the x86 assembler.
   9. Thin archive (.a with !<thin> magic) not supported by linker - FIXED
-     Meson/ninja creates thin archives by default. These contain only member
-     headers and a name table; actual .o data lives in external files.
-     Added parse_thin_archive_members() to elf.rs and load_thin_archive()
-     to all four backend linkers (x86, ARM, i686, RISC-V).
-     Also fixed name parsing: thin archive member names can end with '/'
-     in the 16-byte header field (e.g., "/23607/"), requiring proper
-     trimming before parsing the offset number.
+ 10. Assembler C-comment stripping inside .asciz strings - FIXED
+     The strip_c_comments() function stripped /* ... */ patterns even inside
+     quoted string literals in .asciz directives. QEMU's test-crypto-der.c
+     has DER-encoded RSA keys containing literal 0x2F 0x2A (/*) byte sequences
+     which were being treated as comment starts, truncating the string data.
+     Fixed in all three assemblers (x86, ARM, RISC-V) by adding string-aware
+     tracking to strip_c_comments().
+ 11. Serial console output fixed (was previously reported as missing) - FIXED
+     Serial output from guest Linux kernel now works correctly with -nographic.
 
 Remaining Issues:
-  1. Test library virtio-9p-client.c: __attribute__((common, weak)) on
-     global_qtest causes assembler error "symbol can not be both weak and common".
-     Not blocking - only affects test targets, not the main emulator binary.
-  2. Serial console output not reaching chardev backend:
-     When running with -nographic or -serial file:..., the guest kernel's
-     serial output (console=ttyS0) is never written to the output fd.
-     The QEMU main loop polls normally and the VM runs, but no serial data
-     appears. The chardev/serial emulation path may have another
-     miscompilation - strace shows only eventfd writes, no file writes.
-     Note: Must use --enable-slirp during configure for -net user support
-     (slirp is a meson subproject, not available via system pkg-config).
-
-Priority: HIGH - Serial output is the remaining blocker for running a
-Linux kernel with DOOM in the compiled QEMU. The VM starts and doesn't
-crash, but without serial output there's no way to interact with the guest.
+  1. Two test binaries fail to link (test-qmp-event, fp-test):
+     Missing symbols (qmp_event_build_dict, add128, etc.) - likely build
+     system issues with archive search order, not compiler bugs.
+  2. ARM aarch64-softmmu target: 1915 undeclared helper symbols in
+     translate-sve.c. These are gen_helper_sme2_* and gen_helper_sve2p1_*
+     functions generated from DEF_HELPER macros in helper-sme.h.
+     Root cause needs investigation (likely a preprocessor or macro
+     expansion issue specific to the ARM TCG helper generation).
