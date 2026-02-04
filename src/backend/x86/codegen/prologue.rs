@@ -206,6 +206,17 @@ impl X86Codegen {
 
         let stack_base: i64 = 16;
 
+        // Build a map from physical register -> list of param indices that use it,
+        // so we can detect when two params share the same callee-saved register.
+        let mut reg_to_params: crate::common::fx_hash::FxHashMap<u8, Vec<usize>> = crate::common::fx_hash::FxHashMap::default();
+        for (i, _) in func.params.iter().enumerate() {
+            if let Some(paramref_dest) = paramref_dests[i] {
+                if let Some(&phys_reg) = self.reg_assignments.get(&paramref_dest.0) {
+                    reg_to_params.entry(phys_reg.0).or_default().push(i);
+                }
+            }
+        }
+
         for (i, _param) in func.params.iter().enumerate() {
             let class = param_classes[i];
 
@@ -229,14 +240,20 @@ impl X86Codegen {
                         // haven't been saved yet.
                         let is_callee_saved = phys_reg.0 >= 1 && phys_reg.0 <= 5;
                         if is_callee_saved {
-                            let dest_reg = phys_reg_name(phys_reg);
-                            match class {
-                                ParamClass::IntReg { reg_idx } => {
-                                    self.state.out.emit_instr_reg_reg(
-                                        "    movq", X86_ARG_REGS[reg_idx], dest_reg);
-                                    self.state.param_pre_stored.insert(i);
+                            // Safety check: if another param's dest is also assigned
+                            // to this register, skip pre-store to avoid conflicts.
+                            let shared = reg_to_params.get(&phys_reg.0)
+                                .map_or(false, |users| users.len() > 1);
+                            if !shared {
+                                let dest_reg = phys_reg_name(phys_reg);
+                                match class {
+                                    ParamClass::IntReg { reg_idx } => {
+                                        self.state.out.emit_instr_reg_reg(
+                                            "    movq", X86_ARG_REGS[reg_idx], dest_reg);
+                                        self.state.param_pre_stored.insert(i);
+                                    }
+                                    _ => {} // TODO: handle StackSlot/SSE params
                                 }
-                                _ => {} // TODO: handle StackSlot/SSE params
                             }
                         }
                     }

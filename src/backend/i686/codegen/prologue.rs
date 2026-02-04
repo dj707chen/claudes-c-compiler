@@ -260,6 +260,19 @@ impl I686Codegen {
         let stack_base: i64 = 8;
         let mut fastcall_reg_idx = 0usize;
 
+        // Build a map from physical register -> list of param indices that use it,
+        // so we can detect when two params share the same callee-saved register.
+        let mut reg_to_params: crate::common::fx_hash::FxHashMap<u8, Vec<usize>> = crate::common::fx_hash::FxHashMap::default();
+        if self.is_fastcall {
+            for (i, _) in func.params.iter().enumerate() {
+                if let Some(paramref_dest) = paramref_dests[i] {
+                    if let Some(&phys_reg) = self.reg_assignments.get(&paramref_dest.0) {
+                        reg_to_params.entry(phys_reg.0).or_default().push(i);
+                    }
+                }
+            }
+        }
+
         for (i, _param) in func.params.iter().enumerate() {
             let class = param_classes[i];
 
@@ -282,10 +295,16 @@ impl I686Codegen {
                         let src_reg = if fastcall_reg_idx == 0 { "%ecx" } else { "%edx" };
                         if let Some(paramref_dest) = paramref_dests[i] {
                             if let Some(&phys_reg) = self.reg_assignments.get(&paramref_dest.0) {
-                                // Store directly to the callee-saved register
-                                let dest_reg = phys_reg_name(phys_reg);
-                                emit!(self.state, "    movl {}, %{}", src_reg, dest_reg);
-                                self.state.param_pre_stored.insert(i);
+                                // Safety check: if another param's dest is also assigned
+                                // to this register, skip pre-store to avoid conflicts.
+                                let shared = reg_to_params.get(&phys_reg.0)
+                                    .map_or(false, |users| users.len() > 1);
+                                if !shared {
+                                    // Store directly to the callee-saved register
+                                    let dest_reg = phys_reg_name(phys_reg);
+                                    emit!(self.state, "    movl {}, %{}", src_reg, dest_reg);
+                                    self.state.param_pre_stored.insert(i);
+                                }
                             } else if let Some(slot) = self.state.get_slot(paramref_dest.0) {
                                 // Value was spilled to a stack slot
                                 let slot_ref = self.slot_ref(slot);

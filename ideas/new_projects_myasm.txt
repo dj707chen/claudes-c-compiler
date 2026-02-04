@@ -2,7 +2,7 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 
 | Project | x86 | i686 | arm | riscv | Notes |
 |---------|-----|------|-----|-------|-------|
-| lz4     | PASS | PASS | FAIL | FAIL | i686 fixed by local symbol reloc fix |
+| lz4     | PASS | PASS | PASS | PASS | i686 fixed by local symbol reloc fix; arm/riscv now pass |
 | libyaml | PASS | PASS | PASS | PASS | i686 fixed by local symbol reloc fix |
 | tomlc99 | PASS | PASS | PASS | PASS | i686 fixed by local symbol reloc fix |
 | parson  | PASS | PASS | PASS | PASS | i686 fixed by local symbol reloc fix |
@@ -50,13 +50,13 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | gumbo   | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | md4c    | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | libtommath | PASS | PASS | PASS | PASS | All architectures pass out of the box |
-| flatcc  | PASS | PASS | FAIL (arm segfault) | PASS | arm crashes at runtime in monster_test |
+| flatcc  | PASS | PASS | PASS | PASS | Fixed by pre-store register conflict fix (same as libharu) |
 | mbedtls | PASS | PASS | PASS | PASS | Fixed i686 asm: added AES-NI instructions; fixed SUB/SBB misencoding as byte ops (mnemonic_size_suffix bug) |
 | giflib  | PASS | PASS | PASS | PASS | i686 fixed by COMDAT groups + GOTPC + PIC codegen fixes |
 | arithcode | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | tweetnacl | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | kann    | PASS | PASS | FAIL (arm NEON) | PASS | Fixed: added MXCSR macros/functions to xmmintrin.h, added stmxcsr/ldmxcsr to i686 asm |
-| libucl  | PASS | PASS | FAIL (arm) | PASS | arm fails (separate issue) |
+| libucl  | PASS | PASS | PASS | PASS | Fixed by pre-store register conflict fix (same as libharu) |
 | mpack   | PASS | PASS | PASS | PASS | Fixed ARM: FP param spill clobbered GP arg regs (x0) in prologue |
 | argtable3 | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | cwalk   | PASS | PASS | PASS | PASS | All architectures pass out of the box |
@@ -99,7 +99,7 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | discount | PASS | PASS | PASS | PASS | Fixed x86 linker: local symbol collision (local STB_LOCAL symbols were resolved to global symbols with same name from other object files) |
 | gdbm    | PASS | PASS | PASS | PASS | Fixed RISC-V linker: added _Unwind/gcc_personality to linker_defined list + fixed .so search in linker scripts |
 | xz_liblzma | PASS (with -DXZ_CLMUL_CRC=OFF) | TODO | TODO | TODO | Fixed inline asm early-clobber + callee-saved overflow. CLMUL CRC codegen is a separate bug. |
-| libharu | PASS | PASS | FAIL (arm segfault) | PASS | Fixed: verbose -v link output now emits ld line with -L paths + LIBRARY_PATH for CMake implicit lib dir detection |
+| libharu | PASS | PASS | PASS | PASS | Fixed ARM segfault: pre-store optimization register conflict in prologue codegen (param dest registers could collide when regalloc reused callee-saved regs) |
 | map     | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | sort.h  | PASS | TODO | TODO | TODO | Passes x86 |
 | fastlz  | PASS | PASS | PASS | PASS | All architectures pass out of the box |
@@ -141,7 +141,7 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | uthash  | PASS | TODO | TODO | TODO | Passes x86 |
 | rax     | PASS | TODO | TODO | TODO | Passes x86 |
 | par     | PASS | TODO | TODO | TODO | Passes x86 |
-| dr_libs | PASS | PASS | FAIL (arm) | PASS | ARM fails (separate issue) |
+| dr_libs | PASS | PASS | PASS | PASS | Fixed by pre-store register conflict fix (same as libharu) |
 | fenster | PASS | PASS | PASS | PASS | All architectures pass |
 | microui | PASS | TODO | TODO | TODO | Passes x86 |
 | nanovg  | PASS | TODO | TODO | TODO | Passes x86 |

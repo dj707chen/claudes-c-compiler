@@ -176,6 +176,17 @@ impl ArmCodegen {
                 }
             }
         }
+        // Build a map from physical register -> list of param indices that use it,
+        // so we can detect when two params share the same callee-saved register.
+        let mut reg_to_params: crate::common::fx_hash::FxHashMap<u8, Vec<usize>> = crate::common::fx_hash::FxHashMap::default();
+        for (i, _) in func.params.iter().enumerate() {
+            if let Some(paramref_dest) = paramref_dests[i] {
+                if let Some(&phys_reg) = self.reg_assignments.get(&paramref_dest.0) {
+                    reg_to_params.entry(phys_reg.0).or_default().push(i);
+                }
+            }
+        }
+
         for (i, _) in func.params.iter().enumerate() {
             let class = param_classes[i];
             if !class.uses_gp_reg() { continue; }
@@ -192,6 +203,16 @@ impl ArmCodegen {
                     // they may overlap with scratch registers.
                     let is_callee_saved = phys_reg.0 >= 20 && phys_reg.0 <= 28;
                     if is_callee_saved {
+                        // Safety check: if another param's dest is also assigned
+                        // to this register, skip pre-store to avoid conflicts.
+                        // The register allocator may assign the same register to
+                        // two params whose live ranges don't overlap, but pre-store
+                        // extends the effective lifetime to function entry.
+                        if let Some(users) = reg_to_params.get(&phys_reg.0) {
+                            if users.len() > 1 {
+                                continue;
+                            }
+                        }
                         let dest_reg = callee_saved_name(phys_reg);
                         match class {
                             ParamClass::IntReg { reg_idx } => {
