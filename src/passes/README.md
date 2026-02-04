@@ -237,7 +237,7 @@ containing `VaStart`/`VaEnd`/`VaArg`, `DynAlloca`, `StackSave`/`StackRestore`,
 | Category | Instruction limit | Block limit | Notes |
 |---|---|---|---|
 | Tiny | 5 | 1 | Always inlined, ignores caller size |
-| Small / static inline | 20 | 3 | Always inlined if under caller budget |
+| Small / static inline | 20 | 3 | Always inlined if budget not exhausted, or if `always_inline` |
 | Normal static | 30 | 4 | Inlined if under caller budget |
 | Normal eligible | 60 | 6 | Inlined if under caller budget |
 | `always_inline` | 500 | 500 | Separate 200-instruction budget (main) + 400 (second pass) |
@@ -261,10 +261,13 @@ handles correctness-critical cases where the main loop's budget or round limit
 was exhausted before resolving all always_inline chains (e.g., KVM nVHE functions
 referencing section-specific symbols, or `cpucap_is_possible()` chains that must
 be inlined to eliminate `__attribute__((error))` calls and undefined symbol
-references). The two budgets are independent, so the combined maximum is 200 +
-400 = 600 always_inline instructions per caller. The second pass does not enforce
-caller size caps (hard cap, absolute cap) because these are correctness-critical
-inlines that must proceed regardless of caller size.
+references). Small `always_inline` callees (≤20 instructions, ≤3 blocks) bypass
+the budget in both passes because they have correctness requirements: inline asm
+`"i"` constraints (e.g., `arch_static_branch`'s `__jump_table` entries) need
+resolved symbol references. The two budgets are independent, so the combined
+maximum is 200 + 400 = 600 always_inline instructions per caller. The second
+pass does not enforce caller size caps (hard cap, absolute cap) because these
+are correctness-critical inlines that must proceed regardless of caller size.
 
 **Mechanics.** The inliner clones the callee's blocks with remapped value and
 block IDs, wires arguments by inserting stores into the callee's parameter

@@ -218,10 +218,15 @@ fn select_inline_site(
     //    references to undefined symbols (e.g., fscache_clear_page_bits)
     //
     // However, once the always_inline budget is exhausted, only TINY
-    // callees (≤5 instructions, single block) are picked. Small callees
-    // (6-20 instructions) individually have "negligible" impact but
-    // collectively cause catastrophic stack bloat when a function has
-    // 200+ always_inline call sites (e.g., kernel's shrink_folio_list).
+    // callees (≤5 instructions, single block) and small __always_inline
+    // callees are picked. Non-always_inline small callees (6-20 instructions)
+    // individually have "negligible" impact but collectively cause catastrophic
+    // stack bloat when a function has 200+ call sites (e.g., kernel's
+    // shrink_folio_list). Small __always_inline callees are still inlined
+    // because they have correctness requirements: inline asm "i" constraints
+    // (e.g., arch_static_branch's __jump_table entries) need resolved symbol
+    // references, and their standalone bodies emit invalid assembly (like
+    // ".dword 0 - .") when the symbol can't be resolved.
     let budget_exhausted = always_inline_budget_remaining == 0;
     for site in call_sites {
         let callee_data = &callee_map[&site.callee_name];
@@ -241,7 +246,7 @@ fn select_inline_site(
         let is_static_inline_eligible = callee_data.is_static_inline
             && callee_inst_count <= MAX_INLINE_INSTRUCTIONS
             && callee_data.blocks.len() <= MAX_INLINE_BLOCKS;
-        if is_tiny || (is_small && !budget_exhausted) || is_static_inline_eligible {
+        if is_tiny || (is_small && (!budget_exhausted || callee_data.is_always_inline)) || is_static_inline_eligible {
             let use_relaxed = callee_data.is_always_inline || callee_data.exceeds_normal_limits;
             return Some((site.clone(), callee_inst_count, use_relaxed));
         }
@@ -482,10 +487,15 @@ pub fn run(module: &mut IrModule) -> usize {
                     .sum();
                 let is_tiny = callee_inst_count <= MAX_TINY_INLINE_INSTRUCTIONS
                     && callee_data.blocks.len() <= 1;
-                // Tiny callees always pass; others must fit in the second pass budget.
-                // Callers with section attributes bypass budget (section-specific symbols
-                // like __kvm_nvhe_* MUST be resolved through inlining).
-                if !is_tiny && !caller_has_section && callee_inst_count > second_pass_budget {
+                let is_small = callee_inst_count <= MAX_SMALL_INLINE_INSTRUCTIONS
+                    && callee_data.blocks.len() <= MAX_SMALL_INLINE_BLOCKS;
+                // Tiny and small always_inline callees always pass; others must fit
+                // in the second pass budget. Small always_inline callees bypass the
+                // budget because they have correctness requirements (e.g., inline asm
+                // "i" constraints in arch_static_branch). Callers with section
+                // attributes bypass budget (section-specific symbols like __kvm_nvhe_*
+                // MUST be resolved through inlining).
+                if !is_tiny && !is_small && !caller_has_section && callee_inst_count > second_pass_budget {
                     continue;
                 }
                 let success = inline_call_site(
@@ -508,7 +518,7 @@ pub fn run(module: &mut IrModule) -> usize {
                     }
                     total_inlined += 1;
                     module.functions[func_idx].has_inlined_calls = true;
-                    if !is_tiny && !caller_has_section {
+                    if !is_tiny && !is_small && !caller_has_section {
                         second_pass_budget = second_pass_budget.saturating_sub(callee_inst_count);
                     }
                     found = true;
