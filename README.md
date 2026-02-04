@@ -89,8 +89,9 @@ using `MY_ASM=builtin` / `MY_LD=builtin`.
 ## Status
 
 The compiler can build real-world C codebases across all four architectures,
-including the Linux kernel. FFmpeg compiles and passes all FATE checkasm
-tests on x86-64.
+including the Linux kernel. FFmpeg compiles and passes all 7331 FATE checkasm
+tests on both x86-64 and AArch64 (ARM), using the fully standalone
+assembler and linker.
 
 ### Known Limitations
 

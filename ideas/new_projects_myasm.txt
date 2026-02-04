@@ -121,4 +121,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | zlib    | PASS | TODO | TODO | TODO | Passes x86 |
 | protobuf-c | PASS | TODO | TODO | TODO | Passes x86 |
 | cdb     | PASS | TODO | TODO | TODO | Passes x86 |
-| FFmpeg  | PASS | TODO | TODO | TODO | Compiles all libraries + ffmpeg/ffprobe binaries; all 83 checkasm FATE tests pass; video/audio encoding/decoding works |
+| FFmpeg  | PASS | TODO | PASS | TODO | Compiles all libraries + ffmpeg/ffprobe binaries; all 7331 checkasm tests pass on x86 and ARM (standalone asm+ld) |
