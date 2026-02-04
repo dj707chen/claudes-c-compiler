@@ -89,7 +89,7 @@ impl RelocType {
             RelocType::AdrGotPage21 => 311,    // R_AARCH64_ADR_GOT_PAGE21
             RelocType::Ld64GotLo12 => 312,     // R_AARCH64_LD64_GOT_LO12_NC
             RelocType::TlsLeAddTprelHi12 => 549, // R_AARCH64_TLSLE_ADD_TPREL_HI12
-            RelocType::TlsLeAddTprelLo12 => 550, // R_AARCH64_TLSLE_ADD_TPREL_LO12_NC
+            RelocType::TlsLeAddTprelLo12 => 551, // R_AARCH64_TLSLE_ADD_TPREL_LO12_NC
             RelocType::CondBr19 => 280,        // R_AARCH64_CONDBR19
             RelocType::TstBr14 => 279,         // R_AARCH64_TSTBR14
         }
@@ -354,6 +354,7 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
         "sshr" => encode_neon_sshr(operands),
         "shl" => encode_neon_shl(operands),
         "sli" => encode_neon_sli(operands),
+        "sri" => encode_neon_sri(operands),
         "ext" => encode_neon_ext(operands),
         "addv" => encode_neon_addv(operands),
         "umov" => encode_neon_umov(operands),
@@ -444,6 +445,10 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
         // LSE atomics
         "cas" | "casa" | "casal" | "casl" => encode_cas(mnemonic, operands),
         "swp" | "swpa" | "swpal" | "swpl" => encode_swp(mnemonic, operands),
+        "ldadd" | "ldadda" | "ldaddal" | "ldaddl"
+        | "ldclr" | "ldclra" | "ldclral" | "ldclrl"
+        | "ldeor" | "ldeora" | "ldeoral" | "ldeorl"
+        | "ldset" | "ldseta" | "ldsetal" | "ldsetl" => encode_ldop(mnemonic, operands),
 
         // NEON move-not-immediate
         "mvni" => encode_neon_mvni(operands),
@@ -3140,6 +3145,30 @@ fn encode_neon_dup(operands: &[Operand]) -> Result<EncodeResult, String> {
         return Ok(EncodeResult::Word(word));
     }
 
+    // DUP Vd.T, Vn.Ts[index] (broadcast element to all lanes)
+    if let Some(Operand::RegLane { reg, elem_size, index }) = operands.get(1) {
+        let rn = parse_reg_num(reg).ok_or("invalid NEON register")?;
+        let (q, _) = neon_arr_to_q_size(&arr_d)?;
+
+        // imm5 encodes both element size and index:
+        // .b[i]: imm5 = (i << 1) | 0b00001
+        // .h[i]: imm5 = (i << 2) | 0b00010
+        // .s[i]: imm5 = (i << 3) | 0b00100
+        // .d[i]: imm5 = (i << 4) | 0b01000
+        let imm5 = match elem_size.as_str() {
+            "b" => ((*index & 0xF) << 1) | 0b00001,
+            "h" => ((*index & 0x7) << 2) | 0b00010,
+            "s" => ((*index & 0x3) << 3) | 0b00100,
+            "d" => ((*index & 0x1) << 4) | 0b01000,
+            _ => return Err(format!("unsupported dup element size: {}", elem_size)),
+        };
+
+        // DUP Vd.T, Vn.Ts[i]: 0 Q 0 01110 000 imm5 0 0000 1 Rn Rd
+        let word = (q << 30) | (0b001110000u32 << 21) | (imm5 << 16)
+            | (0b000001 << 10) | (rn << 5) | rd;
+        return Ok(EncodeResult::Word(word));
+    }
+
     Err("unsupported dup operands".to_string())
 }
 
@@ -3901,6 +3930,32 @@ fn encode_neon_sli(operands: &[Operand]) -> Result<EncodeResult, String> {
     Ok(EncodeResult::Word(word))
 }
 
+/// Encode SRI (Shift Right and Insert) immediate.
+/// SRI Vd.T, Vn.T, #shift: 0 Q 1 0 11110 immh:immb 010001 Rn Rd  (U=1)
+fn encode_neon_sri(operands: &[Operand]) -> Result<EncodeResult, String> {
+    if operands.len() < 3 {
+        return Err("sri requires 3 operands".to_string());
+    }
+    let (rd, arr_d) = get_neon_reg(operands, 0)?;
+    let (rn, _) = get_neon_reg(operands, 1)?;
+    let shift = get_imm(operands, 2)? as u32;
+
+    let (q, _) = neon_arr_to_q_size(&arr_d)?;
+
+    // immh:immb = (2*esize - shift) for right shift
+    let immh_immb = match arr_d.as_str() {
+        "8b" | "16b" => (16 - shift) & 0xF,
+        "4h" | "8h" => (32 - shift) & 0x1F,
+        "2s" | "4s" => (64 - shift) & 0x3F,
+        "2d" => (128 - shift) & 0x7F,
+        _ => return Err(format!("unsupported sri arrangement: {}", arr_d)),
+    };
+
+    let word = (q << 30) | (1 << 29) | (0b011110 << 23) | (immh_immb << 16)
+        | (0b010001 << 10) | (rn << 5) | rd;
+    Ok(EncodeResult::Word(word))
+}
+
 /// Encode ORN (logical OR NOT): ORN Rd, Rn, Rm (scalar or vector)
 fn encode_orn(operands: &[Operand]) -> Result<EncodeResult, String> {
     if operands.len() < 3 {
@@ -4083,6 +4138,41 @@ fn encode_swp(mnemonic: &str, operands: &[Operand]) -> Result<EncodeResult, Stri
     // size 111000 A R 1 Rs 1 000 00 Rn Rt
     let word = (size << 30) | (0b111000 << 24) | (a << 23) | (r << 22) | (1 << 21)
         | (rs << 16) | (1 << 15) | (0b000 << 12) | (0b00 << 10) | (rn << 5) | rt;
+    Ok(EncodeResult::Word(word))
+}
+
+/// Encode LDADD/LDCLR/LDEOR/LDSET and their acquire/release variants (LSE atomics).
+/// LDADD Rs, Rt, [Xn]: size 111000 A R 1 Rs 0 opc 00 Rn Rt
+/// opc: LDADD=000, LDCLR=001, LDEOR=010, LDSET=011
+fn encode_ldop(mnemonic: &str, operands: &[Operand]) -> Result<EncodeResult, String> {
+    if operands.len() < 3 {
+        return Err(format!("{} requires 3 operands", mnemonic));
+    }
+    let (rs, is_64) = get_reg(operands, 0)?;
+    let (rt, _) = get_reg(operands, 1)?;
+    let rn = match operands.get(2) {
+        Some(Operand::Mem { base, .. }) => parse_reg_num(base).ok_or("ldop: invalid base")?,
+        _ => return Err(format!("{} requires memory operand [Xn]", mnemonic)),
+    };
+    let size = if is_64 { 0b11u32 } else { 0b10u32 };
+    let mn = mnemonic.to_lowercase();
+    // Determine base op and suffix
+    let (base, suffix) = if let Some(s) = mn.strip_prefix("ldadd") {
+        (0b000u32, s)
+    } else if let Some(s) = mn.strip_prefix("ldclr") {
+        (0b001u32, s)
+    } else if let Some(s) = mn.strip_prefix("ldeor") {
+        (0b010u32, s)
+    } else if let Some(s) = mn.strip_prefix("ldset") {
+        (0b011u32, s)
+    } else {
+        return Err(format!("unknown ld atomic op: {}", mnemonic));
+    };
+    let a = if suffix.contains('a') { 1u32 } else { 0u32 };
+    let r = if suffix.contains('l') { 1u32 } else { 0u32 };
+    // size 111000 A R 1 Rs 0 opc 00 Rn Rt
+    let word = (size << 30) | (0b111000 << 24) | (a << 23) | (r << 22) | (1 << 21)
+        | (rs << 16) | (0 << 15) | (base << 12) | (0b00 << 10) | (rn << 5) | rt;
     Ok(EncodeResult::Word(word))
 }
 

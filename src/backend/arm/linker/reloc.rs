@@ -71,10 +71,12 @@ pub fn resolve_sym(
             .map(|&(oi, so)| output_sections[oi].addr + so)
             .unwrap_or(0);
     }
-    if !sym.name.is_empty() {
+    if !sym.name.is_empty() && !sym.is_local() {
         // All linker-defined symbols (including __bss_start, _edata, _end, __end)
         // are registered in the globals table with defined_in = Some(usize::MAX),
         // so they are resolved through the standard globals lookup below.
+        // Local (STB_LOCAL) symbols must NOT be resolved via globals, since a
+        // local symbol named e.g. "write" must not be confused with libc's write().
         if let Some(g) = globals.get(&sym.name) {
             if g.defined_in.is_some() { return g.value; }
         }
