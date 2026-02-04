@@ -1,0 +1,13 @@
+Fix ARM AAPCS64 struct register pair alignment bug.
+
+The classify_args_core function in call_abi.rs incorrectly applied
+even-register alignment to structs on ARM. Per AAPCS64, only fundamental
+types (i128, long double) require even-aligned GP register pairs.
+Composite types (structs) never do.
+
+This caused 16-byte structs to be assigned to wrong register pairs
+(e.g., x4/x5 instead of x3/x4) when the next available register was
+odd-numbered, resulting in va_arg reading incorrect data.
+
+Fix: add a separate align_struct_pairs config flag (true for RISC-V
+where the psABI does require it, false for ARM/x86/i686).
