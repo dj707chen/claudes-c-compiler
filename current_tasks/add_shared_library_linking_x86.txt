@@ -1,0 +1,3 @@
+Add basic -shared (shared library) linking support to the x86-64 built-in linker.
+This is needed for Redis (xxhash builds libxxhash.so as part of make lib),
+and will be needed for many other real-world projects.
