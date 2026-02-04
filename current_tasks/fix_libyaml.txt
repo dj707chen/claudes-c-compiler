@@ -1,2 +1,0 @@
-Working on getting libyaml project to compile and pass tests with builtin assembler and linker.
-Testing all architectures (x86, i686, arm, riscv).

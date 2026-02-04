@@ -66,9 +66,6 @@ const R_RISCV_TPREL_HI20: u32 = 29;
 const R_RISCV_TPREL_LO12_I: u32 = 30;
 const R_RISCV_TPREL_LO12_S: u32 = 31;
 const R_RISCV_TPREL_ADD: u32 = 32;
-const R_RISCV_ALIGN: u32 = 43;
-const R_RISCV_RVC_BRANCH: u32 = 44;
-const R_RISCV_RVC_JUMP: u32 = 45;
 const R_RISCV_ADD8: u32 = 33;
 const R_RISCV_ADD16: u32 = 34;
 const R_RISCV_ADD32: u32 = 35;
@@ -77,6 +74,9 @@ const R_RISCV_SUB8: u32 = 37;
 const R_RISCV_SUB16: u32 = 38;
 const R_RISCV_SUB32: u32 = 39;
 const R_RISCV_SUB64: u32 = 40;
+const R_RISCV_ALIGN: u32 = 43;
+const R_RISCV_RVC_BRANCH: u32 = 44;
+const R_RISCV_RVC_JUMP: u32 = 45;
 const R_RISCV_RELAX: u32 = 51;
 const R_RISCV_SET6: u32 = 53;
 const R_RISCV_SUB6: u32 = 52;
@@ -1406,8 +1406,8 @@ pub fn link_builtin(
                 let off = offset as usize;
 
                 match reloc.reloc_type {
-                    R_RISCV_RELAX => {
-                        // Linker relaxation hint - skip for now
+                    R_RISCV_RELAX | R_RISCV_ALIGN => {
+                        // Linker relaxation hints - skip (no relaxation performed)
                         continue;
                     }
                     R_RISCV_64 => {
@@ -1519,52 +1519,16 @@ pub fn link_builtin(
                         patch_j_type(data, off, offset_val as u32);
                     }
                     R_RISCV_RVC_BRANCH => {
-                        // Compressed branch: CB-type, 8-bit offset (bits [8|4:3|7:6|2:1|5])
+                        // CB-type: c.beqz/c.bnez - 8-bit signed offset
                         let target = s as i64 + a;
                         let offset_val = (target - p as i64) as u32;
-                        if off + 2 <= data.len() {
-                            let insn = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
-                            // CB-type encoding: imm[8|4:3] in bits [12|11:10], imm[7:6|2:1|5] in bits [6:5|4:3|2]
-                            let bit8 = (offset_val >> 8) & 1;
-                            let bits4_3 = (offset_val >> 3) & 0x3;
-                            let bits7_6 = (offset_val >> 6) & 0x3;
-                            let bits2_1 = (offset_val >> 1) & 0x3;
-                            let bit5 = (offset_val >> 5) & 1;
-                            let insn = (insn & 0xE383)
-                                | ((bit8 as u16) << 12)
-                                | ((bits4_3 as u16) << 10)
-                                | ((bits7_6 as u16) << 5)
-                                | ((bits2_1 as u16) << 3)
-                                | ((bit5 as u16) << 2);
-                            data[off..off + 2].copy_from_slice(&insn.to_le_bytes());
-                        }
+                        patch_cb_type(data, off, offset_val);
                     }
                     R_RISCV_RVC_JUMP => {
-                        // Compressed jump: CJ-type, 11-bit offset
+                        // CJ-type: c.j/c.jal - 11-bit signed offset
                         let target = s as i64 + a;
                         let offset_val = (target - p as i64) as u32;
-                        if off + 2 <= data.len() {
-                            let insn = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
-                            // CJ-type encoding: imm[11|4|9:8|10|6|7|3:1|5] in bits [12:2]
-                            let bit11 = (offset_val >> 11) & 1;
-                            let bit4 = (offset_val >> 4) & 1;
-                            let bits9_8 = (offset_val >> 8) & 0x3;
-                            let bit10 = (offset_val >> 10) & 1;
-                            let bit6 = (offset_val >> 6) & 1;
-                            let bit7 = (offset_val >> 7) & 1;
-                            let bits3_1 = (offset_val >> 1) & 0x7;
-                            let bit5 = (offset_val >> 5) & 1;
-                            let encoded = ((bit11) << 10)
-                                | ((bit4) << 9)
-                                | ((bits9_8) << 7)
-                                | ((bit10) << 6)
-                                | ((bit6) << 5)
-                                | ((bit7) << 4)
-                                | ((bits3_1) << 1)
-                                | (bit5);
-                            let insn = (insn & 0xE003) | ((encoded as u16) << 2);
-                            data[off..off + 2].copy_from_slice(&insn.to_le_bytes());
-                        }
+                        patch_cj_type(data, off, offset_val);
                     }
                     R_RISCV_HI20 => {
                         let val = (s as i64 + a) as u32;
@@ -1768,6 +1732,17 @@ pub fn link_builtin(
 
                         let offset_val = got_entry_vaddr as i64 + a - p as i64;
                         patch_u_type(data, off, offset_val as u32);
+                    }
+                    R_RISCV_SET_ULEB128 => {
+                        // Set ULEB128 value at offset
+                        let val = (s as i64 + a) as u64;
+                        encode_uleb128_in_place(data, off, val);
+                    }
+                    R_RISCV_SUB_ULEB128 => {
+                        // Subtract from ULEB128 value at offset
+                        let cur = decode_uleb128(data, off);
+                        let val = cur.wrapping_sub((s as i64 + a) as u64);
+                        encode_uleb128_in_place(data, off, val);
                     }
                     other => {
                         return Err(format!(
@@ -2509,6 +2484,103 @@ fn patch_j_type(data: &mut [u8], off: usize, value: u32) {
         | (bit11 << 20)
         | (bits19_12 << 12);
     data[off..off + 4].copy_from_slice(&insn.to_le_bytes());
+}
+
+/// Patch a CB-type (compressed branch) instruction with an 8-bit signed offset.
+/// Used for c.beqz/c.bnez (R_RISCV_RVC_BRANCH).
+/// Encoding: offset[8|4:3] in bits [12:10], offset[7:6|2:1|5] in bits [6:2]
+fn patch_cb_type(data: &mut [u8], off: usize, value: u32) {
+    if off + 2 > data.len() {
+        return;
+    }
+    let insn = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
+    let imm = value;
+    let bit8 = (imm >> 8) & 1;
+    let bits4_3 = (imm >> 3) & 0x3;
+    let bits7_6 = (imm >> 6) & 0x3;
+    let bits2_1 = (imm >> 1) & 0x3;
+    let bit5 = (imm >> 5) & 1;
+    let insn = (insn & 0xE383)
+        | ((bit8 as u16) << 12)
+        | ((bits4_3 as u16) << 10)
+        | ((bits7_6 as u16) << 5)
+        | ((bits2_1 as u16) << 3)
+        | ((bit5 as u16) << 2);
+    data[off..off + 2].copy_from_slice(&insn.to_le_bytes());
+}
+
+/// Patch a CJ-type (compressed jump) instruction with an 11-bit signed offset.
+/// Used for c.j/c.jal (R_RISCV_RVC_JUMP).
+/// Encoding: offset[11|4|9:8|10|6|7|3:1|5] in bits [12:2]
+fn patch_cj_type(data: &mut [u8], off: usize, value: u32) {
+    if off + 2 > data.len() {
+        return;
+    }
+    let insn = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
+    let imm = value;
+    let bit11 = (imm >> 11) & 1;
+    let bit4 = (imm >> 4) & 1;
+    let bits9_8 = (imm >> 8) & 0x3;
+    let bit10 = (imm >> 10) & 1;
+    let bit6 = (imm >> 6) & 1;
+    let bit7 = (imm >> 7) & 1;
+    let bits3_1 = (imm >> 1) & 0x7;
+    let bit5 = (imm >> 5) & 1;
+    let encoded = (bit11 << 10)
+        | (bit4 << 9)
+        | (bits9_8 << 7)
+        | (bit10 << 6)
+        | (bit6 << 5)
+        | (bit7 << 4)
+        | (bits3_1 << 1)
+        | bit5;
+    let insn = (insn & 0xE003) | ((encoded as u16) << 2);
+    data[off..off + 2].copy_from_slice(&insn.to_le_bytes());
+}
+
+/// Decode a ULEB128 value from data at offset.
+fn decode_uleb128(data: &[u8], off: usize) -> u64 {
+    let mut result: u64 = 0;
+    let mut shift = 0u32;
+    let mut i = off;
+    while i < data.len() {
+        let byte = data[i];
+        result |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+        i += 1;
+    }
+    result
+}
+
+/// Encode a ULEB128 value in place, reusing the same number of bytes.
+fn encode_uleb128_in_place(data: &mut [u8], off: usize, value: u64) {
+    // First, count how many bytes the existing ULEB128 occupies
+    let mut num_bytes = 0;
+    let mut i = off;
+    while i < data.len() {
+        num_bytes += 1;
+        if data[i] & 0x80 == 0 {
+            break;
+        }
+        i += 1;
+    }
+    // Encode the new value in the same number of bytes
+    let mut val = value;
+    for j in 0..num_bytes {
+        let idx = off + j;
+        if idx >= data.len() {
+            break;
+        }
+        let mut byte = (val & 0x7F) as u8;
+        val >>= 7;
+        if j < num_bytes - 1 {
+            byte |= 0x80; // continuation bit
+        }
+        data[idx] = byte;
+    }
 }
 
 /// Find the hi20 value for a pcrel_lo12 relocation.
