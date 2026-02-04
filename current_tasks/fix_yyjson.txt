@@ -1,9 +1,0 @@
-Fix yyjson i686 build failure caused by incorrect peephole optimization.
-
-The i686 peephole pass was converting `addl $1, %reg` → `incl %reg` even when
-the next instruction was `adcl $0, %reg` (which reads the carry flag). Since
-`incl` does not set the carry flag (unlike `addl`), this broke 64-bit negation
-(notl+notl+addl+adcl pattern) and likely other multi-word arithmetic.
-
-Fix: guard the inc/dec peephole conversions to skip when the next instruction
-reads the carry flag (adcl, sbbl, etc.).

@@ -625,6 +625,39 @@ fn trimmed<'a>(store: &'a LineStore, info: &LineInfo, idx: usize) -> &'a str {
     &store.get(idx)[info.trim_start as usize..]
 }
 
+/// Check if the next instruction reads the carry flag (CF).
+/// Instructions like `adcl`, `sbbl`, `rcl`, `rcr` depend on CF.
+/// `incl`/`decl` do NOT set CF (unlike `addl`/`subl`), so converting
+/// `addl $1` → `incl` or `subl $1` → `decl` is invalid when the next
+/// instruction reads CF.
+fn next_reads_carry_flag(store: &LineStore, infos: &[LineInfo], start: usize) -> bool {
+    let len = infos.len();
+    for j in (start + 1)..len {
+        let s = store.get(j).trim();
+        if s.is_empty() || s.starts_with('#') || s.starts_with("//") || s.ends_with(':') {
+            continue;
+        }
+        // Check if the instruction reads CF
+        return s.starts_with("adcl ")
+            || s.starts_with("adcb ")
+            || s.starts_with("adcw ")
+            || s.starts_with("sbbl ")
+            || s.starts_with("sbbb ")
+            || s.starts_with("sbbw ")
+            || s.starts_with("rcl ")
+            || s.starts_with("rcr ")
+            || s.starts_with("setc ")
+            || s.starts_with("setb ")
+            || s.starts_with("jc ")
+            || s.starts_with("jb ")
+            || s.starts_with("jnc ")
+            || s.starts_with("jnb ")
+            || s.starts_with("jae ")
+            || s.starts_with("cmc");
+    }
+    false
+}
+
 // ── Pass 1: Local patterns ───────────────────────────────────────────────────
 
 /// Combined local pass: scan once, apply multiple patterns.
@@ -655,7 +688,12 @@ fn combined_local_pass(store: &mut LineStore, infos: &mut [LineInfo]) -> bool {
                 let s = trimmed(store, &infos[i], i);
                 let rn = reg32_name(dest_reg);
                 // addl $1, %reg → incl %reg
-                if s.starts_with("addl $1, ") && s.ends_with(rn) {
+                // SAFETY: incl does NOT set the carry flag (CF), so this
+                // conversion is invalid if the next instruction reads CF
+                // (e.g., adcl used in 64-bit add-with-carry chains).
+                if s.starts_with("addl $1, ") && s.ends_with(rn)
+                    && !next_reads_carry_flag(store, infos, i)
+                {
                     store.replace(i, format!("    incl {}", rn));
                     infos[i] = LineInfo {
                         kind: LineKind::Other { dest_reg },
@@ -668,7 +706,10 @@ fn combined_local_pass(store: &mut LineStore, infos: &mut [LineInfo]) -> bool {
                     continue;
                 }
                 // subl $1, %reg → decl %reg
-                if s.starts_with("subl $1, ") && s.ends_with(rn) {
+                // SAFETY: decl does NOT set CF, skip if next reads CF.
+                if s.starts_with("subl $1, ") && s.ends_with(rn)
+                    && !next_reads_carry_flag(store, infos, i)
+                {
                     store.replace(i, format!("    decl {}", rn));
                     infos[i] = LineInfo {
                         kind: LineKind::Other { dest_reg },
@@ -681,7 +722,10 @@ fn combined_local_pass(store: &mut LineStore, infos: &mut [LineInfo]) -> bool {
                     continue;
                 }
                 // addl $-1, %reg → decl %reg
-                if s.starts_with("addl $-1, ") && s.ends_with(rn) {
+                // SAFETY: decl does NOT set CF, skip if next reads CF.
+                if s.starts_with("addl $-1, ") && s.ends_with(rn)
+                    && !next_reads_carry_flag(store, infos, i)
+                {
                     store.replace(i, format!("    decl {}", rn));
                     infos[i] = LineInfo {
                         kind: LineKind::Other { dest_reg },
@@ -694,7 +738,10 @@ fn combined_local_pass(store: &mut LineStore, infos: &mut [LineInfo]) -> bool {
                     continue;
                 }
                 // subl $-1, %reg → incl %reg
-                if s.starts_with("subl $-1, ") && s.ends_with(rn) {
+                // SAFETY: incl does NOT set CF, skip if next reads CF.
+                if s.starts_with("subl $-1, ") && s.ends_with(rn)
+                    && !next_reads_carry_flag(store, infos, i)
+                {
                     store.replace(i, format!("    incl {}", rn));
                     infos[i] = LineInfo {
                         kind: LineKind::Other { dest_reg },
@@ -1870,5 +1917,34 @@ mod tests {
         let asm = "    subl $-1, %esi\n".to_string();
         let result = peephole_optimize(asm);
         assert!(result.contains("incl %esi"), "should convert to incl: {}", result);
+    }
+
+    #[test]
+    fn test_addl_1_not_incl_before_adcl() {
+        // addl $1 followed by adcl must NOT be converted to incl,
+        // because incl does not set the carry flag (CF).
+        // This pattern is used in 64-bit negation: notl+notl+addl+adcl.
+        let asm = [
+            "    notl %eax",
+            "    notl %edx",
+            "    addl $1, %eax",
+            "    adcl $0, %edx",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("addl $1, %eax"), "must keep addl before adcl: {}", result);
+        assert!(!result.contains("incl"), "must NOT convert to incl before adcl: {}", result);
+    }
+
+    #[test]
+    fn test_subl_1_not_decl_before_sbbl() {
+        // subl $1 followed by sbbl must NOT be converted to decl,
+        // because decl does not set the carry flag.
+        let asm = [
+            "    subl $1, %eax",
+            "    sbbl $0, %edx",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("subl $1, %eax"), "must keep subl before sbbl: {}", result);
+        assert!(!result.contains("decl"), "must NOT convert to decl before sbbl: {}", result);
     }
 }
