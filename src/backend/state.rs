@@ -184,6 +184,11 @@ pub struct CodegenState {
     /// parameter value from its alloca slot (where emit_store_params saved it)
     /// instead of reading from ABI registers that may have been clobbered.
     pub param_alloca_slots: Vec<Option<(StackSlot, IrType)>>,
+    /// Set of param indices whose values have been pre-stored directly to a
+    /// callee-saved register during `emit_store_params`. `emit_param_ref` can
+    /// skip the alloca load for these and just emit a no-op (the value is
+    /// already in the register-allocated destination).
+    pub param_pre_stored: FxHashSet<usize>,
     /// Whether the current function returns a struct via hidden pointer (sret).
     /// On i386 SysV ABI, such functions must use `ret $4` to pop the hidden
     /// pointer argument from the caller's stack.
@@ -237,6 +242,7 @@ impl CodegenState {
             num_params: 0,
             func_is_variadic: false,
             param_alloca_slots: Vec::new(),
+            param_pre_stored: FxHashSet::default(),
             uses_sret: false,
             function_sections: false,
             data_sections: false,
@@ -307,6 +313,7 @@ impl CodegenState {
         self.small_slot_values.clear();
         self.reg_assigned_values.clear();
         self.asm_output_values.clear();
+        self.param_pre_stored.clear();
         self.uses_sret = false;
     }
 

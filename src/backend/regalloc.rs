@@ -217,6 +217,11 @@ pub fn allocate_registers(
                         eligible.insert(dest.0);
                     }
                 }
+                Instruction::ParamRef { dest, ty, .. } => {
+                    if !is_non_gpr_type(ty) {
+                        eligible.insert(dest.0);
+                    }
+                }
                 _ => {}
             }
 

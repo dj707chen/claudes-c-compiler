@@ -89,7 +89,7 @@ impl X86Codegen {
             let alloc = (alloc_size + 7) & !7;
             let new_space = ((space + alloc + effective_align - 1) / effective_align) * effective_align;
             (-new_space, new_space)
-        }, &reg_assigned, cached_liveness, false);
+        }, &reg_assigned, &X86_CALLEE_SAVED, cached_liveness, false);
 
         if func.is_variadic {
             if self.no_sse {
@@ -189,10 +189,60 @@ impl X86Codegen {
             })
         }).collect();
 
+        // Build a map of param_idx -> ParamRef dest Value for fast lookup.
+        // This is used to optimize parameter storage: when the ParamRef dest
+        // is register-allocated, we can store the ABI arg register directly
+        // to the callee-saved register, skipping the alloca slot entirely.
+        let mut paramref_dests: Vec<Option<Value>> = vec![None; func.params.len()];
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let Instruction::ParamRef { dest, param_idx, .. } = inst {
+                    if *param_idx < paramref_dests.len() {
+                        paramref_dests[*param_idx] = Some(*dest);
+                    }
+                }
+            }
+        }
+
         let stack_base: i64 = 16;
 
         for (i, _param) in func.params.iter().enumerate() {
             let class = param_classes[i];
+
+            // Pre-store optimization: when a param's alloca is dead (eliminated by
+            // dead param alloca analysis) but the ParamRef dest is register-assigned,
+            // store the ABI arg register directly to the assigned physical register
+            // in the prologue. This is critical because:
+            // 1. Dead alloca means no stack slot exists for this param
+            // 2. The ABI register (rdi, rsi, etc.) is caller-saved and will be clobbered
+            // 3. We must save the value NOW, before any other code runs
+            // 4. emit_param_ref will see param_pre_stored and skip code generation
+            if let Some(paramref_dest) = paramref_dests[i] {
+                let has_slot = find_param_alloca(func, i)
+                    .and_then(|(dest, _)| self.state.get_slot(dest.0))
+                    .is_some();
+                if !has_slot {
+                    if let Some(&phys_reg) = self.reg_assignments.get(&paramref_dest.0) {
+                        // Only pre-store to callee-saved registers (PhysReg 1-5).
+                        // Caller-saved registers (rdi, rsi, r8-r11) cannot be used
+                        // because they overlap with ABI argument registers that
+                        // haven't been saved yet.
+                        let is_callee_saved = phys_reg.0 >= 1 && phys_reg.0 <= 5;
+                        if is_callee_saved {
+                            let dest_reg = phys_reg_name(phys_reg);
+                            match class {
+                                ParamClass::IntReg { reg_idx } => {
+                                    self.state.out.emit_instr_reg_reg(
+                                        "    movq", X86_ARG_REGS[reg_idx], dest_reg);
+                                    self.state.param_pre_stored.insert(i);
+                                }
+                                _ => {} // TODO: handle StackSlot/SSE params
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
 
             let (slot, ty) = if let Some((dest, ty)) = find_param_alloca(func, i) {
                 if let Some(slot) = self.state.get_slot(dest.0) {
@@ -289,16 +339,18 @@ impl X86Codegen {
             return;
         }
 
+        // If this param was pre-stored directly to its register-allocated
+        // destination during emit_store_params, the value is already in place.
+        // No code needs to be emitted — the register already holds the value.
+        if self.state.param_pre_stored.contains(&param_idx) {
+            return;
+        }
+
         if param_idx < self.state.param_alloca_slots.len() {
             if let Some((slot, alloca_ty)) = self.state.param_alloca_slots[param_idx] {
                 let load_instr = Self::mov_load_for_type(alloca_ty);
                 let reg = Self::load_dest_reg(alloca_ty);
                 self.state.emit_fmt(format_args!("    {} {}(%rbp), {}", load_instr, slot.0, reg));
-                // Always store back the sign/zero-extended 64-bit value.
-                // This is simpler than conditionally checking whether the
-                // dest slot already matches the param alloca slot. The extra
-                // store is negligible overhead and ensures correctness
-                // regardless of how emit_store_params initializes the slot.
                 self.store_rax_to(dest);
                 return;
             }

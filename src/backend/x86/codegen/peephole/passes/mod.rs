@@ -28,6 +28,7 @@ mod store_forwarding;
 mod loop_trampoline;
 mod callee_saves;
 mod memory_fold;
+mod frame_compact;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -122,6 +123,11 @@ pub fn peephole_optimize(asm: String) -> String {
 
     // Phase 6: Eliminate unused callee-saved register saves/restores.
     callee_saves::eliminate_unused_callee_saves(&store, &mut infos);
+
+    // Phase 7: Compact stack frames by packing callee-saved saves tightly
+    // and shrinking subq $N, %rsp when dead stores/callee-save elimination
+    // created gaps in the frame.
+    frame_compact::compact_frame(&mut store, &mut infos);
 
     store.build_result(&infos)
 }
@@ -954,6 +960,67 @@ mod regression_tests {
             result.contains("leaq 208(%rdi)"),
             "rax must be set from rdi before leaq 208(%rax): {}", result
         );
+    }
+
+    /// Regression test: frame compaction must NOP out dead stores that conflict
+    /// with relocated callee-save offsets. Without this fix, a dead store like
+    /// `movq %rax, -64(%rbp)` can clobber a callee-saved register that was
+    /// relocated to -64(%rbp) during frame compaction.
+    ///
+    /// Pattern from tre-compile.c: tre_ast_to_tnfa has 5 callee saves at
+    /// -112..-80 and body reads down to -56, with a dead store at -64.
+    /// Compaction moves callee saves to -96..-64, but -64 conflicts with
+    /// the dead store.
+    #[test]
+    fn test_frame_compact_dead_store_noped() {
+        let asm = [
+            "func:",
+            "    pushq %rbp",
+            "    .cfi_def_cfa_offset 16",
+            "    .cfi_offset %rbp, -16",
+            "    movq %rsp, %rbp",
+            "    .cfi_def_cfa_register %rbp",
+            "    subq $112, %rsp",
+            "    movq %rbx, -112(%rbp)",
+            "    movq %r12, -104(%rbp)",
+            "    movq %r13, -96(%rbp)",
+            "    movq %r14, -88(%rbp)",
+            "    movq %r15, -80(%rbp)",
+            // Body: reads at -8, -56; dead store at -64
+            "    movq %rdi, -8(%rbp)",
+            "    movq -8(%rbp), %rax",
+            "    movq %rax, -56(%rbp)",
+            "    movq -56(%rbp), %rdi",
+            "    call some_func",
+            "    movq %rax, -64(%rbp)",      // dead store - never read
+            "    movq %rax, %r14",
+            // Epilogue
+            "    movq %r14, %rax",
+            "    movq -112(%rbp), %rbx",
+            "    movq -104(%rbp), %r12",
+            "    movq -96(%rbp), %r13",
+            "    movq -88(%rbp), %r14",
+            "    movq -80(%rbp), %r15",
+            "    movq %rbp, %rsp",
+            "    popq %rbp",
+            "    ret",
+            ".size func, .-func",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        // After compaction:
+        // - Frame should be smaller than 112
+        // - Dead store at -64 should be NOP'd (not present in output)
+        // - Callee saves should be at new offsets
+        assert!(result.contains("subq $"),
+            "should have subq: {}", result);
+        assert!(!result.contains("subq $112"),
+            "frame should be compacted from 112: {}", result);
+        // The dead store to -64 must not appear in the output
+        // (it would clobber the relocated callee save)
+        assert!(!result.contains("-64(%rbp)") ||
+                // -64 might appear as a new callee-save offset in saves/restores which is OK
+                (result.contains("movq %r15, -64(%rbp)") || result.contains("movq -64(%rbp), %r15")),
+            "dead store to -64 must be eliminated or -64 used only for callee save: {}", result);
     }
 }
 

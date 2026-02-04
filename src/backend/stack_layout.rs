@@ -35,6 +35,7 @@ use crate::ir::reexports::{
 use crate::common::types::IrType;
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
 use super::state::StackSlot;
+use super::regalloc::PhysReg;
 use super::liveness::{
     for_each_operand_in_instruction, for_each_value_use_in_instruction,
     for_each_operand_in_terminator, compute_live_intervals,
@@ -510,10 +511,10 @@ pub fn run_regalloc_and_merge_clobbers(
     available_regs: Vec<super::regalloc::PhysReg>,
     caller_saved_regs: Vec<super::regalloc::PhysReg>,
     asm_clobbered_regs: &[super::regalloc::PhysReg],
-    reg_assignments: &mut FxHashMap<u32, super::regalloc::PhysReg>,
-    used_callee_saved: &mut Vec<super::regalloc::PhysReg>,
+    reg_assignments: &mut FxHashMap<u32, PhysReg>,
+    used_callee_saved: &mut Vec<PhysReg>,
     allow_inline_asm_regalloc: bool,
-) -> (FxHashSet<u32>, Option<super::liveness::LivenessResult>) {
+) -> (FxHashMap<u32, PhysReg>, Option<super::liveness::LivenessResult>) {
     let config = super::regalloc::RegAllocConfig { available_regs, caller_saved_regs, allow_inline_asm_regalloc };
     let alloc_result = super::regalloc::allocate_registers(func, &config);
     *reg_assignments = alloc_result.assignments;
@@ -530,7 +531,7 @@ pub fn run_regalloc_and_merge_clobbers(
     }
     used_callee_saved.sort_by_key(|r| r.0);
 
-    let reg_assigned: FxHashSet<u32> = reg_assignments.keys().copied().collect();
+    let reg_assigned: FxHashMap<u32, PhysReg> = reg_assignments.clone();
     (reg_assigned, cached_liveness)
 }
 
@@ -561,7 +562,8 @@ pub fn calculate_stack_space_common(
     func: &IrFunction,
     initial_offset: i64,
     assign_slot: impl Fn(i64, i64, i64) -> (i64, i64),
-    reg_assigned: &FxHashSet<u32>,
+    reg_assigned: &FxHashMap<u32, PhysReg>,
+    callee_saved_regs: &[PhysReg],
     cached_liveness: Option<super::liveness::LivenessResult>,
     lhs_first_binop: bool,
 ) -> i64 {
@@ -575,11 +577,11 @@ pub fn calculate_stack_space_common(
 
     // Phase 1: Build analysis context (use-blocks, def-blocks, used values,
     //          dead param allocas, alloca coalescability, copy aliases).
-    let ctx = build_layout_context(func, coalesce, reg_assigned, lhs_first_binop);
+    let ctx = build_layout_context(func, coalesce, reg_assigned, callee_saved_regs, lhs_first_binop);
 
     // Tell CodegenState which values are register-assigned so that
     // resolve_slot_addr can return a dummy Indirect slot for them.
-    state.reg_assigned_values = reg_assigned.clone();
+    state.reg_assigned_values = reg_assigned.keys().copied().collect();
 
     // Phase 2: Classify all instructions into the three tiers.
     let mut non_local_space = initial_offset;
@@ -630,7 +632,8 @@ pub fn calculate_stack_space_common(
 fn build_layout_context(
     func: &IrFunction,
     coalesce: bool,
-    reg_assigned: &FxHashSet<u32>,
+    reg_assigned: &FxHashMap<u32, PhysReg>,
+    callee_saved_regs: &[PhysReg],
     lhs_first_binop: bool,
 ) -> StackLayoutContext {
     // Build use-block map
@@ -662,7 +665,7 @@ fn build_layout_context(
     let used_values = collect_used_values(func);
 
     // Detect dead parameter allocas.
-    let dead_param_allocas = find_dead_param_allocas(func, &used_values);
+    let dead_param_allocas = find_dead_param_allocas(func, &used_values, reg_assigned, callee_saved_regs);
 
     // Alloca coalescability analysis.
     let coalescable_allocas = if coalesce {
@@ -724,27 +727,53 @@ fn collect_used_values(func: &IrFunction) -> FxHashSet<u32> {
     used
 }
 
-/// Find param allocas whose Value IDs are never used in any instruction or terminator.
-/// These represent completely unused function parameters.
+/// Find param allocas that can safely skip stack slot allocation.
 ///
-/// Exception: if a ParamRef instruction exists for a given param index, the
-/// corresponding param alloca must NOT be marked dead. emit_store_params needs
-/// to save the incoming register to the alloca slot because emit_param_ref
-/// may read from ABI registers that get clobbered during emit_store_params.
-fn find_dead_param_allocas(func: &IrFunction, used_values: &FxHashSet<u32>) -> FxHashSet<u32> {
+/// A param alloca is dead when BOTH conditions hold:
+/// 1. No instruction references the alloca value (mem2reg promoted it away)
+/// 2. The corresponding ParamRef dest IS register-assigned, so emit_store_params
+///    can store the ABI arg register directly to the callee-saved register
+///
+/// Without condition 2, the param value would have nowhere to live: the alloca
+/// slot was eliminated, the ABI register may be clobbered, and no callee-saved
+/// register was assigned. This would cause emit_param_ref to fall back to
+/// reading the (already-clobbered) ABI register.
+fn find_dead_param_allocas(
+    func: &IrFunction,
+    used_values: &FxHashSet<u32>,
+    reg_assigned: &FxHashMap<u32, PhysReg>,
+    callee_saved_regs: &[PhysReg],
+) -> FxHashSet<u32> {
     let mut dead = FxHashSet::default();
-    if !func.param_alloca_values.is_empty() {
-        let mut paramref_indices: FxHashSet<usize> = FxHashSet::default();
-        for block in &func.blocks {
-            for inst in &block.instructions {
-                if let Instruction::ParamRef { param_idx, .. } = inst {
-                    paramref_indices.insert(*param_idx);
+    if func.param_alloca_values.is_empty() {
+        return dead;
+    }
+
+    // Build param_idx -> ParamRef dest Value map
+    let mut paramref_dests: Vec<Option<u32>> = vec![None; func.param_alloca_values.len()];
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let Instruction::ParamRef { dest, param_idx, .. } = inst {
+                if *param_idx < paramref_dests.len() {
+                    paramref_dests[*param_idx] = Some(dest.0);
                 }
             }
         }
-        for (idx, pv) in func.param_alloca_values.iter().enumerate() {
-            if !used_values.contains(&pv.0) && !paramref_indices.contains(&idx) {
-                dead.insert(pv.0);
+    }
+
+    for (idx, pv) in func.param_alloca_values.iter().enumerate() {
+        if !used_values.contains(&pv.0) {
+            // Only eliminate the alloca if the ParamRef dest is assigned to a
+            // callee-saved register. Caller-saved registers overlap with ABI
+            // argument registers, so using them would clobber other params'
+            // values before they're saved.
+            if let Some(dest_id) = paramref_dests.get(idx).copied().flatten() {
+                let is_callee_saved = reg_assigned.get(&dest_id)
+                    .map(|phys| callee_saved_regs.contains(phys))
+                    .unwrap_or(false);
+                if is_callee_saved {
+                    dead.insert(pv.0);
+                }
             }
         }
     }
@@ -763,7 +792,7 @@ fn build_copy_alias_map(
     func: &IrFunction,
     def_block: &FxHashMap<u32, usize>,
     multi_def_values: &FxHashSet<u32>,
-    reg_assigned: &FxHashSet<u32>,
+    reg_assigned: &FxHashMap<u32, PhysReg>,
     use_blocks_map: &FxHashMap<u32, Vec<usize>>,
 ) -> FxHashMap<u32, u32> {
     // Count uses of each value across all instructions.
@@ -797,7 +826,7 @@ fn build_copy_alias_map(
                 if multi_def_values.contains(&d) || multi_def_values.contains(&s) {
                     continue;
                 }
-                if reg_assigned.contains(&d) || reg_assigned.contains(&s) {
+                if reg_assigned.contains_key(&d) || reg_assigned.contains_key(&s) {
                     continue;
                 }
                 // Only coalesce if Copy is the sole use of the source.
@@ -1089,7 +1118,7 @@ fn classify_instructions(
     func: &IrFunction,
     ctx: &StackLayoutContext,
     assign_slot: &impl Fn(i64, i64, i64) -> (i64, i64),
-    reg_assigned: &FxHashSet<u32>,
+    reg_assigned: &FxHashMap<u32, PhysReg>,
     non_local_space: &mut i64,
     deferred_slots: &mut Vec<DeferredSlot>,
     multi_block_values: &mut Vec<MultiBlockValue>,
@@ -1389,7 +1418,7 @@ fn classify_value(
     dest: Value,
     inst: &Instruction,
     ctx: &StackLayoutContext,
-    reg_assigned: &FxHashSet<u32>,
+    reg_assigned: &FxHashMap<u32, PhysReg>,
     collected_values: &mut FxHashSet<u32>,
     multi_block_values: &mut Vec<MultiBlockValue>,
     block_local_values: &mut Vec<BlockLocalValue>,
@@ -1442,7 +1471,7 @@ fn classify_value(
     }
 
     // Skip register-assigned values (no stack slot needed).
-    if reg_assigned.contains(&dest.0) {
+    if reg_assigned.contains_key(&dest.0) {
         return;
     }
 
