@@ -1,0 +1,3 @@
+Fixing Chibi-Scheme x86 build.
+Issue: __udivti3 undefined symbol when linking shared library.
+Need to provide __udivti3 (128-bit unsigned division) either via libgcc or compiler-rt builtins.
