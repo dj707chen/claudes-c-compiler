@@ -9,57 +9,16 @@
 use std::collections::HashMap;
 use super::parser::*;
 use super::encoder::*;
-
-// ELF constants
-const ELFCLASS64: u8 = 2;
-const ELFDATA2LSB: u8 = 1;
-const EV_CURRENT: u8 = 1;
-const ELFOSABI_NONE: u8 = 0;
-const ET_REL: u16 = 1;
-const EM_X86_64: u16 = 62;
-
-// Section header types
-const SHT_NULL: u32 = 0;
-const SHT_PROGBITS: u32 = 1;
-const SHT_SYMTAB: u32 = 2;
-const SHT_STRTAB: u32 = 3;
-const SHT_RELA: u32 = 4;
-const SHT_NOBITS: u32 = 8;
-const SHT_INIT_ARRAY: u32 = 14;
-const SHT_FINI_ARRAY: u32 = 15;
-const SHT_NOTE: u32 = 7;
-
-// Section header flags
-const SHF_WRITE: u64 = 0x1;
-const SHF_ALLOC: u64 = 0x2;
-const SHF_EXECINSTR: u64 = 0x4;
-const SHF_MERGE: u64 = 0x10;
-const SHF_STRINGS: u64 = 0x20;
-const SHF_TLS: u64 = 0x400;
-const SHF_GROUP: u64 = 0x200;
-
-// Symbol bindings
-const STB_LOCAL: u8 = 0;
-const STB_GLOBAL: u8 = 1;
-const STB_WEAK: u8 = 2;
-
-// Symbol types
-const STT_NOTYPE: u8 = 0;
-const STT_OBJECT: u8 = 1;
-const STT_FUNC: u8 = 2;
-const STT_SECTION: u8 = 3;
-const STT_TLS: u8 = 6;
-
-// Symbol visibility
-const STV_DEFAULT: u8 = 0;
-const STV_INTERNAL: u8 = 1;
-const STV_HIDDEN: u8 = 2;
-const STV_PROTECTED: u8 = 3;
-
-const SHN_UNDEF: u16 = 0;
-#[allow(dead_code)]
-const SHN_ABS: u16 = 0xFFF1;
-const SHN_COMMON: u16 = 0xFFF2;
+use crate::backend::elf::{
+    SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB, SHT_RELA, SHT_NOBITS,
+    SHT_INIT_ARRAY, SHT_FINI_ARRAY, SHT_NOTE,
+    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_MERGE, SHF_STRINGS, SHF_TLS, SHF_GROUP,
+    STB_LOCAL, STB_GLOBAL, STB_WEAK,
+    STT_NOTYPE, STT_OBJECT, STT_FUNC, STT_SECTION, STT_TLS,
+    STV_DEFAULT, STV_INTERNAL, STV_HIDDEN, STV_PROTECTED,
+    SHN_UNDEF, SHN_COMMON,
+    ELFCLASS64, ELFDATA2LSB, EV_CURRENT, ELFOSABI_NONE, ET_REL, EM_X86_64,
+};
 
 /// Tracks a jump instruction for relaxation (long -> short).
 #[derive(Clone, Debug)]
@@ -1269,7 +1228,7 @@ impl ElfByteWriter {
 
             symbol_to_elf_idx.insert(sym.name.clone(), sym_entries.len());
             sym_entries.push(SymEntry {
-                name_offset: strtab.get_offset(&sym.name),
+                name_offset: strtab.offset_of(&sym.name),
                 info: (sym.binding << 4) | sym.sym_type,
                 other: sym.visibility,
                 shndx,
@@ -1299,7 +1258,7 @@ impl ElfByteWriter {
 
             symbol_to_elf_idx.insert(sym.name.clone(), sym_entries.len());
             sym_entries.push(SymEntry {
-                name_offset: strtab.get_offset(&sym.name),
+                name_offset: strtab.offset_of(&sym.name),
                 info: (sym.binding << 4) | sym.sym_type,
                 other: sym.visibility,
                 shndx,
@@ -1315,7 +1274,7 @@ impl ElfByteWriter {
                 let target_entry = &sym_entries[target_idx];
                 symbol_to_elf_idx.insert(alias.clone(), sym_entries.len());
                 sym_entries.push(SymEntry {
-                    name_offset: strtab.get_offset(alias),
+                    name_offset: strtab.offset_of(alias),
                     info: target_entry.info,
                     other: target_entry.other,
                     shndx: target_entry.shndx,
@@ -1340,7 +1299,7 @@ impl ElfByteWriter {
                 strtab.add(sym_name);
                 symbol_to_elf_idx.insert(sym_name.clone(), sym_entries.len());
                 sym_entries.push(SymEntry {
-                    name_offset: strtab.get_offset(sym_name),
+                    name_offset: strtab.offset_of(sym_name),
                     info: (STB_GLOBAL << 4) | STT_NOTYPE,
                     other: STV_DEFAULT,
                     shndx: SHN_UNDEF,
@@ -1374,12 +1333,12 @@ impl ElfByteWriter {
 
         // Strtab
         let strtab_offset = offset;
-        let strtab_data = strtab.finish();
+        let strtab_data = strtab.as_bytes().to_vec();
         offset += strtab_data.len() as u64;
 
         // Shstrtab
         let shstrtab_offset = offset;
-        let shstrtab_data = shstrtab.finish();
+        let shstrtab_data = shstrtab.as_bytes().to_vec();
         offset += shstrtab_data.len() as u64;
 
         // Rela sections
@@ -1452,7 +1411,7 @@ impl ElfByteWriter {
             self.output.push(0);
         }
         for entry in &sym_entries {
-            self.write_u32(entry.name_offset as u32); // st_name
+            self.write_u32(entry.name_offset); // st_name
             self.output.push(entry.info);              // st_info
             self.output.push(entry.other);             // st_other
             self.write_u16(entry.shndx);              // st_shndx
@@ -1528,7 +1487,7 @@ impl ElfByteWriter {
         // Data sections
         for (i, sec) in sections.iter().enumerate() {
             self.write_shdr(
-                shstrtab.get_offset(&sec.name) as u32,
+                shstrtab.offset_of(&sec.name),
                 sec.section_type,
                 sec.flags,
                 0, // addr
@@ -1543,7 +1502,7 @@ impl ElfByteWriter {
 
         // .symtab
         self.write_shdr(
-            shstrtab.get_offset(".symtab") as u32,
+            shstrtab.offset_of(".symtab"),
             SHT_SYMTAB,
             0,
             0,
@@ -1557,7 +1516,7 @@ impl ElfByteWriter {
 
         // .strtab
         self.write_shdr(
-            shstrtab.get_offset(".strtab") as u32,
+            shstrtab.offset_of(".strtab"),
             SHT_STRTAB,
             0,
             0,
@@ -1568,7 +1527,7 @@ impl ElfByteWriter {
 
         // .shstrtab
         self.write_shdr(
-            shstrtab.get_offset(".shstrtab") as u32,
+            shstrtab.offset_of(".shstrtab"),
             SHT_STRTAB,
             0,
             0,
@@ -1581,7 +1540,7 @@ impl ElfByteWriter {
         for &(sec_idx, rela_offset, rela_size) in &rela_offsets {
             let rela_name = format!(".rela{}", sections[sec_idx].name);
             self.write_shdr(
-                shstrtab.get_offset(&rela_name) as u32,
+                shstrtab.offset_of(&rela_name),
                 SHT_RELA,
                 0,
                 0,
@@ -1645,7 +1604,7 @@ impl ElfByteWriter {
 
 /// Elf64_Sym entry.
 struct SymEntry {
-    name_offset: usize,
+    name_offset: u32,
     info: u8,
     other: u8,
     shndx: u16,
@@ -1666,38 +1625,7 @@ impl SymEntry {
     }
 }
 
-/// Simple string table builder.
-struct StringTable {
-    data: Vec<u8>,
-    offsets: HashMap<String, usize>,
-}
-
-impl StringTable {
-    fn new() -> Self {
-        StringTable {
-            data: Vec::new(),
-            offsets: HashMap::new(),
-        }
-    }
-
-    fn add(&mut self, s: &str) {
-        if self.offsets.contains_key(s) {
-            return;
-        }
-        let offset = self.data.len();
-        self.data.extend_from_slice(s.as_bytes());
-        self.data.push(0);
-        self.offsets.insert(s.to_string(), offset);
-    }
-
-    fn get_offset(&self, s: &str) -> usize {
-        self.offsets.get(s).copied().unwrap_or(0)
-    }
-
-    fn finish(&self) -> Vec<u8> {
-        self.data.clone()
-    }
-}
+use crate::backend::elf::StringTable;
 
 /// Parse section name, flags string, and type into ELF section type and flags.
 fn parse_section_flags(name: &str, flags_str: Option<&str>, type_str: Option<&str>) -> (u32, u64) {

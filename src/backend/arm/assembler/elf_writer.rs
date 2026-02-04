@@ -8,50 +8,15 @@
 use std::collections::{HashMap, HashSet};
 use super::parser::{AsmStatement, AsmDirective, SectionDirective, SymbolKind, SizeExpr, DataValue, Operand};
 use super::encoder::{encode_instruction, EncodeResult, RelocType};
-
-const EM_AARCH64: u16 = 183;
-const ELFCLASS64: u8 = 2;
-const ELFDATA2LSB: u8 = 1;
-const EV_CURRENT: u8 = 1;
-const ELFOSABI_NONE: u8 = 0;
-const ET_REL: u16 = 1;
-
-// Section types
-const SHT_NULL: u32 = 0;
-const SHT_PROGBITS: u32 = 1;
-const SHT_SYMTAB: u32 = 2;
-const SHT_STRTAB: u32 = 3;
-const SHT_RELA: u32 = 4;
-const SHT_NOBITS: u32 = 8;
-const SHT_NOTE: u32 = 7;
-
-// Section flags
-const SHF_WRITE: u64 = 1;
-const SHF_ALLOC: u64 = 2;
-const SHF_EXECINSTR: u64 = 4;
-const SHF_MERGE: u64 = 0x10;
-const SHF_STRINGS: u64 = 0x20;
-const SHF_INFO_LINK: u64 = 0x40;
-const SHF_TLS: u64 = 0x400;
-const SHF_GROUP: u64 = 0x200;
-
-// Symbol bindings
-const STB_LOCAL: u8 = 0;
-const STB_GLOBAL: u8 = 1;
-const STB_WEAK: u8 = 2;
-
-// Symbol types
-const STT_NOTYPE: u8 = 0;
-const STT_OBJECT: u8 = 1;
-const STT_FUNC: u8 = 2;
-const STT_SECTION: u8 = 3;
-const STT_TLS: u8 = 6;
-
-// Symbol visibility
-const STV_DEFAULT: u8 = 0;
-const STV_HIDDEN: u8 = 2;
-const STV_PROTECTED: u8 = 3;
-const STV_INTERNAL: u8 = 1;
+use crate::backend::elf::{self, StringTable,
+    SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB, SHT_RELA, SHT_NOBITS, SHT_NOTE,
+    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_MERGE, SHF_STRINGS, SHF_INFO_LINK,
+    SHF_TLS, SHF_GROUP,
+    STB_LOCAL, STB_GLOBAL, STB_WEAK,
+    STT_NOTYPE, STT_OBJECT, STT_FUNC, STT_SECTION, STT_TLS,
+    STV_DEFAULT, STV_HIDDEN, STV_PROTECTED, STV_INTERNAL,
+    ELFCLASS64, ELFDATA2LSB, EV_CURRENT, ELFOSABI_NONE, ET_REL, EM_AARCH64,
+};
 
 /// An ELF section being built.
 struct Section {
@@ -854,12 +819,12 @@ impl ElfWriter {
 
         // Strtab offset
         let strtab_offset = offset;
-        let strtab_data = strtab.data();
+        let strtab_data = strtab.as_bytes().to_vec();
         offset += strtab_data.len();
 
         // Shstrtab offset
         let shstrtab_offset = offset;
-        let shstrtab_data = shstrtab.data();
+        let shstrtab_data = shstrtab.as_bytes().to_vec();
         offset += shstrtab_data.len();
 
         // Section headers offset (align to 8)
@@ -916,13 +881,8 @@ impl ElfWriter {
                         elf.push(0);
                     }
                     for reloc in &section.relocs {
-                        // Find symbol index
                         let sym_idx = self.find_symbol_index(&reloc.symbol_name, &sym_entries, &strtab, &content_sections);
-                        // Write Elf64_Rela
-                        elf.extend_from_slice(&reloc.offset.to_le_bytes());
-                        let r_info = ((sym_idx as u64) << 32) | (reloc.reloc_type as u64);
-                        elf.extend_from_slice(&r_info.to_le_bytes());
-                        elf.extend_from_slice(&reloc.addend.to_le_bytes());
+                        elf::write_rela64(&mut elf, reloc.offset, sym_idx, reloc.reloc_type, reloc.addend);
                     }
                     rela_idx += 1;
                 }
@@ -934,12 +894,8 @@ impl ElfWriter {
             elf.push(0);
         }
         for sym in &sym_entries {
-            elf.extend_from_slice(&sym.st_name.to_le_bytes());
-            elf.push(sym.st_info);
-            elf.push(sym.st_other);
-            elf.extend_from_slice(&sym.st_shndx.to_le_bytes());
-            elf.extend_from_slice(&sym.st_value.to_le_bytes());
-            elf.extend_from_slice(&sym.st_size.to_le_bytes());
+            elf::write_sym64(&mut elf, sym.st_name, sym.st_info, sym.st_other,
+                           sym.st_shndx, sym.st_value, sym.st_size);
         }
 
         // ── Write strtab ──
@@ -1159,24 +1115,7 @@ impl ElfWriter {
     }
 }
 
-/// Write an Elf64_Shdr entry.
-fn write_shdr(
-    buf: &mut Vec<u8>,
-    sh_name: u32, sh_type: u32, sh_flags: u64,
-    sh_addr: u64, sh_offset: u64, sh_size: u64,
-    sh_link: u32, sh_info: u32, sh_addralign: u64, sh_entsize: u64,
-) {
-    buf.extend_from_slice(&sh_name.to_le_bytes());
-    buf.extend_from_slice(&sh_type.to_le_bytes());
-    buf.extend_from_slice(&sh_flags.to_le_bytes());
-    buf.extend_from_slice(&sh_addr.to_le_bytes());
-    buf.extend_from_slice(&sh_offset.to_le_bytes());
-    buf.extend_from_slice(&sh_size.to_le_bytes());
-    buf.extend_from_slice(&sh_link.to_le_bytes());
-    buf.extend_from_slice(&sh_info.to_le_bytes());
-    buf.extend_from_slice(&sh_addralign.to_le_bytes());
-    buf.extend_from_slice(&sh_entsize.to_le_bytes());
-}
+use elf::{write_shdr64 as write_shdr, section_index, default_section_flags};
 
 /// A symbol table entry for writing.
 struct SymEntry {
@@ -1186,78 +1125,5 @@ struct SymEntry {
     st_shndx: u16,
     st_value: u64,
     st_size: u64,
-}
-
-/// Simple string table builder.
-struct StringTable {
-    data: Vec<u8>,
-    offsets: HashMap<String, u32>,
-}
-
-impl StringTable {
-    fn new() -> Self {
-        Self {
-            data: vec![0], // Start with null byte
-            offsets: HashMap::new(),
-        }
-    }
-
-    fn add(&mut self, s: &str) -> u32 {
-        if let Some(&offset) = self.offsets.get(s) {
-            return offset;
-        }
-        if s.is_empty() {
-            return 0;
-        }
-        let offset = self.data.len() as u32;
-        self.data.extend_from_slice(s.as_bytes());
-        self.data.push(0);
-        self.offsets.insert(s.to_string(), offset);
-        offset
-    }
-
-    fn offset_of(&self, s: &str) -> u32 {
-        self.offsets.get(s).copied().unwrap_or(0)
-    }
-
-    fn data(&self) -> Vec<u8> {
-        self.data.clone()
-    }
-}
-
-/// Map section name to its section header index, handling special names.
-fn section_index(section_name: &str, content_sections: &[String]) -> u16 {
-    if section_name == "*COM*" {
-        0xFFF2u16 // SHN_COMMON
-    } else if section_name == "*UND*" || section_name.is_empty() {
-        0u16 // SHN_UNDEF
-    } else {
-        content_sections.iter().position(|s| s == section_name)
-            .map(|i| (i + 1) as u16)
-            .unwrap_or(0)
-    }
-}
-
-/// Return default section flags based on section name.
-fn default_section_flags(name: &str) -> u64 {
-    if name == ".text" || name.starts_with(".text.") {
-        SHF_ALLOC | SHF_EXECINSTR
-    } else if name == ".data" || name.starts_with(".data.") {
-        SHF_ALLOC | SHF_WRITE
-    } else if name == ".bss" || name.starts_with(".bss.") {
-        SHF_ALLOC | SHF_WRITE
-    } else if name == ".rodata" || name.starts_with(".rodata.") {
-        SHF_ALLOC
-    } else if name.starts_with(".note") {
-        SHF_ALLOC
-    } else if name.starts_with(".tdata") {
-        SHF_ALLOC | SHF_WRITE | SHF_TLS
-    } else if name.starts_with(".tbss") {
-        SHF_ALLOC | SHF_WRITE | SHF_TLS
-    } else if name.starts_with(".init") || name.starts_with(".fini") {
-        SHF_ALLOC | SHF_EXECINSTR
-    } else {
-        0
-    }
 }
 

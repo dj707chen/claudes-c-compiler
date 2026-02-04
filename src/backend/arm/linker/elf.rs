@@ -2,69 +2,26 @@
 //!
 //! Reads ELF relocatable object files (.o), static archives (.a), and
 //! shared libraries (.so), extracting sections, symbols, and relocations.
+//!
+//! ELF constants, read/write helpers, archive parsing, and linker script
+//! parsing are imported from the shared `crate::backend::elf` module.
 
-// ── ELF64 constants ────────────────────────────────────────────────────
-
-pub const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
-pub const ELFCLASS64: u8 = 2;
-pub const ELFDATA2LSB: u8 = 1;
-pub const ET_REL: u16 = 1;
-pub const ET_EXEC: u16 = 2;
-pub const ET_DYN: u16 = 3;
-pub const EM_AARCH64: u16 = 183;
-
-// Section header types
-pub const SHT_NULL: u32 = 0;
-pub const SHT_PROGBITS: u32 = 1;
-pub const SHT_SYMTAB: u32 = 2;
-pub const SHT_STRTAB: u32 = 3;
-pub const SHT_RELA: u32 = 4;
-pub const SHT_DYNAMIC: u32 = 6;
-pub const SHT_NOTE: u32 = 7;
-pub const SHT_NOBITS: u32 = 8;
-pub const SHT_REL: u32 = 9;
-pub const SHT_DYNSYM: u32 = 11;
-pub const SHT_INIT_ARRAY: u32 = 14;
-pub const SHT_FINI_ARRAY: u32 = 15;
-pub const SHT_GROUP: u32 = 17;
-
-// Section header flags
-pub const SHF_WRITE: u64 = 0x1;
-pub const SHF_ALLOC: u64 = 0x2;
-pub const SHF_EXECINSTR: u64 = 0x4;
-pub const SHF_TLS: u64 = 0x400;
-pub const SHF_EXCLUDE: u64 = 0x80000000;
-
-// Symbol binding
-pub const STB_LOCAL: u8 = 0;
-pub const STB_GLOBAL: u8 = 1;
-pub const STB_WEAK: u8 = 2;
-
-// Symbol type
-pub const STT_NOTYPE: u8 = 0;
-pub const STT_OBJECT: u8 = 1;
-pub const STT_FUNC: u8 = 2;
-pub const STT_SECTION: u8 = 3;
-pub const STT_FILE: u8 = 4;
-pub const STT_COMMON: u8 = 5;
-pub const STT_TLS: u8 = 6;
-pub const STT_GNU_IFUNC: u8 = 10;
-
-// Special section indices
-pub const SHN_UNDEF: u16 = 0;
-pub const SHN_ABS: u16 = 0xfff1;
-pub const SHN_COMMON: u16 = 0xfff2;
-
-// Program header types
-pub const PT_LOAD: u32 = 1;
-pub const PT_NOTE: u32 = 4;
-pub const PT_TLS: u32 = 7;
-pub const PT_GNU_STACK: u32 = 0x6474e551;
-
-// Program header flags
-pub const PF_X: u32 = 0x1;
-pub const PF_W: u32 = 0x2;
-pub const PF_R: u32 = 0x4;
+// Re-export shared ELF constants so existing callers (mod.rs, reloc.rs)
+// continue to work via `use super::elf::*`.
+pub use crate::backend::elf::{
+    ELF_MAGIC, ELFCLASS64, ELFDATA2LSB, ET_REL, ET_EXEC, ET_DYN, EM_AARCH64,
+    SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB, SHT_RELA,
+    SHT_NOBITS, SHT_REL, SHT_GROUP,
+    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_EXCLUDE,
+    STB_LOCAL, STB_GLOBAL, STB_WEAK,
+    STT_OBJECT, STT_FUNC, STT_SECTION, STT_FILE, STT_TLS, STT_GNU_IFUNC,
+    SHN_UNDEF, SHN_ABS, SHN_COMMON,
+    PT_LOAD, PT_TLS, PT_GNU_STACK,
+    PF_X, PF_W, PF_R,
+    read_u16, read_u32, read_u64, read_i64, read_cstr,
+    w16, w32, w64, write_bytes,
+    parse_archive_members, parse_linker_script,
+};
 
 // ── AArch64 relocation types ───────────────────────────────────────────
 
@@ -151,55 +108,6 @@ pub struct ElfObject {
     pub source_name: String,
 }
 
-// ── Reading helpers ────────────────────────────────────────────────────
-
-pub fn read_u16(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([data[offset], data[offset + 1]])
-}
-
-pub fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
-}
-
-pub fn read_u64(data: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes([
-        data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-        data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
-    ])
-}
-
-pub fn read_i64(data: &[u8], offset: usize) -> i64 {
-    i64::from_le_bytes([
-        data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-        data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
-    ])
-}
-
-fn read_string(data: &[u8], offset: usize) -> String {
-    if offset >= data.len() { return String::new(); }
-    let end = data[offset..].iter().position(|&b| b == 0).unwrap_or(data.len() - offset);
-    String::from_utf8_lossy(&data[offset..offset + end]).to_string()
-}
-
-// ── Writing helpers ────────────────────────────────────────────────────
-
-pub fn w16(buf: &mut [u8], off: usize, val: u16) {
-    if off + 2 <= buf.len() { buf[off..off + 2].copy_from_slice(&val.to_le_bytes()); }
-}
-
-pub fn w32(buf: &mut [u8], off: usize, val: u32) {
-    if off + 4 <= buf.len() { buf[off..off + 4].copy_from_slice(&val.to_le_bytes()); }
-}
-
-pub fn w64(buf: &mut [u8], off: usize, val: u64) {
-    if off + 8 <= buf.len() { buf[off..off + 8].copy_from_slice(&val.to_le_bytes()); }
-}
-
-pub fn write_bytes(buf: &mut [u8], off: usize, data: &[u8]) {
-    let end = off + data.len();
-    if end <= buf.len() { buf[off..end].copy_from_slice(data); }
-}
-
 // ── ELF parsing ────────────────────────────────────────────────────────
 
 /// Parse an ELF64 relocatable object file (.o) for AArch64
@@ -265,7 +173,7 @@ pub fn parse_object(data: &[u8], source_name: &str) -> Result<ElfObject, String>
                 read_u32(data, e_shoff + i * e_shentsize)
             }).collect();
             for (i, sec) in sections.iter_mut().enumerate() {
-                sec.name = read_string(strtab_data, name_idxs[i] as usize);
+                sec.name = read_cstr(strtab_data, name_idxs[i] as usize);
             }
         }
     }
@@ -302,7 +210,7 @@ pub fn parse_object(data: &[u8], source_name: &str) -> Result<ElfObject, String>
                 if off + 24 > sym_data.len() { break; }
                 let name_idx = read_u32(sym_data, off);
                 symbols.push(Symbol {
-                    name: read_string(strtab_data, name_idx as usize),
+                    name: read_cstr(strtab_data, name_idx as usize),
                     info: sym_data[off + 4],
                     other: sym_data[off + 5],
                     shndx: read_u16(sym_data, off + 6),
@@ -346,86 +254,4 @@ pub fn parse_object(data: &[u8], source_name: &str) -> Result<ElfObject, String>
         relocations,
         source_name: source_name.to_string(),
     })
-}
-
-/// Parse an archive (.a) file, returning (member_name, data_offset, size) for each member.
-pub fn parse_archive_members(data: &[u8]) -> Result<Vec<(String, usize, usize)>, String> {
-    if data.len() < 8 || &data[0..8] != b"!<arch>\n" {
-        return Err("not a valid archive file".to_string());
-    }
-
-    let mut members = Vec::new();
-    let mut pos = 8;
-    let mut extended_names: Option<&[u8]> = None;
-
-    while pos + 60 <= data.len() {
-        let name_raw = &data[pos..pos + 16];
-        let size_str = std::str::from_utf8(&data[pos + 48..pos + 58]).unwrap_or("").trim();
-        let magic = &data[pos + 58..pos + 60];
-        if magic != b"`\n" { break; }
-
-        let size: usize = size_str.parse().unwrap_or(0);
-        let data_start = pos + 60;
-        let name_str = std::str::from_utf8(name_raw).unwrap_or("").trim_end();
-
-        if name_str == "/" || name_str == "/SYM64/" {
-            // Symbol table - skip
-        } else if name_str == "//" {
-            extended_names = Some(&data[data_start..data_start + size]);
-        } else {
-            let member_name = if name_str.starts_with('/') {
-                if let Some(ext) = extended_names {
-                    let name_off: usize = name_str[1..].trim_end_matches('/').parse().unwrap_or(0);
-                    if name_off < ext.len() {
-                        let end = ext[name_off..].iter()
-                            .position(|&b| b == b'/' || b == b'\n' || b == 0)
-                            .unwrap_or(ext.len() - name_off);
-                        String::from_utf8_lossy(&ext[name_off..name_off + end]).to_string()
-                    } else {
-                        name_str.to_string()
-                    }
-                } else {
-                    name_str.to_string()
-                }
-            } else {
-                name_str.trim_end_matches('/').to_string()
-            };
-
-            if data_start + size <= data.len() {
-                members.push((member_name, data_start, size));
-            }
-        }
-
-        pos = data_start + size;
-        if pos % 2 != 0 { pos += 1; }
-    }
-
-    Ok(members)
-}
-
-/// Parse a linker script (e.g., libc.so text file with GROUP directive)
-pub fn parse_linker_script(content: &str) -> Option<Vec<String>> {
-    let group_start = content.find("GROUP")?;
-    let paren_start = content[group_start..].find('(')?;
-    let paren_end = content[group_start..].find(')')?;
-    let inside = &content[group_start + paren_start + 1..group_start + paren_end];
-
-    let mut paths = Vec::new();
-    let mut in_as_needed = false;
-    for token in inside.split_whitespace() {
-        match token {
-            "AS_NEEDED" => { in_as_needed = true; continue; }
-            "(" => continue,
-            ")" => { in_as_needed = false; continue; }
-            _ => {}
-        }
-        if token.starts_with('/') || token.ends_with(".so") || token.ends_with(".a") ||
-           token.contains(".so.") {
-            if !in_as_needed {
-                paths.push(token.to_string());
-            }
-        }
-    }
-
-    if paths.is_empty() { None } else { Some(paths) }
 }

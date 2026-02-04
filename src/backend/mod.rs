@@ -1,4 +1,5 @@
 pub(crate) mod common;
+pub(crate) mod elf;
 
 // Shared codegen framework, split into focused modules:
 pub(crate) mod state;       // CodegenState, StackSlot, SlotAddr

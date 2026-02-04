@@ -1,44 +1,23 @@
-//! ELF object file and archive reader for the linker.
+//! ELF object file and archive reader for the RISC-V linker.
+//!
+//! Shared ELF constants and helpers are imported from `crate::backend::elf`.
 
 use std::collections::HashMap;
 
-// ELF constants
-pub const ET_REL: u16 = 1;
-pub const EM_RISCV: u16 = 243;
-pub const SHT_PROGBITS: u32 = 1;
-pub const SHT_SYMTAB: u32 = 2;
-pub const SHT_STRTAB: u32 = 3;
-pub const SHT_RELA: u32 = 4;
-pub const SHT_NOBITS: u32 = 8;
-pub const SHT_INIT_ARRAY: u32 = 14;
-pub const SHT_FINI_ARRAY: u32 = 15;
-pub const SHT_PREINIT_ARRAY: u32 = 16;
-pub const SHT_GROUP: u32 = 17;
+pub use crate::backend::elf::{
+    ET_REL, EM_RISCV,
+    SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB, SHT_RELA, SHT_NOBITS, SHT_DYNSYM, SHT_GROUP,
+    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS,
+    STB_LOCAL, STB_GLOBAL, STB_WEAK,
+    STT_NOTYPE, STT_OBJECT, STT_FUNC, STT_SECTION,
+    STV_DEFAULT,
+    SHN_UNDEF, SHN_ABS, SHN_COMMON,
+    read_u16, read_u32, read_u64, read_cstr,
+    parse_archive_members,
+};
+
+// RISC-V specific constants
 pub const SHT_RISCV_ATTRIBUTES: u32 = 0x70000003;
-
-pub const SHF_WRITE: u64 = 1;
-pub const SHF_ALLOC: u64 = 2;
-pub const SHF_EXECINSTR: u64 = 4;
-pub const SHF_TLS: u64 = 0x400;
-pub const SHF_GROUP: u64 = 0x200;
-
-pub const STB_LOCAL: u8 = 0;
-pub const STB_GLOBAL: u8 = 1;
-pub const STB_WEAK: u8 = 2;
-
-pub const STT_NOTYPE: u8 = 0;
-pub const STT_OBJECT: u8 = 1;
-pub const STT_FUNC: u8 = 2;
-pub const STT_SECTION: u8 = 3;
-pub const STT_FILE: u8 = 4;
-pub const STT_TLS: u8 = 6;
-
-pub const STV_DEFAULT: u8 = 0;
-pub const STV_HIDDEN: u8 = 2;
-
-pub const SHN_UNDEF: u16 = 0;
-pub const SHN_ABS: u16 = 0xFFF1;
-pub const SHN_COMMON: u16 = 0xFFF2;
 
 /// Parsed ELF section from a .o file.
 #[derive(Clone)]
@@ -84,24 +63,6 @@ pub struct ObjFile {
     pub elf_flags: u32,
 }
 
-/// Read a u16 LE from a byte slice.
-fn r16(data: &[u8], off: usize) -> u16 {
-    u16::from_le_bytes([data[off], data[off + 1]])
-}
-/// Read a u32 LE.
-fn r32(data: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes(data[off..off + 4].try_into().unwrap())
-}
-/// Read a u64 LE.
-fn r64(data: &[u8], off: usize) -> u64 {
-    u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
-}
-
-/// Read a null-terminated string from a byte slice.
-fn read_cstr(data: &[u8], off: usize) -> String {
-    let end = data[off..].iter().position(|&b| b == 0).unwrap_or(data.len() - off);
-    String::from_utf8_lossy(&data[off..off + end]).into_owned()
-}
 
 /// Parse an ELF .o file from raw bytes.
 pub fn parse_obj(data: &[u8]) -> Result<ObjFile, String> {
@@ -115,20 +76,20 @@ pub fn parse_obj(data: &[u8]) -> Result<ObjFile, String> {
         return Err("Not little-endian ELF".into());
     }
 
-    let e_type = r16(data, 16);
+    let e_type = read_u16(data, 16);
     if e_type != ET_REL {
         return Err(format!("Not a relocatable file (e_type={})", e_type));
     }
-    let e_machine = r16(data, 18);
+    let e_machine = read_u16(data, 18);
     if e_machine != EM_RISCV {
         return Err(format!("Not RISC-V (e_machine={})", e_machine));
     }
 
-    let elf_flags = r32(data, 48);
-    let e_shoff = r64(data, 40) as usize;
-    let e_shentsize = r16(data, 58) as usize;
-    let e_shnum = r16(data, 60) as usize;
-    let e_shstrndx = r16(data, 62) as usize;
+    let elf_flags = read_u32(data, 48);
+    let e_shoff = read_u64(data, 40) as usize;
+    let e_shentsize = read_u16(data, 58) as usize;
+    let e_shnum = read_u16(data, 60) as usize;
+    let e_shstrndx = read_u16(data, 62) as usize;
 
     // Read section headers
     let mut sections = Vec::with_capacity(e_shnum);
@@ -136,15 +97,15 @@ pub fn parse_obj(data: &[u8]) -> Result<ObjFile, String> {
 
     for i in 0..e_shnum {
         let off = e_shoff + i * e_shentsize;
-        let sh_name = r32(data, off);
-        let sh_type = r32(data, off + 4);
-        let sh_flags = r64(data, off + 8);
-        let sh_offset = r64(data, off + 24);
-        let sh_size = r64(data, off + 32);
-        let sh_link = r32(data, off + 40);
-        let sh_info = r32(data, off + 44);
-        let sh_addralign = r64(data, off + 48);
-        let sh_entsize = r64(data, off + 56);
+        let sh_name = read_u32(data, off);
+        let sh_type = read_u32(data, off + 4);
+        let sh_flags = read_u64(data, off + 8);
+        let sh_offset = read_u64(data, off + 24);
+        let sh_size = read_u64(data, off + 32);
+        let sh_link = read_u32(data, off + 40);
+        let sh_info = read_u32(data, off + 44);
+        let sh_addralign = read_u64(data, off + 48);
+        let sh_entsize = read_u64(data, off + 56);
 
         raw_shdrs.push((sh_name, sh_type, sh_flags, sh_offset, sh_size, sh_addralign, sh_link, sh_info));
 
@@ -207,12 +168,12 @@ pub fn parse_obj(data: &[u8]) -> Result<ObjFile, String> {
             if off + 24 > symdata.len() {
                 break;
             }
-            let st_name = r32(symdata, off) as usize;
+            let st_name = read_u32(symdata, off) as usize;
             let st_info = symdata[off + 4];
             let st_other = symdata[off + 5];
-            let st_shndx = r16(symdata, off + 6);
-            let st_value = r64(symdata, off + 8);
-            let st_size = r64(symdata, off + 16);
+            let st_shndx = read_u16(symdata, off + 6);
+            let st_value = read_u64(symdata, off + 8);
+            let st_size = read_u64(symdata, off + 16);
 
             let name = if st_name < strtab.len() {
                 read_cstr(strtab, st_name)
@@ -247,9 +208,9 @@ pub fn parse_obj(data: &[u8]) -> Result<ObjFile, String> {
                 if off + 24 > rela_data.len() {
                     break;
                 }
-                let r_offset = r64(rela_data, off);
-                let r_info = r64(rela_data, off + 8);
-                let r_addend = r64(rela_data, off + 16) as i64;
+                let r_offset = read_u64(rela_data, off);
+                let r_info = read_u64(rela_data, off + 8);
+                let r_addend = read_u64(rela_data, off + 16) as i64;
 
                 rela_list.push(ObjReloc {
                     offset: r_offset,
@@ -272,84 +233,17 @@ pub fn parse_obj(data: &[u8]) -> Result<ObjFile, String> {
 
 /// Parse a .a static archive and return all ELF .o members.
 pub fn parse_archive(data: &[u8]) -> Result<Vec<(String, ObjFile)>, String> {
-    if data.len() < 8 || &data[0..8] != b"!<arch>\n" {
-        return Err("Not an ar archive".into());
-    }
-
+    let members = parse_archive_members(data)?;
     let mut results = Vec::new();
-    let mut pos = 8;
-
-    // Long name table (for names > 15 chars, GNU-style //)
-    let mut long_names: Vec<u8> = Vec::new();
-
-    while pos + 60 <= data.len() {
-        let header = &data[pos..pos + 60];
-        // ar header: name[16] mtime[12] uid[6] gid[6] mode[8] size[10] magic[2]
-        if &header[58..60] != b"`\n" {
-            break;
-        }
-
-        let raw_name = std::str::from_utf8(&header[0..16])
-            .unwrap_or("")
-            .trim_end();
-        let size_str = std::str::from_utf8(&header[48..58])
-            .unwrap_or("0")
-            .trim();
-        let size: usize = size_str.parse().unwrap_or(0);
-
-        let member_data = if pos + 60 + size <= data.len() {
-            &data[pos + 60..pos + 60 + size]
-        } else {
-            break;
-        };
-
-        // Resolve name
-        let name = if raw_name == "//" {
-            // This is the long name table
-            long_names = member_data.to_vec();
-            pos += 60 + size;
-            if pos % 2 != 0 {
-                pos += 1;
-            }
-            continue;
-        } else if raw_name == "/" {
-            // Symbol index - skip
-            pos += 60 + size;
-            if pos % 2 != 0 {
-                pos += 1;
-            }
-            continue;
-        } else if raw_name.starts_with('/') {
-            // GNU long name: /offset
-            let offset: usize = raw_name[1..].trim_end_matches('/').parse().unwrap_or(0);
-            if offset < long_names.len() {
-                let end = long_names[offset..]
-                    .iter()
-                    .position(|&b| b == b'/' || b == b'\n')
-                    .unwrap_or(long_names.len() - offset);
-                String::from_utf8_lossy(&long_names[offset..offset + end]).into_owned()
-            } else {
-                raw_name.to_string()
-            }
-        } else {
-            // Short name, strip trailing '/'
-            raw_name.trim_end_matches('/').to_string()
-        };
-
-        // Try to parse as ELF
+    for (name, offset, size) in members {
+        let member_data = &data[offset..offset + size];
         if member_data.len() >= 4 && &member_data[0..4] == b"\x7fELF" {
             match parse_obj(member_data) {
                 Ok(obj) => results.push((name, obj)),
                 Err(_) => {} // Skip non-RISC-V objects
             }
         }
-
-        pos += 60 + size;
-        if pos % 2 != 0 {
-            pos += 1;
-        }
     }
-
     Ok(results)
 }
 
@@ -371,9 +265,9 @@ pub fn read_shared_lib_symbols(path: &str) -> Result<Vec<SharedSymInfo>, String>
         return Err(format!("{}: not an ELF file", path));
     }
 
-    let e_shoff = r64(&data, 40) as usize;
-    let e_shentsize = r16(&data, 58) as usize;
-    let e_shnum = r16(&data, 60) as usize;
+    let e_shoff = read_u64(&data, 40) as usize;
+    let e_shentsize = read_u16(&data, 58) as usize;
+    let e_shnum = read_u16(&data, 60) as usize;
 
     // Find .dynsym and .dynstr
     let mut dynsym_off = 0usize;
@@ -386,13 +280,12 @@ pub fn read_shared_lib_symbols(path: &str) -> Result<Vec<SharedSymInfo>, String>
         if off + 64 > data.len() {
             break;
         }
-        let sh_type = r32(&data, off + 4);
-        // SHT_DYNSYM = 11
-        if sh_type == 11 {
-            dynsym_off = r64(&data, off + 24) as usize;
-            dynsym_size = r64(&data, off + 32) as usize;
-            dynsym_link = r32(&data, off + 40);
-            let es = r64(&data, off + 56) as usize;
+        let sh_type = read_u32(&data, off + 4);
+        if sh_type == SHT_DYNSYM {
+            dynsym_off = read_u64(&data, off + 24) as usize;
+            dynsym_size = read_u64(&data, off + 32) as usize;
+            dynsym_link = read_u32(&data, off + 40);
+            let es = read_u64(&data, off + 56) as usize;
             if es > 0 {
                 dynsym_entsize = es;
             }
@@ -409,8 +302,8 @@ pub fn read_shared_lib_symbols(path: &str) -> Result<Vec<SharedSymInfo>, String>
     if dynstr_shdr_off + 64 > data.len() {
         return Ok(Vec::new());
     }
-    let dynstr_off = r64(&data, dynstr_shdr_off + 24) as usize;
-    let dynstr_size = r64(&data, dynstr_shdr_off + 32) as usize;
+    let dynstr_off = read_u64(&data, dynstr_shdr_off + 24) as usize;
+    let dynstr_size = read_u64(&data, dynstr_shdr_off + 32) as usize;
     let dynstr_end = (dynstr_off + dynstr_size).min(data.len());
     let dynstr = &data[dynstr_off..dynstr_end];
 
@@ -422,10 +315,10 @@ pub fn read_shared_lib_symbols(path: &str) -> Result<Vec<SharedSymInfo>, String>
         if off + 24 > data.len() {
             break;
         }
-        let st_name = r32(&data, off) as usize;
+        let st_name = read_u32(&data, off) as usize;
         let st_info = data[off + 4];
-        let st_shndx = r16(&data, off + 6);
-        let st_size = r64(&data, off + 8);
+        let st_shndx = read_u16(&data, off + 6);
+        let st_size = read_u64(&data, off + 8);
 
         // Only include defined symbols (not UND)
         if st_shndx == 0 {

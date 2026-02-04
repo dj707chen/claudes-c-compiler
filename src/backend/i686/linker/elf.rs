@@ -2,15 +2,23 @@
 //!
 //! Reads relocatable ELF32 object files, resolves symbols, applies i386
 //! relocations, and emits a dynamically-linked ELF32 executable.
+//!
+//! Shared ELF helpers are imported from `crate::backend::elf`.
 
 use std::collections::HashMap;
 use std::path::Path;
 
-// ── ELF32 constants ──────────────────────────────────────────────────────────
+use crate::backend::elf::{
+    ELF_MAGIC, ELFCLASS32, ELFDATA2LSB,
+    read_u16, read_u32, read_cstr, read_i32,
+    parse_archive_members,
+};
 
-const ELFMAG: [u8; 4] = [0x7f, b'E', b'L', b'F'];
-const ELFCLASS32: u8 = 1;
-const ELFDATA2LSB: u8 = 1;
+// ── ELF32 constants ──────────────────────────────────────────────────────────
+// Most constants remain local because the shared module uses ELF64 types
+// (u64 for SHF_*, i64 for DT_*) while this ELF32 linker uses u32/i32.
+// Only type-compatible helpers (read_u16, read_u32, etc.) are shared.
+
 const EV_CURRENT: u8 = 1;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
@@ -120,13 +128,6 @@ const PAGE_SIZE: u32 = 0x1000;
 const BASE_ADDR: u32 = 0x08048000;
 const INTERP: &[u8] = b"/lib/ld-linux.so.2\0";
 
-/// Read a NUL-terminated string from a string table.
-fn read_str(strtab: &[u8], offset: u32) -> String {
-    let start = offset as usize;
-    if start >= strtab.len() { return String::new(); }
-    let end = strtab[start..].iter().position(|&b| b == 0).unwrap_or(strtab.len() - start) + start;
-    String::from_utf8_lossy(&strtab[start..end]).into_owned()
-}
 
 // ── ELF32 structures ────────────────────────────────────────────────────────
 
@@ -209,23 +210,12 @@ struct InputObject {
     filename: String,
 }
 
-fn read_u16(data: &[u8], off: usize) -> u16 {
-    u16::from_le_bytes([data[off], data[off + 1]])
-}
-
-fn read_u32(data: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
-}
-
-fn read_i32(data: &[u8], off: usize) -> i32 {
-    i32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
-}
 
 fn parse_elf32(data: &[u8], filename: &str) -> Result<InputObject, String> {
     if data.len() < 52 {
         return Err(format!("{}: too small for ELF header", filename));
     }
-    if data[0..4] != ELFMAG {
+    if data[0..4] != ELF_MAGIC {
         return Err(format!("{}: not an ELF file", filename));
     }
     if data[4] != ELFCLASS32 {
@@ -296,7 +286,7 @@ fn parse_elf32(data: &[u8], filename: &str) -> Result<InputObject, String> {
             let st_other = data[off + 13];
             let st_shndx = read_u16(data, off + 14);
             symbols.push(InputSymbol {
-                name: read_str(strtab_data, st_name),
+                name: read_cstr(strtab_data, st_name as usize),
                 value: st_value,
                 size: st_size,
                 binding: st_info >> 4,
@@ -319,7 +309,7 @@ fn parse_elf32(data: &[u8], filename: &str) -> Result<InputObject, String> {
     }
 
     for (i, shdr) in shdrs.iter().enumerate() {
-        let sec_name = read_str(shstrtab_data, shdr.name);
+        let sec_name = read_cstr(shstrtab_data, shdr.name as usize);
         let sec_data = if shdr.sh_type != SHT_NOBITS && shdr.size > 0 {
             data[shdr.offset as usize..(shdr.offset + shdr.size) as usize].to_vec()
         } else {
@@ -372,60 +362,17 @@ fn parse_elf32(data: &[u8], filename: &str) -> Result<InputObject, String> {
 
 // ── Archive (.a) parsing ─────────────────────────────────────────────────────
 
-fn parse_archive(data: &[u8], filename: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-    if data.len() < 8 || &data[0..8] != b"!<arch>\n" {
-        return Err(format!("{}: not an ar archive", filename));
-    }
+fn parse_archive(data: &[u8], _filename: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let raw_members = parse_archive_members(data)?;
     let mut members = Vec::new();
-    let mut pos = 8;
-    let mut long_names: Vec<u8> = Vec::new();
-
-    while pos + 60 <= data.len() {
-        let hdr = &data[pos..pos + 60];
-        if hdr[58] != b'`' || hdr[59] != b'\n' {
-            break;
-        }
-        let name_field = std::str::from_utf8(&hdr[0..16]).unwrap_or("").trim();
-        let size_str = std::str::from_utf8(&hdr[48..58]).unwrap_or("0").trim();
-        let size: usize = size_str.parse().unwrap_or(0);
-        let content_start = pos + 60;
-        let content_end = (content_start + size).min(data.len());
-        let content = &data[content_start..content_end];
-
-        // Long name table
-        if name_field == "//" {
-            long_names = content.to_vec();
-            pos = content_end;
-            if pos % 2 != 0 { pos += 1; }
-            continue;
-        }
-        // Symbol table
-        if name_field == "/" || name_field == "/SYM64/" {
-            pos = content_end;
-            if pos % 2 != 0 { pos += 1; }
-            continue;
-        }
-
-        let member_name = if name_field.starts_with('/') && name_field.len() > 1 {
-            // Long name reference
-            let offset: usize = name_field[1..].trim_end_matches('/').parse().unwrap_or(0);
-            let end = long_names[offset..].iter().position(|&b| b == b'/' || b == b'\n')
-                .map(|p| offset + p).unwrap_or(long_names.len());
-            String::from_utf8_lossy(&long_names[offset..end]).into_owned()
-        } else {
-            name_field.trim_end_matches('/').to_string()
-        };
-
+    for (name, offset, size) in raw_members {
+        let content = &data[offset..offset + size];
         // Accept .o and .oS (e.g. libc_nonshared.a has .oS members)
-        let is_obj = member_name.ends_with(".o") || member_name.ends_with(".oS");
-        if is_obj && content.len() >= 4 && content[0..4] == ELFMAG {
-            members.push((member_name, content.to_vec()));
+        let is_obj = name.ends_with(".o") || name.ends_with(".oS");
+        if is_obj && content.len() >= 4 && content[0..4] == ELF_MAGIC {
+            members.push((name, content.to_vec()));
         }
-
-        pos = content_end;
-        if pos % 2 != 0 { pos += 1; }
     }
-
     Ok(members)
 }
 
@@ -450,7 +397,7 @@ fn read_dynsyms(path: &str) -> Result<Vec<DynSymInfo>, String> {
 
     let data = std::fs::read(path)
         .map_err(|e| format!("cannot read {}: {}", path, e))?;
-    if data.len() < 52 || data[0..4] != ELFMAG || data[4] != ELFCLASS32 {
+    if data.len() < 52 || data[0..4] != ELF_MAGIC || data[4] != ELFCLASS32 {
         return Err(format!("{}: not a valid ELF32 file", path));
     }
     let e_type = read_u16(&data, 16);
@@ -526,7 +473,7 @@ fn read_dynsyms(path: &str) -> Result<Vec<DynSymInfo>, String> {
                 if aux_pos + 8 <= data.len() {
                     let vda_name = read_u32(&data, aux_pos) as usize;
                     if vda_name < vd_strtab.len() {
-                        let name = read_str(vd_strtab, vda_name as u32);
+                        let name = read_cstr(vd_strtab, vda_name);
                         ver_names.insert(vd_ndx, name.to_string());
                     }
                 }
@@ -2369,7 +2316,7 @@ pub fn link_builtin(
     let mut output = vec![0u8; total_file_size];
 
     // ELF header
-    output[0..4].copy_from_slice(&ELFMAG);
+    output[0..4].copy_from_slice(&ELF_MAGIC);
     output[4] = ELFCLASS32;
     output[5] = ELFDATA2LSB;
     output[6] = EV_CURRENT;
