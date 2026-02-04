@@ -680,6 +680,7 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
 
     // Parse user-provided library flags
     let mut extra_libs: Vec<String> = Vec::new();
+    let mut extra_lib_files: Vec<String> = Vec::new(); // -l:filename (exact filenames)
     let mut lib_paths: Vec<String> = Vec::new();
     let mut extra_objects: Vec<String> = Vec::new();
     let mut rdynamic = false;
@@ -690,7 +691,13 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
         if arg == "-nostdlib" || arg == "-shared" || arg == "-static" || arg == "-r" {
             // handled above
         } else if arg.starts_with("-l") {
-            extra_libs.push(arg[2..].to_string());
+            let libarg = &arg[2..];
+            if libarg.starts_with(':') {
+                // -l:filename - search for exact filename in library paths
+                extra_lib_files.push(libarg[1..].to_string());
+            } else {
+                extra_libs.push(libarg.to_string());
+            }
         } else if arg.starts_with("-L") {
             lib_paths.push(arg[2..].to_string());
         } else if arg == "-rdynamic" || arg == "--export-dynamic" {
@@ -699,7 +706,12 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
             // Parse -Wl, flags
             for part in arg[4..].split(',') {
                 if part.starts_with("-l") {
-                    extra_libs.push(part[2..].to_string());
+                    let libarg = &part[2..];
+                    if libarg.starts_with(':') {
+                        extra_lib_files.push(libarg[1..].to_string());
+                    } else {
+                        extra_libs.push(libarg.to_string());
+                    }
                 } else if part.starts_with("-L") {
                     lib_paths.push(part[2..].to_string());
                 } else if part == "--export-dynamic" || part == "-export-dynamic" {
@@ -804,6 +816,8 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
     // Build dynamic symbol set from shared libraries
     // Maps symbol name -> (library soname, symbol type, symbol size, glibc version, is_default)
     let mut dynlib_syms: HashMap<String, (String, u8, u32, Option<String>, bool)> = HashMap::new();
+    // Static archives found via -l flags (when no .so is available)
+    let mut static_lib_objects: Vec<String> = Vec::new();
 
     if !is_static {
         let mut libs_to_scan: Vec<String> = Vec::new();
@@ -818,45 +832,135 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
             .collect();
 
         for lib in &libs_to_scan {
-            let soname = format!("lib{}.so.6", lib);
-            let filename = format!("lib{}.so", lib);
-            // Try to find the .so file
+            // Try to find the shared library file (.so, .so.N, .so.N.N, etc.)
             let mut found = false;
-            for dir in &all_lib_dirs {
-                // Try .so.6 first, then .so
-                for name in &[&soname, &filename] {
-                    let path = format!("{}/{}", dir, name);
-                    let real_path = std::fs::canonicalize(&path).ok();
-                    let check_path = real_path.as_ref()
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or(path.clone());
-                    if let Ok(syms) = read_dynsyms(&check_path) {
-                        let lib_soname = if lib == "c" { "libc.so.6".to_string() }
-                            else if lib == "m" { "libm.so.6".to_string() }
-                            else { format!("lib{}.so", lib) };
-                        for sym in syms {
-                            // Prefer default version (@@) over hidden version (@)
-                            let entry = dynlib_syms.entry(sym.name.clone());
-                            match entry {
-                                std::collections::hash_map::Entry::Vacant(e) => {
-                                    e.insert((lib_soname.clone(), sym.sym_type, sym.size, sym.version, sym.is_default_ver));
-                                }
-                                std::collections::hash_map::Entry::Occupied(mut e) => {
-                                    // Replace if new entry is default and old is not
-                                    if sym.is_default_ver && !e.get().4 {
+            if !is_static {
+                let so_base = format!("lib{}.so", lib);
+                'dir_search: for dir in &all_lib_dirs {
+                    // Build candidate list: lib{name}.so, then scan for lib{name}.so.N
+                    let mut candidates: Vec<String> = vec![format!("{}/{}", dir, so_base)];
+                    // Also try common versioned names
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            let fname = entry.file_name().to_string_lossy().into_owned();
+                            if fname.starts_with(&so_base) && fname.len() > so_base.len()
+                                && fname.as_bytes()[so_base.len()] == b'.'
+                            {
+                                candidates.push(format!("{}/{}", dir, fname));
+                            }
+                        }
+                    }
+                    for cand in &candidates {
+                        let real_path = std::fs::canonicalize(cand).ok();
+                        let check_path = real_path.as_ref()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or(cand.clone());
+                        if let Ok(syms) = read_dynsyms(&check_path) {
+                            let lib_soname = if lib == "c" { "libc.so.6".to_string() }
+                                else if lib == "m" { "libm.so.6".to_string() }
+                                else { format!("lib{}.so", lib) };
+                            for sym in syms {
+                                // Prefer default version (@@) over hidden version (@)
+                                let entry = dynlib_syms.entry(sym.name.clone());
+                                match entry {
+                                    std::collections::hash_map::Entry::Vacant(e) => {
                                         e.insert((lib_soname.clone(), sym.sym_type, sym.size, sym.version, sym.is_default_ver));
+                                    }
+                                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                                        // Replace if new entry is default and old is not
+                                        if sym.is_default_ver && !e.get().4 {
+                                            e.insert((lib_soname.clone(), sym.sym_type, sym.size, sym.version, sym.is_default_ver));
+                                        }
                                     }
                                 }
                             }
+                            found = true;
+                            break 'dir_search;
                         }
+                    }
+                }
+            }
+            // If no .so found, try to find a static archive (.a)
+            if !found {
+                let ar_filename = format!("lib{}.a", lib);
+                for dir in &all_lib_dirs {
+                    let path = format!("{}/{}", dir, ar_filename);
+                    if Path::new(&path).exists() {
+                        // Add as a static archive to be linked
+                        static_lib_objects.push(path);
                         found = true;
                         break;
                     }
                 }
-                if found { break; }
             }
             // It's ok if we can't find a lib; linker will error on undefined symbols
         }
+    }
+
+    // Handle -l flags in static linking mode
+    if is_static && !extra_libs.is_empty() {
+        let all_lib_dirs: Vec<&str> = lib_paths.iter().map(|s| s.as_str())
+            .chain(system_lib_dirs.iter().map(|s| s.as_str()))
+            .collect();
+        for lib in &extra_libs {
+            let ar_filename = format!("lib{}.a", lib);
+            for dir in &all_lib_dirs {
+                let path = format!("{}/{}", dir, ar_filename);
+                if Path::new(&path).exists() {
+                    static_lib_objects.push(path);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Handle -l:filename (exact filename search in library paths)
+    {
+        let all_lib_dirs: Vec<&str> = lib_paths.iter().map(|s| s.as_str())
+            .chain(system_lib_dirs.iter().map(|s| s.as_str()))
+            .collect();
+        for filename in &extra_lib_files {
+            for dir in &all_lib_dirs {
+                let path = format!("{}/{}", dir, filename);
+                if Path::new(&path).exists() {
+                    if filename.ends_with(".a") || filename.ends_with(".o") {
+                        static_lib_objects.push(path);
+                    } else {
+                        // Assume it's a shared library - try to read dynsyms
+                        if !is_static {
+                            let real_path = std::fs::canonicalize(&path).ok();
+                            let check_path = real_path.as_ref()
+                                .map(|p| p.to_string_lossy().into_owned())
+                                .unwrap_or(path.clone());
+                            if let Ok(syms) = read_dynsyms(&check_path) {
+                                let lib_soname = filename.clone();
+                                for sym in syms {
+                                    let entry = dynlib_syms.entry(sym.name.clone());
+                                    match entry {
+                                        std::collections::hash_map::Entry::Vacant(e) => {
+                                            e.insert((lib_soname.clone(), sym.sym_type, sym.size, sym.version, sym.is_default_ver));
+                                        }
+                                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                                            if sym.is_default_ver && !e.get().4 {
+                                                e.insert((lib_soname.clone(), sym.sym_type, sym.size, sym.version, sym.is_default_ver));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Also add as a static file (it could be an archive)
+                        static_lib_objects.push(path);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // Add static libraries found via -l flags to the object list
+    for lib_path in &static_lib_objects {
+        all_objects.push(lib_path.clone());
     }
 
     // Parse all input objects
@@ -1385,16 +1489,20 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
     // Build .hash section (SysV hash, simpler than GNU hash)
     let hash_data = build_sysv_hash(&dynsym_entries, &dynstr_data);
 
-    // Collect all unique GLIBC version strings needed by dynamic symbols, grouped by library.
+    // Collect all unique version strings needed by dynamic symbols, grouped by library.
     // Maps: library soname -> set of version strings
     let mut lib_versions: std::collections::HashMap<String, std::collections::BTreeSet<String>> = std::collections::HashMap::new();
     for name in &dynsym_names {
         if let Some(gs) = global_symbols.get(name) {
             if gs.is_dynamic {
-                let ver = gs.version.clone().unwrap_or_else(|| "GLIBC_2.0".to_string());
-                lib_versions.entry(gs.dynlib.clone())
-                    .or_default()
-                    .insert(ver);
+                // Only add version requirement if the symbol actually has a version.
+                // Symbols without a version (e.g. from libraries without versioning)
+                // use VER_NDX_GLOBAL and don't need a verneed entry.
+                if let Some(ref ver) = gs.version {
+                    lib_versions.entry(gs.dynlib.clone())
+                        .or_default()
+                        .insert(ver.clone());
+                }
             }
         }
     }
@@ -1459,10 +1567,14 @@ pub fn link_elf32(object_files: &[&str], output_path: &str, user_args: &[String]
             let gs = global_symbols.get(sym_name);
             if let Some(gs) = gs {
                 if gs.is_dynamic && !gs.dynlib.is_empty() {
-                    let ver = gs.version.clone().unwrap_or_else(|| "GLIBC_2.0".to_string());
-                    let idx = ver_index_map.get(&(gs.dynlib.clone(), ver))
-                        .copied().unwrap_or(0);
-                    versym_data.extend_from_slice(&idx.to_le_bytes());
+                    if let Some(ref ver) = gs.version {
+                        let idx = ver_index_map.get(&(gs.dynlib.clone(), ver.clone()))
+                            .copied().unwrap_or(1); // 1 = VER_NDX_GLOBAL
+                        versym_data.extend_from_slice(&idx.to_le_bytes());
+                    } else {
+                        // No version info: use VER_NDX_GLOBAL (1)
+                        versym_data.extend_from_slice(&1u16.to_le_bytes());
+                    }
                 } else {
                     versym_data.extend_from_slice(&0u16.to_le_bytes());
                 }
