@@ -242,6 +242,22 @@ impl ElfWriter {
                 Ok(())
             }
 
+            AsmDirective::Incbin { path, skip, count } => {
+                let data = std::fs::read(path)
+                    .map_err(|e| format!(".incbin: failed to read '{}': {}", path, e))?;
+                let skip = *skip as usize;
+                let data = if skip < data.len() { &data[skip..] } else { &[] };
+                let data = match count {
+                    Some(c) => {
+                        let c = *c as usize;
+                        if c < data.len() { &data[..c] } else { data }
+                    }
+                    None => data,
+                };
+                self.base.emit_bytes(data);
+                Ok(())
+            }
+
             AsmDirective::Cfi | AsmDirective::Ignored => Ok(()),
         }
     }

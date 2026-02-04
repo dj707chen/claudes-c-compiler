@@ -765,7 +765,7 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
             let values = parse_data_values(args)?;
             Directive::Short(values)
         }
-        ".long" | ".4byte" | ".word" => {
+        ".long" | ".4byte" | ".word" | ".int" => {
             let values = parse_data_values(args)?;
             Directive::Long(values)
         }

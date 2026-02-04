@@ -1,3 +1,0 @@
-Testing and fixing lzfse project with builtin assembler/linker.
-Testing all architectures (x86, i686, arm, riscv).
-Started 2026-02-04.

@@ -143,6 +143,8 @@ pub enum AsmDirective {
     PopSection,
     /// CFI directive (ignored for code generation)
     Cfi,
+    /// `.incbin "file"[, skip[, count]]` — include binary file contents
+    Incbin { path: String, skip: u64, count: Option<u64> },
     /// Other ignored directives (.file, .loc, .ident, etc.)
     Ignored,
 }
@@ -785,7 +787,7 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
             }
             AsmDirective::Short(vals)
         }
-        ".long" | ".4byte" | ".word" => {
+        ".long" | ".4byte" | ".word" | ".int" => {
             let vals = parse_data_values(args)?;
             AsmDirective::Long(vals)
         }
@@ -855,6 +857,20 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
             // .org expressions like ". - (X) + (Y)" are used as size assertions
             // in kernel alternative macros. Silently ignore them.
             AsmDirective::Ignored
+        }
+        ".incbin" => {
+            let parts: Vec<&str> = args.splitn(3, ',').collect();
+            let path = elf::parse_string_literal(parts[0].trim())
+                .map_err(|e| format!(".incbin path: {}", e))?;
+            let path = String::from_utf8(path)
+                .map_err(|_| ".incbin: invalid UTF-8 in path".to_string())?;
+            let skip = if parts.len() > 1 {
+                parts[1].trim().parse::<u64>().unwrap_or(0)
+            } else { 0 };
+            let count = if parts.len() > 2 {
+                Some(parts[2].trim().parse::<u64>().unwrap_or(0))
+            } else { None };
+            AsmDirective::Incbin { path, skip, count }
         }
         // Other directives we can safely ignore
         ".file" | ".loc" | ".ident" | ".addrsig" | ".addrsig_sym"

@@ -75,7 +75,7 @@ struct ElfRelocation {
     symbol: String,
     reloc_type: u32,
     addend: i32,
-    /// For SymbolDiff (.long A - B): the subtracted symbol B, used to adjust the addend.
+    /// For SymbolDiff (e.g. `.long A - B`), stores the subtracted symbol B.
     diff_symbol: Option<String>,
 }
 
@@ -362,6 +362,21 @@ impl ElfWriter {
             AsmItem::Set(alias, target) => {
                 self.aliases.insert(alias.clone(), target.clone());
             }
+            AsmItem::Incbin { path, skip, count } => {
+                let data = std::fs::read(path)
+                    .map_err(|e| format!(".incbin: failed to read '{}': {}", path, e))?;
+                let skip = *skip as usize;
+                let data = if skip < data.len() { &data[skip..] } else { &[] };
+                let data = match count {
+                    Some(c) => {
+                        let c = *c as usize;
+                        if c < data.len() { &data[..c] } else { data }
+                    }
+                    None => data,
+                };
+                let section = self.current_section_mut()?;
+                section.data.extend_from_slice(data);
+            }
             AsmItem::Instruction(instr) => {
                 self.encode_instruction(instr)?;
             }
@@ -469,12 +484,14 @@ impl ElfWriter {
                 }
                 DataValue::SymbolDiff(a, b) => {
                     let offset = self.sections[sec_idx].data.len() as u32;
+                    let a_resolved = self.aliases.get(a).cloned().unwrap_or_else(|| a.clone());
+                    let b_resolved = self.aliases.get(b).cloned().unwrap_or_else(|| b.clone());
                     self.sections[sec_idx].relocations.push(ElfRelocation {
                         offset,
-                        symbol: a.clone(),
+                        symbol: a_resolved,
                         reloc_type: R_386_PC32,
                         addend: 0,
-                        diff_symbol: Some(b.clone()),
+                        diff_symbol: Some(b_resolved),
                     });
                     let section = &mut self.sections[sec_idx];
                     section.data.extend(std::iter::repeat_n(0, size));
@@ -520,12 +537,14 @@ impl ElfWriter {
                 }
                 DataValue::SymbolDiff(a, b) => {
                     let offset = self.sections[sec_idx].data.len() as u32;
+                    let a_resolved = self.aliases.get(a).cloned().unwrap_or_else(|| a.clone());
+                    let b_resolved = self.aliases.get(b).cloned().unwrap_or_else(|| b.clone());
                     self.sections[sec_idx].relocations.push(ElfRelocation {
                         offset,
-                        symbol: a.clone(),
+                        symbol: a_resolved,
                         reloc_type: R_386_PC32,
                         addend: 0,
-                        diff_symbol: Some(b.clone()),
+                        diff_symbol: Some(b_resolved),
                     });
                     let section = &mut self.sections[sec_idx];
                     section.data.extend(std::iter::repeat_n(0, 8));
@@ -1096,6 +1115,23 @@ impl ElfWriter {
             let mut unresolved = Vec::new();
 
             for reloc in &self.sections[sec_idx].relocations {
+                // Handle SymbolDiff relocations (e.g. `.long A - B`)
+                if let Some(ref diff_sym) = reloc.diff_symbol {
+                    if let (Some(&(a_sec, a_off)), Some(&(b_sec, b_off))) = (
+                        self.label_positions.get(&reloc.symbol),
+                        self.label_positions.get(diff_sym),
+                    ) {
+                        if a_sec == b_sec {
+                            // Both in same section: constant = a - b
+                            let val = a_off as i64 - b_off as i64;
+                            resolved.push((reloc.offset as usize, val as i32));
+                            continue;
+                        }
+                    }
+                    unresolved.push(reloc.clone());
+                    continue;
+                }
+
                 // Try regular label lookup first, then numeric label resolution (1b, 1f, etc.)
                 let label_pos = self.label_positions.get(&reloc.symbol).copied()
                     .or_else(|| self.resolve_numeric_label(&reloc.symbol, reloc.offset, sec_idx));

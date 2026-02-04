@@ -73,6 +73,8 @@ pub enum AsmItem {
     PopSection,
     /// `.org` directive: advance to position symbol + offset within the section.
     Org(String, i64),
+    /// `.incbin "file"[, skip[, count]]` — include binary file contents
+    Incbin { path: String, skip: u64, count: Option<u64> },
     /// Blank line or comment-only line
     Empty,
 }
@@ -518,7 +520,7 @@ fn parse_directive(line: &str) -> Result<AsmItem, String> {
             let vals = parse_data_values(args)?;
             Ok(AsmItem::Short(vals))
         }
-        ".long" | ".4byte" => {
+        ".long" | ".4byte" | ".int" => {
             let vals = parse_data_values(args)?;
             Ok(AsmItem::Long(vals))
         }
@@ -609,6 +611,20 @@ fn parse_directive(line: &str) -> Result<AsmItem, String> {
         ".popsection" | ".previous" => Ok(AsmItem::PopSection),
         ".code16gcc" => Ok(AsmItem::Empty), // i686 only, ignored
         ".option" => Ok(AsmItem::OptionDirective(args.to_string())),
+        ".incbin" => {
+            let parts: Vec<&str> = args.splitn(3, ',').collect();
+            let path = elf::parse_string_literal(parts[0].trim())
+                .map_err(|e| format!(".incbin path: {}", e))?;
+            let path = String::from_utf8(path)
+                .map_err(|_| ".incbin: invalid UTF-8 in path".to_string())?;
+            let skip = if parts.len() > 1 {
+                parts[1].trim().parse::<u64>().unwrap_or(0)
+            } else { 0 };
+            let count = if parts.len() > 2 {
+                Some(parts[2].trim().parse::<u64>().unwrap_or(0))
+            } else { None };
+            Ok(AsmItem::Incbin { path, skip, count })
+        }
         _ => {
             // Unknown directive - just ignore it with a warning
             // This handles .ident, .addrsig, etc. that GCC might emit

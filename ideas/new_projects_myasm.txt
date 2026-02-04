@@ -115,3 +115,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | jo_gif  | PASS | TODO | TODO | TODO | Passes x86 |
 | quicklz | PASS | TODO | TODO | TODO | Passes x86 |
 | lemon   | PASS | TODO | TODO | TODO | Passes x86 |
+| incbin  | PASS | PASS | PASS | PASS | Added .incbin directive to x86/i686/ARM assemblers; fixed .int directive recognition; fixed i686 SymbolDiff resolution |

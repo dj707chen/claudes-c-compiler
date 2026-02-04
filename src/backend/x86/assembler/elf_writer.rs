@@ -454,6 +454,21 @@ impl ElfWriter {
             AsmItem::Set(alias, target) => {
                 self.aliases.insert(alias.clone(), target.clone());
             }
+            AsmItem::Incbin { path, skip, count } => {
+                let data = std::fs::read(path)
+                    .map_err(|e| format!(".incbin: failed to read '{}': {}", path, e))?;
+                let skip = *skip as usize;
+                let data = if skip < data.len() { &data[skip..] } else { &[] };
+                let data = match count {
+                    Some(c) => {
+                        let c = *c as usize;
+                        if c < data.len() { &data[..c] } else { data }
+                    }
+                    None => data,
+                };
+                let section = self.current_section_mut()?;
+                section.data.extend_from_slice(data);
+            }
             AsmItem::Instruction(instr) => {
                 self.encode_instruction(instr)?;
             }
