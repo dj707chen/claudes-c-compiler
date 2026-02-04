@@ -11,6 +11,7 @@
 //! - Extra assembler/linker flags
 
 use std::process::Command;
+use std::sync::Once;
 use crate::ir::reexports::{
     GlobalInit,
     IrConst,
@@ -18,6 +19,32 @@ use crate::ir::reexports::{
     IrModule,
 };
 use crate::common::types::IrType;
+
+/// Print a one-time warning when falling back to a GCC-backed assembler.
+///
+/// This fires when `MY_ASM` is not set, meaning the compiler shells out to
+/// GCC instead of using its own built-in assembler. The warning is printed
+/// at most once per process to avoid flooding stderr on large builds.
+fn warn_gcc_assembler(command: &str) {
+    static WARN_ONCE: Once = Once::new();
+    WARN_ONCE.call_once(|| {
+        eprintln!("WARNING: Calling GCC-backed assembler ({})", command);
+        eprintln!("WARNING: Set MY_ASM=builtin to use the built-in assembler");
+    });
+}
+
+/// Print a one-time warning when falling back to GCC as the linker driver.
+///
+/// This fires when `MY_LD` is not set (or disabled), meaning the compiler
+/// shells out to GCC for linking instead of using its own built-in linker
+/// or invoking ld directly. The warning is printed at most once per process.
+fn warn_gcc_linker(command: &str) {
+    static WARN_ONCE: Once = Once::new();
+    WARN_ONCE.call_once(|| {
+        eprintln!("WARNING: Calling GCC-backed linker ({})", command);
+        eprintln!("WARNING: Set MY_LD=builtin to use the built-in linker");
+    });
+}
 
 /// Configuration for an external assembler.
 pub struct AssemblerConfig {
@@ -80,6 +107,11 @@ pub fn assemble_with_extra(config: &AssemblerConfig, asm_text: &str, output_path
         .map_err(|e| format!("Failed to write assembly: {}", e))?;
 
     let asm_command = custom_asm.as_deref().unwrap_or(config.command);
+
+    // Warn loudly when falling back to GCC-backed assembler
+    if custom_asm.is_none() {
+        warn_gcc_assembler(config.command);
+    }
 
     let mut cmd = Command::new(asm_command);
     cmd.args(config.extra_args);
@@ -296,6 +328,7 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
     }
 
     // Default path: invoke GCC as the linker driver
+    warn_gcc_linker(config.command);
     let ld_command = config.command;
 
     let mut cmd = Command::new(ld_command);

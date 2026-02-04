@@ -4,8 +4,20 @@
 //! This module centralizes all external process spawning so the rest of the
 //! driver doesn't need to deal with `std::process::Command` building.
 
+use std::sync::Once;
 use super::Driver;
 use crate::backend::Target;
+
+/// Print a one-time warning when falling back to a GCC-backed assembler for
+/// source .s/.S files. Uses a separate `Once` from the compiler-generated
+/// assembly warning in `common.rs` since these are distinct code paths.
+fn warn_gcc_source_assembler(command: &str) {
+    static WARN_ONCE: Once = Once::new();
+    WARN_ONCE.call_once(|| {
+        eprintln!("WARNING: Calling GCC-backed assembler for source files ({})", command);
+        eprintln!("WARNING: Set MY_ASM=builtin to use the built-in assembler");
+    });
+}
 
 /// Output mode for GCC -m16 passthrough compilation.
 pub(super) enum GccM16Mode {
@@ -93,6 +105,10 @@ impl Driver {
         let config = self.target.assembler_config();
         // Check MY_ASM env var to allow overriding the assembler command.
         let custom_asm = std::env::var("MY_ASM").ok();
+        // Warn loudly when falling back to GCC-backed assembler for .s/.S files
+        if custom_asm.is_none() {
+            warn_gcc_source_assembler(config.command);
+        }
         let asm_command = custom_asm.as_deref().unwrap_or(config.command);
         let mut cmd = std::process::Command::new(asm_command);
         cmd.args(config.extra_args);
