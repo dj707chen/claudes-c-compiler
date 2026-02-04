@@ -8,7 +8,7 @@
 ///   - Shifts: `<<`, `>>`
 ///   - Addition/Subtraction: `+`, `-`
 ///   - Multiplication/Division/Modulo: `*`, `/`, `%`
-///   - Unary: `-`, `+`, `~`
+///   - Unary: `-`, `+`, `~`, `!` (logical NOT)
 ///
 /// Integer literals: decimal, hex (0x), binary (0b), octal (leading 0).
 /// Used by all four assembler backends (x86, i686, ARM, RISC-V).
@@ -33,6 +33,7 @@ fn tokenize_expr(s: &str) -> Result<Vec<ExprToken>, String> {
         }
         if c == b'(' || c == b')' || c == b'+' || c == b'-' || c == b'*'
             || c == b'/' || c == b'%' || c == b'&' || c == b'|' || c == b'^' || c == b'~'
+            || c == b'!'
         {
             tokens.push(ExprToken::Op(c as char));
             i += 1;
@@ -161,6 +162,7 @@ fn eval_unary(tokens: &[ExprToken], pos: &mut usize) -> Result<i64, String> {
         ExprToken::Op('-') => { *pos += 1; Ok(-eval_unary(tokens, pos)?) }
         ExprToken::Op('+') => { *pos += 1; eval_unary(tokens, pos) }
         ExprToken::Op('~') => { *pos += 1; Ok(!eval_unary(tokens, pos)?) }
+        ExprToken::Op('!') => { *pos += 1; Ok(if eval_unary(tokens, pos)? == 0 { 1 } else { 0 }) }
         ExprToken::Op('(') => {
             *pos += 1;
             let val = eval_tokens(tokens, pos)?;
@@ -277,6 +279,17 @@ mod tests {
         assert_eq!(parse_integer_expr("1 << 5").unwrap(), 32);
         assert_eq!(parse_integer_expr("~0").unwrap(), -1);
         assert_eq!(parse_integer_expr("0xFF ^ 0x0F").unwrap(), 0xF0);
+    }
+
+    #[test]
+    fn test_logical_not() {
+        // GAS logical NOT: !0 = 1, !1 = 0, !nonzero = 0
+        assert_eq!(parse_integer_expr("!0").unwrap(), 1);
+        assert_eq!(parse_integer_expr("!1").unwrap(), 0);
+        assert_eq!(parse_integer_expr("!42").unwrap(), 0);
+        // Used in FFmpeg: 1+!0 = 2
+        assert_eq!(parse_integer_expr("1+!0").unwrap(), 2);
+        assert_eq!(parse_integer_expr("1+!1").unwrap(), 1);
     }
 
     #[test]

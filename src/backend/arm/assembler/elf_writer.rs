@@ -258,6 +258,8 @@ impl ElfWriter {
                 Ok(())
             }
 
+            AsmDirective::RawBytes(bytes) => { self.base.emit_bytes(bytes); Ok(()) }
+
             AsmDirective::Cfi | AsmDirective::Ignored => Ok(()),
         }
     }
@@ -399,6 +401,11 @@ impl ElfWriter {
                         // R_AARCH64_TSTBR14
                         let imm14 = ((pc_offset >> 2) as u32) & 0x3FFF;
                         word |= imm14 << 5;
+                    }
+                    273 => {
+                        // R_AARCH64_LD_PREL_LO19 - LDR literal
+                        let imm19 = ((pc_offset >> 2) as u32) & 0x7FFFF;
+                        word |= imm19 << 5;
                     }
                     274 => {
                         // R_AARCH64_ADR_PREL_LO21 - ADR instruction

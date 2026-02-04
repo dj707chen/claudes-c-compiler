@@ -13,7 +13,7 @@ not enabled).  It accepts the same textual assembly that GCC's gas would consume
 and produces ABI-compatible `.o` files that any standard AArch64 ELF linker (or
 the companion built-in linker) can link.
 
-The implementation spans roughly 5,930 lines of Rust across four files and is
+The implementation spans roughly 8,470 lines of Rust across four files and is
 organized as a clean three-stage pipeline.  Shared ELF infrastructure (section
 management, symbol tables, ELF serialization) lives in `ElfWriterBase` in
 `elf.rs`; this file only contains AArch64-specific logic.
@@ -26,15 +26,15 @@ management, symbol tables, ELF serialization) lives in `ElfWriterBase` in
        |
        v
   +------------------+
-  |   parser.rs       |   Stage 1: Tokenize + Parse
-  |   (1,234 lines)   |   Lines -> AsmStatement[]
+  |   parser.rs       |   Stage 1: Preprocess + Parse
+  |   (2,193 lines)   |   Macros, .rept, .if -> AsmStatement[]
   +------------------+
        |
        | Vec<AsmStatement>
        v
   +------------------+
   |   elf_writer.rs   |   Stage 2: Process + Encode + Emit
-  |   (413 lines)     |   AArch64-specific: branch resolution,
+  |   (454 lines)     |   AArch64-specific: branch resolution,
   |                    |   sym diffs (uses ElfWriterBase)
   +------------------+
        |         ^
@@ -42,7 +42,7 @@ management, symbol tables, ELF serialization) lives in `ElfWriterBase` in
        v         |
   +------------------+
   |   encoder.rs      |   Instruction Encoding Library
-  |   (4,012 lines)   |   Mnemonic + Operands -> u32 words
+  |   (5,604 lines)   |   Mnemonic + Operands -> u32 words
   +------------------+
        |
        v
@@ -112,22 +112,28 @@ RegListIndexed { regs, index }     -- {v0.s, v1.s}[0] (NEON single-element)
 
 ```
 parse_asm(text)
-  0. Pre-pass: expand_rept_blocks() -- flatten .rept/.endr into repeated lines
-  for each line in text:
-    1. Trim whitespace
-    2. Strip comments (// style and @ GAS-ARM style)
-    3. Split on ';' (GAS multi-statement separator, respecting strings)
-    4. For each sub-statement:
-       a. Try to match "name:" -> Label(name)
-          - .L* prefixed names are recognized as local labels
-          - Any text after the colon is recursively parsed
-       b. Try to match "." prefix -> parse_directive()
-          - 24 directive types, each with its own sub-parser
-       c. Otherwise -> parse_instruction()
-          - Split mnemonic from operand string
-          - parse_operands() splits on ',' respecting [] and {} nesting
-          - Each token -> parse_single_operand()
-          - Post-pass: merge [base], #offset into MemPostIndex
+  0. Strip C-style /* ... */ block comments
+  1. expand_macros() -- collect .macro/.endm definitions, expand invocations
+     - Supports default parameters, varargs (\()), .purgem
+     - Nested macro definitions tracked with depth counter
+     - Recursive expansion with 64-level depth limit
+  2. expand_rept_blocks() -- flatten .rept/.endr and .irp/.irpc/.endr
+  3. resolve_set_constants() -- substitute .set/.equ symbol values
+  4. resolve_register_aliases() -- process .req/.unreq register aliases
+  5. Conditional assembly: .if/.elseif/.else/.endif, .ifc/.ifnc, .ifb/.ifnb
+     - Supports ==, !=, >, >=, <, <= comparisons
+     - Arithmetic expressions via shared asm_expr evaluator
+  6. ldr =symbol pseudo-instruction expansion (literal pool)
+  for each line:
+    a. Trim whitespace, strip comments (// and @ style)
+    b. Split on ';' (GAS multi-statement separator)
+    c. For each sub-statement:
+       - Try to match "name:" -> Label(name)
+       - Try to match "." prefix -> parse_directive()
+       - Otherwise -> parse_instruction()
+         - parse_operands() splits on ',' respecting [] and {} nesting
+         - parse_single_operand() handles all operand shapes
+         - Post-pass: merge [base], #offset into MemPostIndex
 ```
 
 ### Supported Directives
@@ -137,10 +143,13 @@ parse_asm(text)
 | Sections | `.section`, `.text`, `.data`, `.bss`, `.rodata`, `.pushsection`, `.popsection`/`.previous` |
 | Symbols | `.globl`/`.global`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type`, `.size`, `.local`, `.comm`, `.set`/`.equ` |
 | Alignment | `.align`, `.p2align` (power-of-2), `.balign` (byte count) |
-| Data emission | `.byte`, `.short`/`.hword`/`.2byte`, `.long`/`.4byte`/`.word`, `.quad`/`.8byte`/`.xword`, `.zero`/`.space`, `.ascii`, `.asciz`/`.string` |
-| Repetition | `.rept` count / `.endr` (expanded as a pre-pass before parsing) |
+| Data emission | `.byte`, `.short`/`.hword`/`.2byte`, `.long`/`.4byte`/`.word`, `.quad`/`.8byte`/`.xword`, `.zero`/`.space`, `.ascii`, `.asciz`/`.string`, `.float`, `.double`, `.inst` |
+| Macros | `.macro`/`.endm` (with default params, varargs), `.purgem`, `.req`/`.unreq` (register aliases) |
+| Repetition | `.rept`/`.endr`, `.irp`/`.endr`, `.irpc`/`.endr` |
+| Conditionals | `.if`/`.elseif`/`.else`/`.endif`, `.ifc`/`.ifnc`, `.ifb`/`.ifnb` |
+| Includes | `.incbin` (binary file inclusion) |
 | CFI | `.cfi_startproc`, `.cfi_endproc`, `.cfi_def_cfa_offset`, `.cfi_offset`, and 12 more (all passed through as no-ops) |
-| Ignored | `.file`, `.loc`, `.ident`, `.addrsig`, `.addrsig_sym`, `.build_attributes`, `.eabi_attribute` |
+| Ignored | `.file`, `.loc`, `.ident`, `.addrsig`, `.addrsig_sym`, `.build_attributes`, `.eabi_attribute`, `.arch`, `.arch_extension`, `.ltorg`/`.pool` |
 
 ### Design Decisions (Parser)
 
@@ -187,22 +196,38 @@ Skip                             -- pseudo-instruction; no code emitted
 
 ### Supported Instruction Categories
 
-The encoder handles every instruction the compiler's AArch64 backend emits.
-The dispatch table in `encode_instruction()` maps ~120 mnemonics:
+The encoder handles a comprehensive set of AArch64 instructions.
+The dispatch table in `encode_instruction()` maps ~240 base mnemonics
+(~440 including condition code variants):
 
 | Category | Mnemonics |
 |----------|-----------|
-| **Data Processing** | `mov`, `movz`, `movk`, `movn`, `add`, `adds`, `sub`, `subs`, `and`, `orr`, `eor`, `ands`, `orn`, `bics`, `mul`, `madd`, `msub`, `smull`, `umull`, `smaddl`, `umaddl`, `mneg`, `udiv`, `sdiv`, `umulh`, `smulh`, `neg`, `negs`, `mvn`, `adc`, `adcs`, `sbc`, `sbcs` |
+| **Data Processing** | `mov`, `movz`, `movk`, `movn`, `add`, `adds`, `sub`, `subs`, `and`, `orr`, `eor`, `ands`, `orn`, `eon`, `bics`, `mul`, `madd`, `msub`, `smull`, `umull`, `smaddl`, `umaddl`, `mneg`, `udiv`, `sdiv`, `umulh`, `smulh`, `neg`, `negs`, `mvn`, `adc`, `adcs`, `sbc`, `sbcs` |
 | **Shifts** | `lsl`, `lsr`, `asr`, `ror` |
+| **Bit fields** | `ubfm`, `sbfm`, `ubfx`, `sbfx`, `ubfiz`, `sbfiz`, `bfm`, `bfi`, `bfxil` |
 | **Extensions** | `sxtw`, `sxth`, `sxtb`, `uxtw`, `uxth`, `uxtb` |
-| **Compare** | `cmp`, `cmn`, `tst`, `ccmp` |
-| **Conditional select** | `csel`, `csinc`, `csinv`, `csneg`, `cset`, `csetm` |
-| **Branches** | `b`, `bl`, `br`, `blr`, `ret`, `cbz`, `cbnz`, `tbz`, `tbnz`, `b.eq`/`beq`, `b.ne`/`bne`, `b.lt`/`blt`, ... (all 16 condition codes, with and without dot) |
-| **Loads/Stores** | `ldr`, `str`, `ldrb`, `strb`, `ldrh`, `strh`, `ldrsw`, `ldrsb`, `ldrsh`, `ldp`, `stp`, `ldnp`, `stnp`, `ldxr`, `stxr`, `ldxrb`, `stxrb`, `ldxrh`, `stxrh`, `ldaxr`, `stlxr`, `ldaxrb`, `stlxrb`, `ldaxrh`, `stlxrh`, `ldar`, `stlr`, `ldarb`, `stlrb`, `ldarh`, `stlrh` |
+| **Compare** | `cmp`, `cmn`, `tst`, `ccmp`, `fccmp` |
+| **Conditional select** | `csel`, `csinc`, `csinv`, `csneg`, `cset`, `csetm`, `fcsel` |
+| **Branches** | `b`, `bl`, `br`, `blr`, `ret`, `cbz`, `cbnz`, `tbz`, `tbnz`, `b.eq`/`beq`, ... (all 16 conditions) |
+| **Loads/Stores** | `ldr`, `str`, `ldrb`, `strb`, `ldrh`, `strh`, `ldrsw`, `ldrsb`, `ldrsh`, `ldur`, `stur`, `ldp`, `stp`, `ldnp`, `stnp`, `ldxr`, `stxr`, `ldxrb`, `stxrb`, `ldxrh`, `stxrh`, `ldaxr`, `stlxr`, `ldaxrb`, `stlxrb`, `ldaxrh`, `stlxrh`, `ldar`, `stlr`, `ldarb`, `stlrb`, `ldarh`, `stlrh` |
 | **Address** | `adrp`, `adr` |
-| **Floating point** | `fmov`, `fadd`, `fsub`, `fmul`, `fdiv`, `fneg`, `fabs`, `fsqrt`, `fcmp`, `fcvtzs`, `fcvtzu`, `fcvtas`, `fcvtau`, `fcvtns`, `fcvtnu`, `fcvtms`, `fcvtmu`, `fcvtps`, `fcvtpu`, `ucvtf`, `scvtf`, `fcvt` |
-| **NEON/SIMD** | `cnt`, `uaddlv`, `cmeq`, `cmtst`, `uqsub`, `sqsub`, `ushr`, `sshr`, `shl`, `sli`, `ext`, `addv`, `umov`, `dup`, `ins`, `not`, `movi`, `bic`, `bsl`, `pmul`, `mla`, `mls`, `rev64`, `tbl`, `tbx`, `ld1`, `ld1r`, `ld2`, `ld3`, `ld4`, `st1`, `st2`, `st3`, `st4`, `uzp1`, `uzp2`, `zip1`, `zip2`, `eor3`, `pmull`, `pmull2`, `aese`, `aesd`, `aesmc`, `aesimc` |
-| **System** | `nop`, `yield`, `clrex`, `dc`, `dmb`, `dsb`, `isb`, `mrs`, `msr`, `svc`, `brk` |
+| **Floating point** | `fmov`, `fadd`, `fsub`, `fmul`, `fdiv`, `fmax`, `fmin`, `fmaxnm`, `fminnm`, `fneg`, `fabs`, `fsqrt`, `fcmp`, `fmadd`, `fmsub`, `fnmadd`, `fnmsub`, `frintn`/`p`/`m`/`z`/`a`/`x`/`i`, `fcvtzs`, `fcvtzu`, `fcvtas`/`au`/`ns`/`nu`/`ms`/`mu`/`ps`/`pu`, `ucvtf`, `scvtf`, `fcvt` |
+| **NEON three-same** | `add`, `sub`, `mul`, `and`, `orr`, `eor`, `orn`, `bic`, `bif`, `bit`, `bsl`, `cmeq`, `cmge`, `cmgt`, `cmhi`, `cmhs`, `cmtst`, `sqadd`, `uqadd`, `sqsub`, `uqsub`, `shadd`, `uhadd`, `shsub`, `uhsub`, `srhadd`, `urhadd`, `smax`, `umax`, `smin`, `umin`, `sabd`, `uabd`, `saba`, `uaba`, `sshl`, `ushl`, `sqshl`, `uqshl`, `srshl`, `urshl`, `sqrshl`, `uqrshl`, `addp`, `uminp`, `umaxp`, `sminp`, `smaxp`, `pmul` |
+| **NEON two-misc** | `cnt`, `not`/`mvn`, `rev16`, `rev32`, `rev64`, `cls`, `clz`, `neg`, `abs`, `sqabs`, `sqneg`, `xtn`/`xtn2`, `uqxtn`/`uqxtn2`, `sqxtn`/`sqxtn2`, `sqxtun`/`sqxtun2`, `fcvtn`/`fcvtl`, `shll`/`shll2` |
+| **NEON float vector** | `fadd`, `fsub`, `fmul`, `fdiv`, `fmax`, `fmin`, `fmaxnm`, `fminnm`, `fneg`, `fabs`, `fsqrt`, `frintn`/`p`/`m`/`z`/`a`/`x`/`i` (vector forms), `frecpe`, `frsqrte`, `frecps`, `frsqrts`, `faddp`, `fmaxp`, `fminp`, `fmaxnmp`, `fminnmp` |
+| **NEON compare-zero** | `cmgt`/`cmge`/`cmeq`/`cmle`/`cmlt` `#0`, `fcmeq`/`fcmgt`/`fcmle`/`fcmlt` `#0.0` |
+| **NEON shifts** | `sshr`, `ushr`, `srshr`, `urshr`, `ssra`, `usra`, `srsra`, `ursra`, `sri`, `sli`, `shl`, `sqshl`, `uqshl`, `sqshlu` |
+| **NEON narrow** | `shrn`/`shrn2`, `rshrn`/`rshrn2`, `sqshrn`/`uqshrn`/`sqrshrn`/`uqrshrn` (+ `2` variants), `sqshrun`/`sqrshrun` (+ `2` variants) |
+| **NEON widen/long** | `sshll`/`ushll`/`sxtl`/`uxtl` (+ `2` variants), `smull`/`umull`/`smlal`/`umlal`/`smlsl`/`umlsl`/`saddw`/`uaddw`/`ssubw`/`usubw`/`addhn`/`subhn`/`pmull` (+ `2` variants) |
+| **NEON by-element** | `mul`, `mla`, `mls`, `fmul`, `fmla`, `fmls`, `smull`, `umull`, `smlal`, `umlal`, `sqdmulh`, `sqrdmulh` (with lane index) |
+| **NEON reduce** | `addv`, `saddlv`, `umaxv`, `uminv`, `smaxv`, `sminv`, `fmaxv`, `fminv`, `fmaxnmv`, `fminnmv` |
+| **NEON permute** | `zip1`, `zip2`, `uzp1`, `uzp2`, `trn1`, `trn2`, `ext`, `tbl`, `tbx` |
+| **NEON insert/move** | `ins` (element/GPR), `umov`, `smov`, `dup` (element/GPR), `movi`, `mvni` |
+| **NEON load/store** | `ld1`/`st1` (1-4 regs), `ld2`/`st2`, `ld3`/`st3`, `ld4`/`st4` (with post-index), `ld1r`/`ld2r`/`ld3r`/`ld4r` (with post-index) |
+| **NEON convert** | `fcvtzs`, `fcvtzu`, `scvtf`, `ucvtf`, `fcvtns`, `fcvtms`, `fcvtas`, `fcvtps` (vector forms) |
+| **NEON scalar** | `addp` (scalar), `add`/`sub` (d-regs), `sqabs`/`sqneg` (scalar), `sqshrn` (scalar) |
+| **NEON crypto** | `aese`, `aesd`, `aesmc`, `aesimc`, `sha1h`, `sha1c`, `sha1m`, `sha1p`, `sha1su0`, `sha1su1`, `sha256h`, `sha256h2`, `sha256su0`, `sha256su1`, `eor3` |
+| **System** | `nop`, `yield`, `wfe`, `sev`, `clrex`, `hint`, `dc`, `ic`, `tlbi`, `dmb`, `dsb`, `isb`, `mrs`, `msr`, `svc`, `brk` |
 | **Bit manipulation** | `clz`, `cls`, `rbit`, `rev`, `rev16`, `rev32` |
 | **CRC32** | `crc32b`, `crc32h`, `crc32w`, `crc32x`, `crc32cb`, `crc32ch`, `crc32cw`, `crc32cx` |
 | **Prefetch** | `prfm` |
@@ -210,7 +235,7 @@ The dispatch table in `encode_instruction()` maps ~120 mnemonics:
 ### Relocation Types Emitted
 
 When an instruction references an external symbol (e.g., `bl printf` or
-`adrp x0, :got:variable`), the encoder returns `WordWithReloc`.  The 17
+`adrp x0, :got:variable`), the encoder returns `WordWithReloc`.  The 18
 relocation types cover the full AArch64 static-linking relocation model:
 
 | Relocation | ELF Number | Usage |
@@ -230,6 +255,7 @@ relocation types cover the full AArch64 static-linking relocation model:
 | `TlsLeAddTprelLo12` | 550 | TLS Local Exec, low 12 |
 | `CondBr19` | 280 | Conditional branch, 19-bit |
 | `TstBr14` | 279 | Test-and-branch, 14-bit |
+| `Ldr19` | 273 | LDR literal, 19-bit PC-relative |
 | `Abs64` | 257 | 64-bit absolute |
 | `Abs32` | 258 | 32-bit absolute |
 | `Prel32` | 261 | 32-bit PC-relative |
@@ -442,8 +468,8 @@ relaxation passes (unlike x86).  The only multi-word output is the
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `mod.rs` | 221 | Public API: `assemble()` entry point, numeric label resolution |
-| `parser.rs` | 1,241 | Tokenizer and parser: text -> `Vec<AsmStatement>` |
-| `encoder.rs` | 4,054 | Instruction encoder: mnemonic + operands -> `u32` machine code |
-| `elf_writer.rs` | 413 | ELF object file writer: composes with `ElfWriterBase` (from `elf.rs`), adds AArch64-specific branch resolution and symbol difference handling |
-| **Total** | **5,929** | |
+| `mod.rs` | 223 | Public API: `assemble()` entry point, numeric label resolution |
+| `parser.rs` | 2,193 | Preprocessor (macros, .rept, .irp, conditionals, aliases) and parser: text -> `Vec<AsmStatement>` |
+| `encoder.rs` | 5,604 | Instruction encoder: ~240 base mnemonics + operands -> `u32` machine code |
+| `elf_writer.rs` | 454 | ELF object file writer: composes with `ElfWriterBase` (from `elf.rs`), adds AArch64-specific branch resolution and symbol difference handling |
+| **Total** | **8,474** | |
