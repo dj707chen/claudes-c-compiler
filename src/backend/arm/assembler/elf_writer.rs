@@ -391,21 +391,7 @@ impl ElfWriter {
 
                 // Set default flags based on section name
                 if sh_flags == 0 {
-                    if sec_name == ".text" {
-                        sh_flags = SHF_ALLOC | SHF_EXECINSTR;
-                    } else if sec_name == ".data" || sec_name.starts_with(".data.") {
-                        sh_flags = SHF_ALLOC | SHF_WRITE;
-                    } else if sec_name == ".bss" || sec_name.starts_with(".bss.") {
-                        sh_flags = SHF_ALLOC | SHF_WRITE;
-                    } else if sec_name == ".rodata" || sec_name.starts_with(".rodata.") {
-                        sh_flags = SHF_ALLOC;
-                    } else if sec_name.starts_with(".note") {
-                        sh_flags = SHF_ALLOC;
-                    } else if sec_name.starts_with(".tdata") {
-                        sh_flags = SHF_ALLOC | SHF_WRITE | SHF_TLS;
-                    } else if sec_name.starts_with(".tbss") {
-                        sh_flags = SHF_ALLOC | SHF_WRITE | SHF_TLS;
-                    }
+                    sh_flags = default_section_flags(&sec_name);
                 }
 
                 let align = if sec_name == ".text" { 4 } else { 1 };
@@ -429,6 +415,12 @@ impl ElfWriter {
             ".bss" => {
                 self.ensure_section(".bss", SHT_NOBITS, SHF_ALLOC | SHF_WRITE, 1);
                 self.current_section = ".bss".to_string();
+                Ok(())
+            }
+
+            ".rodata" => {
+                self.ensure_section(".rodata", SHT_PROGBITS, SHF_ALLOC, 1);
+                self.current_section = ".rodata".to_string();
                 Ok(())
             }
 
@@ -506,13 +498,8 @@ impl ElfWriter {
                 let align_val: u64 = args.trim().split(',').next()
                     .and_then(|s| s.trim().parse().ok())
                     .unwrap_or(0);
-                // On ARM, .align N means 2^N bytes
-                let bytes = if name == ".p2align" || true {
-                    // AArch64 .align is always power-of-2
-                    1u64 << align_val
-                } else {
-                    align_val
-                };
+                // AArch64 .align N means 2^N bytes (same as .p2align)
+                let bytes = 1u64 << align_val;
                 self.align_to(bytes);
                 Ok(())
             }
@@ -531,7 +518,7 @@ impl ElfWriter {
                 Ok(())
             }
 
-            ".short" | ".hword" | ".2byte" => {
+            ".short" | ".hword" | ".2byte" | ".half" => {
                 for part in args.split(',') {
                     let val = parse_data_value(part.trim())? as u16;
                     self.emit_bytes(&val.to_le_bytes());
@@ -560,29 +547,7 @@ impl ElfWriter {
                 Ok(())
             }
 
-            ".quad" | ".8byte" | ".xword" => {
-                for part in args.split(',') {
-                    let trimmed = part.trim();
-                    // Handle symbol difference expressions: A - B
-                    if let Some(result) = self.try_emit_symbol_diff(trimmed, 8) {
-                        result?;
-                        continue;
-                    }
-                    // Check for symbol references
-                    if is_symbol_ref(trimmed) {
-                        let (sym, addend) = parse_symbol_addend(trimmed);
-                        self.add_reloc(RelocType::Abs64.elf_type(), sym, addend);
-                        self.emit_bytes(&0u64.to_le_bytes());
-                        continue;
-                    }
-                    let val = parse_data_value(trimmed)? as u64;
-                    self.emit_bytes(&val.to_le_bytes());
-                }
-                Ok(())
-            }
-
-            ".dword" => {
-                // .dword is the same as .xword on AArch64 (8 bytes)
+            ".quad" | ".8byte" | ".xword" | ".dword" => {
                 for part in args.split(',') {
                     let trimmed = part.trim();
                     // Handle symbol difference expressions: A - B
@@ -603,13 +568,19 @@ impl ElfWriter {
             }
 
             ".zero" | ".space" => {
-                let size: usize = args.trim().parse()
+                let parts: Vec<&str> = args.trim().split(',').collect();
+                let size: usize = parts[0].trim().parse()
                     .map_err(|_| format!("invalid .zero size: {}", args))?;
-                self.emit_bytes(&vec![0u8; size]);
+                let fill: u8 = if parts.len() > 1 {
+                    parse_data_value(parts[1].trim())? as u8
+                } else {
+                    0
+                };
+                self.emit_bytes(&vec![fill; size]);
                 Ok(())
             }
 
-            ".asciz" => {
+            ".asciz" | ".string" => {
                 let s = parse_string_literal(args)?;
                 self.emit_bytes(s.as_bytes());
                 self.emit_bytes(&[0]); // null terminator
@@ -619,13 +590,6 @@ impl ElfWriter {
             ".ascii" => {
                 let s = parse_string_literal(args)?;
                 self.emit_bytes(s.as_bytes());
-                Ok(())
-            }
-
-            ".string" => {
-                let s = parse_string_literal(args)?;
-                self.emit_bytes(s.as_bytes());
-                self.emit_bytes(&[0]); // null terminator
                 Ok(())
             }
 
@@ -652,6 +616,18 @@ impl ElfWriter {
                         section_name: "*COM*".to_string(),
                     });
                 }
+                Ok(())
+            }
+
+            ".local" => {
+                // .local symbol - marks symbol as local (default)
+                // Nothing to do since symbols are local by default
+                Ok(())
+            }
+
+            ".set" | ".equ" => {
+                // .set name, value - define a symbol with a value
+                // TODO: implement properly
                 Ok(())
             }
 
@@ -854,15 +830,7 @@ impl ElfWriter {
 
         for sym in &local_syms {
             let name_offset = strtab.add(&sym.name);
-            let shndx = if sym.section_name == "*COM*" {
-                0xFFF2u16 // SHN_COMMON
-            } else if sym.section_name == "*UND*" || sym.section_name.is_empty() {
-                0u16 // SHN_UNDEF
-            } else {
-                content_sections.iter().position(|s| s == &sym.section_name)
-                    .map(|i| (i + 1) as u16)
-                    .unwrap_or(0)
-            };
+            let shndx = section_index(&sym.section_name, &content_sections);
             sym_entries.push(SymEntry {
                 st_name: name_offset,
                 st_info: (sym.binding << 4) | sym.sym_type,
@@ -875,15 +843,7 @@ impl ElfWriter {
 
         for sym in &global_syms {
             let name_offset = strtab.add(&sym.name);
-            let shndx = if sym.section_name == "*COM*" {
-                0xFFF2u16 // SHN_COMMON
-            } else if sym.section_name == "*UND*" || sym.section_name.is_empty() {
-                0u16 // SHN_UNDEF
-            } else {
-                content_sections.iter().position(|s| s == &sym.section_name)
-                    .map(|i| (i + 1) as u16)
-                    .unwrap_or(0)
-            };
+            let shndx = section_index(&sym.section_name, &content_sections);
             sym_entries.push(SymEntry {
                 st_name: name_offset,
                 st_info: (sym.binding << 4) | sym.sym_type,
@@ -1265,6 +1225,42 @@ impl StringTable {
 
     fn data(&self) -> Vec<u8> {
         self.data.clone()
+    }
+}
+
+/// Map section name to its section header index, handling special names.
+fn section_index(section_name: &str, content_sections: &[String]) -> u16 {
+    if section_name == "*COM*" {
+        0xFFF2u16 // SHN_COMMON
+    } else if section_name == "*UND*" || section_name.is_empty() {
+        0u16 // SHN_UNDEF
+    } else {
+        content_sections.iter().position(|s| s == section_name)
+            .map(|i| (i + 1) as u16)
+            .unwrap_or(0)
+    }
+}
+
+/// Return default section flags based on section name.
+fn default_section_flags(name: &str) -> u64 {
+    if name == ".text" || name.starts_with(".text.") {
+        SHF_ALLOC | SHF_EXECINSTR
+    } else if name == ".data" || name.starts_with(".data.") {
+        SHF_ALLOC | SHF_WRITE
+    } else if name == ".bss" || name.starts_with(".bss.") {
+        SHF_ALLOC | SHF_WRITE
+    } else if name == ".rodata" || name.starts_with(".rodata.") {
+        SHF_ALLOC
+    } else if name.starts_with(".note") {
+        SHF_ALLOC
+    } else if name.starts_with(".tdata") {
+        SHF_ALLOC | SHF_WRITE | SHF_TLS
+    } else if name.starts_with(".tbss") {
+        SHF_ALLOC | SHF_WRITE | SHF_TLS
+    } else if name.starts_with(".init") || name.starts_with(".fini") {
+        SHF_ALLOC | SHF_EXECINSTR
+    } else {
+        0
     }
 }
 
