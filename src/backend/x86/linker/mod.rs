@@ -243,6 +243,752 @@ pub fn link_builtin(
     )
 }
 
+/// Create a shared library (.so) from object files.
+///
+/// Produces an ELF `ET_DYN` file with position-independent base address (0),
+/// exporting all defined global symbols. Used when the compiler is invoked
+/// with `-shared`.
+pub fn link_shared(
+    object_files: &[&str],
+    output_path: &str,
+    user_args: &[String],
+    lib_paths: &[&str],
+) -> Result<(), String> {
+    let mut objects: Vec<ElfObject> = Vec::new();
+    let mut globals: HashMap<String, GlobalSymbol> = HashMap::new();
+    let mut needed_sonames: Vec<String> = Vec::new();
+    let lib_path_strings: Vec<String> = lib_paths.iter().map(|s| s.to_string()).collect();
+
+    // Parse user args for -L, -l, -Wl,-soname=, bare .o/.a files
+    let mut extra_lib_paths: Vec<String> = Vec::new();
+    let mut libs_to_load: Vec<String> = Vec::new();
+    let mut extra_object_files: Vec<String> = Vec::new();
+    let mut soname: Option<String> = None;
+    let mut i = 0;
+    let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
+    while i < args.len() {
+        let arg = args[i];
+        if let Some(path) = arg.strip_prefix("-L") {
+            let p = if path.is_empty() && i + 1 < args.len() { i += 1; args[i] } else { path };
+            extra_lib_paths.push(p.to_string());
+        } else if let Some(lib) = arg.strip_prefix("-l") {
+            let l = if lib.is_empty() && i + 1 < args.len() { i += 1; args[i] } else { lib };
+            libs_to_load.push(l.to_string());
+        } else if let Some(wl_arg) = arg.strip_prefix("-Wl,") {
+            for part in wl_arg.split(',') {
+                if let Some(sn) = part.strip_prefix("-soname=") {
+                    soname = Some(sn.to_string());
+                } else if part == "-soname" {
+                    // -Wl,-soname,libfoo.so.1 form: next part is the soname
+                    // handled below
+                } else if let Some(lpath) = part.strip_prefix("-L") {
+                    extra_lib_paths.push(lpath.to_string());
+                } else if let Some(lib) = part.strip_prefix("-l") {
+                    libs_to_load.push(lib.to_string());
+                }
+            }
+            // Handle -Wl,-soname,libfoo.so.1 (comma-separated form)
+            let parts: Vec<&str> = wl_arg.split(',').collect();
+            for j in 0..parts.len() {
+                if parts[j] == "-soname" && j + 1 < parts.len() {
+                    soname = Some(parts[j + 1].to_string());
+                }
+            }
+        } else if arg == "-shared" || arg == "-nostdlib" || arg == "-o" {
+            if arg == "-o" { i += 1; } // skip output path
+        } else if !arg.starts_with('-') && Path::new(arg).exists() {
+            extra_object_files.push(arg.to_string());
+        }
+        i += 1;
+    }
+
+    // Load user object files
+    for path in object_files {
+        load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings)?;
+    }
+
+    // Load extra object/archive files from user args
+    for path in &extra_object_files {
+        load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings)?;
+    }
+
+    let mut all_lib_paths: Vec<String> = extra_lib_paths;
+    all_lib_paths.extend(lib_path_strings.iter().cloned());
+
+    // Resolve -l libraries
+    let resolve_lib = |name: &str, paths: &[String]| -> Option<String> {
+        if let Some(exact) = name.strip_prefix(':') {
+            for dir in paths {
+                let p = format!("{}/{}", dir, exact);
+                if Path::new(&p).exists() { return Some(p); }
+            }
+            return None;
+        }
+        for dir in paths {
+            let so = format!("{}/lib{}.so", dir, name);
+            if Path::new(&so).exists() { return Some(so); }
+            let a = format!("{}/lib{}.a", dir, name);
+            if Path::new(&a).exists() { return Some(a); }
+        }
+        None
+    };
+
+    if !libs_to_load.is_empty() {
+        let mut lib_paths_resolved: Vec<String> = Vec::new();
+        for lib_name in &libs_to_load {
+            if let Some(lib_path) = resolve_lib(lib_name, &all_lib_paths) {
+                if !lib_paths_resolved.contains(&lib_path) {
+                    lib_paths_resolved.push(lib_path);
+                }
+            }
+        }
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let prev_count = objects.len();
+            for lib_path in &lib_paths_resolved {
+                load_file(lib_path, &mut objects, &mut globals, &mut needed_sonames, &all_lib_paths)?;
+            }
+            if objects.len() != prev_count { changed = true; }
+        }
+    }
+
+    // For shared libraries, undefined symbols are allowed (they'll be resolved
+    // at load time). Don't check for truly undefined symbols.
+    // TODO: Add PLT/GOT dynamic relocations for imported symbols from other .so
+    // files. Currently, external dynamic symbol references in shared libraries are
+    // resolved at static link time which works for simple libraries but won't
+    // support cross-library function calls at runtime.
+
+    // Merge sections
+    let mut output_sections: Vec<OutputSection> = Vec::new();
+    let mut section_map: HashMap<(usize, usize), (usize, u64)> = HashMap::new();
+    merge_sections(&objects, &mut output_sections, &mut section_map);
+
+    // Allocate COMMON symbols
+    allocate_common_symbols(&mut globals, &mut output_sections);
+
+    // Emit shared library
+    emit_shared_library(
+        &objects, &mut globals, &mut output_sections, &section_map,
+        &needed_sonames, output_path, soname,
+    )
+}
+
+/// Emit a shared library (.so) ELF file.
+///
+/// Key differences from emit_executable:
+/// - ELF type is ET_DYN (not ET_EXEC)
+/// - Base address is 0 (position-independent)
+/// - No PT_INTERP segment
+/// - All defined global symbols exported to .dynsym
+/// - R_X86_64_RELATIVE relocations for internal absolute addresses
+#[allow(clippy::too_many_arguments)]
+fn emit_shared_library(
+    objects: &[ElfObject], globals: &mut HashMap<String, GlobalSymbol>,
+    output_sections: &mut [OutputSection],
+    section_map: &HashMap<(usize, usize), (usize, u64)>,
+    needed_sonames: &[String], output_path: &str,
+    soname: Option<String>,
+) -> Result<(), String> {
+    let base_addr: u64 = 0;
+
+    let mut dynstr = DynStrTab::new();
+    for lib in needed_sonames { dynstr.add(lib); }
+    if let Some(ref sn) = soname { dynstr.add(sn); }
+
+    // Collect all defined global symbols for export
+    let mut dyn_sym_names: Vec<String> = Vec::new();
+    let mut exported: Vec<String> = globals.iter()
+        .filter(|(_, g)| {
+            g.defined_in.is_some() && !g.is_dynamic
+                && (g.info >> 4) != 0 // not STB_LOCAL
+                && g.section_idx != SHN_UNDEF
+        })
+        .map(|(n, _)| n.clone())
+        .collect();
+    exported.sort();
+    for name in exported {
+        if !dyn_sym_names.contains(&name) {
+            dyn_sym_names.push(name);
+        }
+    }
+
+    // Also add undefined dynamic symbols (from -l libs)
+    for (name, gsym) in globals.iter() {
+        if gsym.is_dynamic && !dyn_sym_names.contains(name) {
+            dyn_sym_names.push(name.clone());
+        }
+    }
+
+    for name in &dyn_sym_names { dynstr.add(name); }
+
+    let dynsym_count = 1 + dyn_sym_names.len();
+    let dynsym_size = dynsym_count as u64 * 24;
+    let dynstr_size = dynstr.as_bytes().len() as u64;
+
+    // Build .gnu.hash for all exported symbols
+    let gnu_hash_symoffset: usize = 1; // all symbols are hashed (1-indexed, null is 0)
+    let num_hashed = dyn_sym_names.len();
+    let gnu_hash_nbuckets = if num_hashed == 0 { 1 } else { num_hashed.next_power_of_two().max(1) } as u32;
+    let gnu_hash_bloom_size: u32 = 1;
+    let gnu_hash_bloom_shift: u32 = 6;
+
+    let hashed_sym_hashes: Vec<u32> = dyn_sym_names.iter()
+        .map(|name| linker_common::gnu_hash(name.as_bytes()))
+        .collect();
+
+    let mut bloom_word: u64 = 0;
+    for &h in &hashed_sym_hashes {
+        bloom_word |= 1u64 << (h as u64 % 64);
+        bloom_word |= 1u64 << ((h >> gnu_hash_bloom_shift) as u64 % 64);
+    }
+
+    // Sort hashed symbols by bucket
+    if num_hashed > 0 {
+        let mut hashed_with_hash: Vec<(String, u32)> = dyn_sym_names.iter()
+            .zip(hashed_sym_hashes.iter())
+            .map(|(n, &h)| (n.clone(), h))
+            .collect();
+        hashed_with_hash.sort_by_key(|(_, h)| h % gnu_hash_nbuckets);
+        for (i, (name, _)) in hashed_with_hash.iter().enumerate() {
+            dyn_sym_names[i] = name.clone();
+        }
+    }
+
+    let hashed_sym_hashes: Vec<u32> = dyn_sym_names.iter()
+        .map(|name| linker_common::gnu_hash(name.as_bytes()))
+        .collect();
+
+    let mut gnu_hash_buckets = vec![0u32; gnu_hash_nbuckets as usize];
+    let mut gnu_hash_chains = vec![0u32; num_hashed];
+    for (i, &h) in hashed_sym_hashes.iter().enumerate() {
+        let bucket = (h % gnu_hash_nbuckets) as usize;
+        if gnu_hash_buckets[bucket] == 0 {
+            gnu_hash_buckets[bucket] = (gnu_hash_symoffset + i) as u32;
+        }
+        gnu_hash_chains[i] = h & !1;
+    }
+    for bucket_idx in 0..gnu_hash_nbuckets as usize {
+        if gnu_hash_buckets[bucket_idx] == 0 { continue; }
+        let mut last_in_bucket = 0;
+        for (i, &h) in hashed_sym_hashes.iter().enumerate() {
+            if (h % gnu_hash_nbuckets) as usize == bucket_idx {
+                last_in_bucket = i;
+            }
+        }
+        gnu_hash_chains[last_in_bucket] |= 1;
+    }
+
+    let gnu_hash_size: u64 = 16 + (gnu_hash_bloom_size as u64 * 8)
+        + (gnu_hash_nbuckets as u64 * 4) + (num_hashed as u64 * 4);
+
+    // Count R_X86_64_RELATIVE relocations needed (for internal absolute addresses)
+    // We'll collect them during relocation processing
+    let has_init_array = output_sections.iter().any(|s| s.name == ".init_array" && s.mem_size > 0);
+    let has_fini_array = output_sections.iter().any(|s| s.name == ".fini_array" && s.mem_size > 0);
+    let mut dyn_count = needed_sonames.len() as u64 + 10; // 9 fixed entries + DT_NULL
+    if soname.is_some() { dyn_count += 1; }
+    if has_init_array { dyn_count += 2; }
+    if has_fini_array { dyn_count += 2; }
+    let dynamic_size = dyn_count * 16;
+
+    let has_tls_sections = output_sections.iter().any(|s| s.flags & SHF_TLS != 0 && s.flags & SHF_ALLOC != 0);
+    // phdrs: PHDR, LOAD(ro), LOAD(text), LOAD(rodata), LOAD(rw), DYNAMIC, GNU_STACK, [TLS]
+    let phdr_count: u64 = if has_tls_sections { 8 } else { 7 };
+    let phdr_total_size = phdr_count * 56;
+
+    // === Layout ===
+    let mut offset = 64 + phdr_total_size;
+
+    offset = (offset + 7) & !7;
+    let gnu_hash_offset = offset; let gnu_hash_addr = base_addr + offset; offset += gnu_hash_size;
+    offset = (offset + 7) & !7;
+    let dynsym_offset = offset; let dynsym_addr = base_addr + offset; offset += dynsym_size;
+    let dynstr_offset = offset; let dynstr_addr = base_addr + offset; offset += dynstr_size;
+
+    // Text segment
+    offset = (offset + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let text_page_offset = offset;
+    let text_page_addr = base_addr + offset;
+    for sec in output_sections.iter_mut() {
+        if sec.flags & SHF_EXECINSTR != 0 && sec.flags & SHF_ALLOC != 0 {
+            let a = sec.alignment.max(1);
+            offset = (offset + a - 1) & !(a - 1);
+            sec.addr = base_addr + offset;
+            sec.file_offset = offset;
+            offset += sec.mem_size;
+        }
+    }
+    let text_total_size = offset - text_page_offset;
+
+    // Rodata segment
+    offset = (offset + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let rodata_page_offset = offset;
+    let rodata_page_addr = base_addr + offset;
+    for sec in output_sections.iter_mut() {
+        if sec.flags & SHF_ALLOC != 0 && sec.flags & SHF_EXECINSTR == 0 &&
+           sec.flags & SHF_WRITE == 0 && sec.sh_type != SHT_NOBITS {
+            let a = sec.alignment.max(1);
+            offset = (offset + a - 1) & !(a - 1);
+            sec.addr = base_addr + offset;
+            sec.file_offset = offset;
+            offset += sec.mem_size;
+        }
+    }
+    let rodata_total_size = offset - rodata_page_offset;
+
+    // RW segment
+    offset = (offset + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let rw_page_offset = offset;
+    let rw_page_addr = base_addr + offset;
+
+    let mut init_array_addr = 0u64; let mut init_array_size = 0u64;
+    let mut fini_array_addr = 0u64; let mut fini_array_size = 0u64;
+
+    for sec in output_sections.iter_mut() {
+        if sec.name == ".init_array" {
+            let a = sec.alignment.max(8);
+            offset = (offset + a - 1) & !(a - 1);
+            sec.addr = base_addr + offset; sec.file_offset = offset;
+            init_array_addr = sec.addr; init_array_size = sec.mem_size;
+            offset += sec.mem_size; break;
+        }
+    }
+    for sec in output_sections.iter_mut() {
+        if sec.name == ".fini_array" {
+            let a = sec.alignment.max(8);
+            offset = (offset + a - 1) & !(a - 1);
+            sec.addr = base_addr + offset; sec.file_offset = offset;
+            fini_array_addr = sec.addr; fini_array_size = sec.mem_size;
+            offset += sec.mem_size; break;
+        }
+    }
+
+    // Reserve space for .rela.dyn (will be filled later)
+    offset = (offset + 7) & !7;
+    let rela_dyn_offset = offset;
+    let rela_dyn_addr = base_addr + offset;
+    // We'll calculate the actual size after processing relocations,
+    // but we need to allocate a conservative max first.
+    // Each R_X86_64_64 reloc in input becomes one R_X86_64_RELATIVE entry.
+    let mut max_rela_count: usize = 0;
+    for obj in objects.iter() {
+        for sec_relas in &obj.relocations {
+            for rela in sec_relas {
+                if rela.rela_type == R_X86_64_64 {
+                    max_rela_count += 1;
+                }
+            }
+        }
+    }
+    // Also init_array/fini_array entries are pointers
+    for sec in output_sections.iter() {
+        if sec.name == ".init_array" || sec.name == ".fini_array" {
+            max_rela_count += (sec.mem_size / 8) as usize;
+        }
+    }
+    let rela_dyn_max_size = max_rela_count as u64 * 24;
+    offset += rela_dyn_max_size;
+
+    offset = (offset + 7) & !7;
+    let dynamic_offset = offset; let dynamic_addr = base_addr + offset; offset += dynamic_size;
+
+    // GOT for locally-resolved symbols
+    let got_offset = offset; let got_addr = base_addr + offset;
+    // Count GOT entries needed for GOTPCREL relocations
+    let mut got_needed: Vec<String> = Vec::new();
+    for obj in objects.iter() {
+        for sec_relas in &obj.relocations {
+            for rela in sec_relas {
+                let si = rela.sym_idx as usize;
+                if si >= obj.symbols.len() { continue; }
+                let sym = &obj.symbols[si];
+                if sym.name.is_empty() { continue; }
+                match rela.rela_type {
+                    R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX | R_X86_64_REX_GOTPCRELX | R_X86_64_GOTTPOFF => {
+                        if !got_needed.contains(&sym.name) {
+                            got_needed.push(sym.name.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let got_size = got_needed.len() as u64 * 8;
+    offset += got_size;
+
+    for sec in output_sections.iter_mut() {
+        if sec.flags & SHF_ALLOC != 0 && sec.flags & SHF_WRITE != 0 &&
+           sec.sh_type != SHT_NOBITS && sec.name != ".init_array" && sec.name != ".fini_array" &&
+           sec.flags & SHF_TLS == 0 {
+            let a = sec.alignment.max(1);
+            offset = (offset + a - 1) & !(a - 1);
+            sec.addr = base_addr + offset; sec.file_offset = offset;
+            offset += sec.mem_size;
+        }
+    }
+
+    // TLS sections
+    let mut tls_addr = 0u64;
+    let mut tls_file_offset = 0u64;
+    let mut tls_file_size = 0u64;
+    let mut tls_mem_size = 0u64;
+    let mut tls_align = 1u64;
+    for sec in output_sections.iter_mut() {
+        if sec.flags & SHF_TLS != 0 && sec.flags & SHF_ALLOC != 0 && sec.sh_type != SHT_NOBITS {
+            let a = sec.alignment.max(1);
+            offset = (offset + a - 1) & !(a - 1);
+            sec.addr = base_addr + offset; sec.file_offset = offset;
+            if tls_addr == 0 { tls_addr = sec.addr; tls_file_offset = offset; tls_align = a; }
+            tls_file_size += sec.mem_size;
+            tls_mem_size += sec.mem_size;
+            offset += sec.mem_size;
+        }
+    }
+    if tls_addr == 0 && has_tls_sections {
+        tls_addr = base_addr + offset;
+        tls_file_offset = offset;
+    }
+    for sec in output_sections.iter_mut() {
+        if sec.flags & SHF_TLS != 0 && sec.sh_type == SHT_NOBITS {
+            let a = sec.alignment.max(1);
+            let aligned = (tls_mem_size + a - 1) & !(a - 1);
+            sec.addr = tls_addr + aligned; sec.file_offset = offset;
+            tls_mem_size = aligned + sec.mem_size;
+            if a > tls_align { tls_align = a; }
+        }
+    }
+    tls_mem_size = (tls_mem_size + tls_align - 1) & !(tls_align - 1);
+    let has_tls = tls_addr != 0;
+
+    let bss_addr = base_addr + offset;
+    let mut bss_size = 0u64;
+    for sec in output_sections.iter_mut() {
+        if sec.sh_type == SHT_NOBITS && sec.flags & SHF_ALLOC != 0 && sec.flags & SHF_TLS == 0 {
+            let a = sec.alignment.max(1);
+            let aligned = (bss_addr + bss_size + a - 1) & !(a - 1);
+            bss_size = aligned - bss_addr + sec.mem_size;
+            sec.addr = aligned; sec.file_offset = offset;
+        }
+    }
+
+    // Merge section data
+    for sec in output_sections.iter_mut() {
+        if sec.sh_type == SHT_NOBITS { continue; }
+        let mut data = vec![0u8; sec.mem_size as usize];
+        for input in &sec.inputs {
+            let sd = &objects[input.object_idx].section_data[input.section_idx];
+            let s = input.output_offset as usize;
+            let e = s + sd.len();
+            if e <= data.len() && !sd.is_empty() { data[s..e].copy_from_slice(sd); }
+        }
+        sec.data = data;
+    }
+
+    // Update global symbol addresses
+    for (_, gsym) in globals.iter_mut() {
+        if let Some(obj_idx) = gsym.defined_in {
+            if gsym.section_idx == SHN_COMMON || gsym.section_idx == 0xffff {
+                if let Some(bss_sec) = output_sections.iter().find(|s| s.name == ".bss") {
+                    gsym.value += bss_sec.addr;
+                }
+            } else if gsym.section_idx != SHN_UNDEF && gsym.section_idx != SHN_ABS {
+                let si = gsym.section_idx as usize;
+                if let Some(&(oi, so)) = section_map.get(&(obj_idx, si)) {
+                    gsym.value += output_sections[oi].addr + so;
+                }
+            }
+        }
+    }
+
+    // Define linker-provided symbols
+    let linker_addrs = LinkerSymbolAddresses {
+        base_addr,
+        got_addr: got_addr,
+        dynamic_addr,
+        bss_addr,
+        bss_size,
+        text_end: text_page_addr + text_total_size,
+        data_start: rw_page_addr,
+        init_array_start: init_array_addr,
+        init_array_size,
+        fini_array_start: fini_array_addr,
+        fini_array_size,
+        preinit_array_start: 0,
+        preinit_array_size: 0,
+        rela_iplt_start: 0,
+        rela_iplt_size: 0,
+    };
+    for sym in &get_standard_linker_symbols(&linker_addrs) {
+        let entry = globals.entry(sym.name.to_string()).or_insert(GlobalSymbol {
+            value: 0, size: 0, info: (sym.binding << 4),
+            defined_in: None, from_lib: None, plt_idx: None, got_idx: None,
+            section_idx: SHN_ABS, is_dynamic: false, copy_reloc: false, lib_sym_value: 0,
+        });
+        if entry.defined_in.is_none() && !entry.is_dynamic {
+            entry.value = sym.value;
+            entry.defined_in = Some(usize::MAX);
+            entry.section_idx = SHN_ABS;
+        }
+    }
+
+    // === Build output buffer ===
+    let file_size = offset as usize;
+    let mut out = vec![0u8; file_size];
+
+    // ELF header
+    out[0..4].copy_from_slice(&ELF_MAGIC);
+    out[4] = ELFCLASS64; out[5] = ELFDATA2LSB; out[6] = 1;
+    w16(&mut out, 16, ET_DYN); // Shared object
+    w16(&mut out, 18, EM_X86_64); w32(&mut out, 20, 1);
+    w64(&mut out, 24, 0); // e_entry = 0 for shared libraries
+    w64(&mut out, 32, 64); // e_phoff
+    w64(&mut out, 40, 0); // e_shoff = 0 (no section headers for now)
+    w32(&mut out, 48, 0); w16(&mut out, 52, 64); w16(&mut out, 54, 56);
+    w16(&mut out, 56, phdr_count as u16); w16(&mut out, 58, 64); w16(&mut out, 60, 0); w16(&mut out, 62, 0);
+
+    // Program headers
+    let mut ph = 64usize;
+    wphdr(&mut out, ph, PT_PHDR, PF_R, 64, base_addr + 64, phdr_total_size, phdr_total_size, 8); ph += 56;
+    let ro_seg_end = dynstr_offset + dynstr_size;
+    wphdr(&mut out, ph, PT_LOAD, PF_R, 0, base_addr, ro_seg_end, ro_seg_end, PAGE_SIZE); ph += 56;
+    if text_total_size > 0 {
+        wphdr(&mut out, ph, PT_LOAD, PF_R|PF_X, text_page_offset, text_page_addr, text_total_size, text_total_size, PAGE_SIZE); ph += 56;
+    } else {
+        wphdr(&mut out, ph, PT_LOAD, PF_R|PF_X, text_page_offset, text_page_addr, 0, 0, PAGE_SIZE); ph += 56;
+    }
+    wphdr(&mut out, ph, PT_LOAD, PF_R, rodata_page_offset, rodata_page_addr, rodata_total_size, rodata_total_size, PAGE_SIZE); ph += 56;
+    let rw_filesz = offset - rw_page_offset;
+    let rw_memsz = if bss_size > 0 { (bss_addr + bss_size) - rw_page_addr } else { rw_filesz };
+    wphdr(&mut out, ph, PT_LOAD, PF_R|PF_W, rw_page_offset, rw_page_addr, rw_filesz, rw_memsz, PAGE_SIZE); ph += 56;
+    wphdr(&mut out, ph, PT_DYNAMIC, PF_R|PF_W, dynamic_offset, dynamic_addr, dynamic_size, dynamic_size, 8); ph += 56;
+    wphdr(&mut out, ph, PT_GNU_STACK, PF_R|PF_W, 0, 0, 0, 0, 0x10); ph += 56;
+    if has_tls {
+        wphdr(&mut out, ph, PT_TLS, PF_R, tls_file_offset, tls_addr, tls_file_size, tls_mem_size, tls_align);
+    }
+
+    // .gnu.hash
+    let gh = gnu_hash_offset as usize;
+    w32(&mut out, gh, gnu_hash_nbuckets);
+    w32(&mut out, gh+4, gnu_hash_symoffset as u32);
+    w32(&mut out, gh+8, gnu_hash_bloom_size);
+    w32(&mut out, gh+12, gnu_hash_bloom_shift);
+    let bloom_off = gh + 16;
+    w64(&mut out, bloom_off, bloom_word);
+    let buckets_off = bloom_off + (gnu_hash_bloom_size as usize * 8);
+    for (i, &b) in gnu_hash_buckets.iter().enumerate() {
+        w32(&mut out, buckets_off + i * 4, b);
+    }
+    let chains_off = buckets_off + (gnu_hash_nbuckets as usize * 4);
+    for (i, &c) in gnu_hash_chains.iter().enumerate() {
+        w32(&mut out, chains_off + i * 4, c);
+    }
+
+    // .dynsym
+    let mut ds = dynsym_offset as usize + 24; // skip null entry
+    for name in &dyn_sym_names {
+        let no = dynstr.get_offset(name) as u32;
+        w32(&mut out, ds, no);
+        if let Some(gsym) = globals.get(name) {
+            if gsym.defined_in.is_some() && !gsym.is_dynamic && gsym.section_idx != SHN_UNDEF {
+                // Exported defined symbol: preserve original st_info (type + binding)
+                if ds+5 < out.len() { out[ds+4] = gsym.info; out[ds+5] = 0; }
+                // shndx=1: marks symbol as defined (non-UNDEF). The dynamic linker
+                // only checks UNDEF vs defined, not the actual section index.
+                w16(&mut out, ds+6, 1);
+                w64(&mut out, ds+8, gsym.value);
+                w64(&mut out, ds+16, gsym.size);
+            } else {
+                // Undefined symbol (from -l dependencies)
+                if ds+5 < out.len() { out[ds+4] = (STB_GLOBAL << 4) | STT_FUNC; out[ds+5] = 0; }
+                w16(&mut out, ds+6, 0); w64(&mut out, ds+8, 0); w64(&mut out, ds+16, 0);
+            }
+        } else {
+            if ds+5 < out.len() { out[ds+4] = (STB_GLOBAL << 4) | STT_FUNC; out[ds+5] = 0; }
+            w16(&mut out, ds+6, 0); w64(&mut out, ds+8, 0); w64(&mut out, ds+16, 0);
+        }
+        ds += 24;
+    }
+
+    // .dynstr
+    write_bytes(&mut out, dynstr_offset as usize, dynstr.as_bytes());
+
+    // Section data
+    for sec in output_sections.iter() {
+        if sec.sh_type == SHT_NOBITS || sec.data.is_empty() { continue; }
+        write_bytes(&mut out, sec.file_offset as usize, &sec.data);
+    }
+
+    // Build GOT entries map
+    let mut got_sym_addrs: HashMap<String, u64> = HashMap::new();
+    for (i, name) in got_needed.iter().enumerate() {
+        let gea = got_addr + i as u64 * 8;
+        got_sym_addrs.insert(name.clone(), gea);
+        // Fill GOT with resolved symbol value
+        if let Some(gsym) = globals.get(name) {
+            if gsym.defined_in.is_some() && !gsym.is_dynamic {
+                w64(&mut out, (got_offset + i as u64 * 8) as usize, gsym.value);
+            }
+        }
+    }
+
+    // Apply relocations and collect R_X86_64_RELATIVE entries
+    let globals_snap: HashMap<String, GlobalSymbol> = globals.clone();
+    let mut rela_dyn_entries: Vec<(u64, u64)> = Vec::new(); // (offset, value) for RELATIVE relocs
+
+    // Add RELATIVE entries for GOT entries that point to local symbols
+    for (i, name) in got_needed.iter().enumerate() {
+        if let Some(gsym) = globals_snap.get(name) {
+            if gsym.defined_in.is_some() && !gsym.is_dynamic {
+                let gea = got_addr + i as u64 * 8;
+                rela_dyn_entries.push((gea, gsym.value));
+            }
+        }
+    }
+
+    for obj_idx in 0..objects.len() {
+        for sec_idx in 0..objects[obj_idx].sections.len() {
+            let relas = &objects[obj_idx].relocations[sec_idx];
+            if relas.is_empty() { continue; }
+            let (out_idx, sec_off) = match section_map.get(&(obj_idx, sec_idx)) {
+                Some(&v) => v, None => continue,
+            };
+            let sa = output_sections[out_idx].addr;
+            let sfo = output_sections[out_idx].file_offset;
+
+            for rela in relas {
+                let si = rela.sym_idx as usize;
+                if si >= objects[obj_idx].symbols.len() { continue; }
+                let sym = &objects[obj_idx].symbols[si];
+                let p = sa + sec_off + rela.offset;
+                let fp = (sfo + sec_off + rela.offset) as usize;
+                let a = rela.addend;
+                let s = resolve_sym(obj_idx, sym, &globals_snap, section_map, output_sections, 0);
+
+                match rela.rela_type {
+                    R_X86_64_64 => {
+                        let val = (s as i64 + a) as u64;
+                        w64(&mut out, fp, val);
+                        // Need R_X86_64_RELATIVE for this at load time
+                        if s != 0 {
+                            rela_dyn_entries.push((p, val));
+                        }
+                    }
+                    R_X86_64_PC32 | R_X86_64_PLT32 => {
+                        w32(&mut out, fp, (s as i64 + a - p as i64) as u32);
+                    }
+                    // TODO: R_X86_64_32/32S are not position-independent and should
+                    // ideally emit a diagnostic when used in shared libraries. For now
+                    // we apply them statically which works for simple cases but may fail
+                    // if the library is loaded at a high address.
+                    R_X86_64_32 => { w32(&mut out, fp, (s as i64 + a) as u32); }
+                    R_X86_64_32S => { w32(&mut out, fp, (s as i64 + a) as u32); }
+                    R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX | R_X86_64_REX_GOTPCRELX => {
+                        if let Some(&gea) = got_sym_addrs.get(&sym.name) {
+                            w32(&mut out, fp, (gea as i64 + a - p as i64) as u32);
+                        } else if (rela.rela_type == R_X86_64_GOTPCRELX || rela.rela_type == R_X86_64_REX_GOTPCRELX)
+                                  && !sym.name.is_empty() {
+                            // GOT relaxation: convert to LEA
+                            if let Some(g) = globals_snap.get(&sym.name) {
+                                if g.defined_in.is_some() {
+                                    if fp >= 2 && fp < out.len() && out[fp-2] == 0x8b {
+                                        out[fp-2] = 0x8d;
+                                    }
+                                    w32(&mut out, fp, (s as i64 + a - p as i64) as u32);
+                                    continue;
+                                }
+                            }
+                            w32(&mut out, fp, (s as i64 + a - p as i64) as u32);
+                        } else {
+                            w32(&mut out, fp, (s as i64 + a - p as i64) as u32);
+                        }
+                    }
+                    R_X86_64_PC64 => { w64(&mut out, fp, (s as i64 + a - p as i64) as u64); }
+                    R_X86_64_GOTTPOFF => {
+                        // TLS: try to find GOT entry
+                        if let Some(&gea) = got_sym_addrs.get(&sym.name) {
+                            let tpoff = (s as i64 - tls_addr as i64) - tls_mem_size as i64;
+                            w64(&mut out, (got_offset + (gea - got_addr)) as usize, tpoff as u64);
+                            w32(&mut out, fp, (gea as i64 + a - p as i64) as u32);
+                        } else {
+                            let tpoff = (s as i64 - tls_addr as i64) - tls_mem_size as i64;
+                            if fp >= 2 && fp + 4 <= out.len() && out[fp-2] == 0x8b {
+                                let modrm = out[fp-1];
+                                let reg = (modrm >> 3) & 7;
+                                out[fp-2] = 0xc7;
+                                out[fp-1] = 0xc0 | reg;
+                                w32(&mut out, fp, (tpoff + a) as u32);
+                            }
+                        }
+                    }
+                    R_X86_64_TPOFF32 => {
+                        let tpoff = (s as i64 - tls_addr as i64) - tls_mem_size as i64;
+                        w32(&mut out, fp, (tpoff + a) as u32);
+                    }
+                    R_X86_64_NONE => {}
+                    other => {
+                        eprintln!("warning: unsupported relocation type {} for '{}' in shared library", other, sym.name);
+                    }
+                }
+            }
+        }
+    }
+
+    // Write .rela.dyn entries (R_X86_64_RELATIVE)
+    let actual_rela_count = rela_dyn_entries.len();
+    let rela_dyn_size = actual_rela_count as u64 * 24;
+    let mut rd = rela_dyn_offset as usize;
+    // R_X86_64_RELATIVE type = 8, no symbol index
+    for (rel_offset, rel_value) in &rela_dyn_entries {
+        if rd + 24 <= out.len() {
+            w64(&mut out, rd, *rel_offset);     // r_offset
+            w64(&mut out, rd+8, 8);             // r_info = R_X86_64_RELATIVE (type 8, sym 0)
+            w64(&mut out, rd+16, *rel_value);   // r_addend = runtime value
+            rd += 24;
+        }
+    }
+
+    // .dynamic
+    let mut dd = dynamic_offset as usize;
+    for lib in needed_sonames {
+        let so = dynstr.get_offset(lib);
+        w64(&mut out, dd, DT_NEEDED as u64); w64(&mut out, dd+8, so as u64); dd += 16;
+    }
+    if let Some(ref sn) = soname {
+        let so = dynstr.get_offset(sn);
+        w64(&mut out, dd, DT_SONAME as u64); w64(&mut out, dd+8, so as u64); dd += 16;
+    }
+    for &(tag, val) in &[
+        (DT_STRTAB, dynstr_addr), (DT_SYMTAB, dynsym_addr), (DT_STRSZ, dynstr_size),
+        (DT_SYMENT, 24),
+        (DT_RELA, rela_dyn_addr), (DT_RELASZ, rela_dyn_size), (DT_RELAENT, 24),
+        (DT_RELACOUNT as i64, actual_rela_count as u64),
+        (DT_GNU_HASH, gnu_hash_addr),
+        // DT_TEXTREL not needed since we use PIC
+    ] {
+        w64(&mut out, dd, tag as u64); w64(&mut out, dd+8, val); dd += 16;
+    }
+    if has_init_array {
+        w64(&mut out, dd, DT_INIT_ARRAY as u64); w64(&mut out, dd+8, init_array_addr); dd += 16;
+        w64(&mut out, dd, DT_INIT_ARRAYSZ as u64); w64(&mut out, dd+8, init_array_size); dd += 16;
+    }
+    if has_fini_array {
+        w64(&mut out, dd, DT_FINI_ARRAY as u64); w64(&mut out, dd+8, fini_array_addr); dd += 16;
+        w64(&mut out, dd, DT_FINI_ARRAYSZ as u64); w64(&mut out, dd+8, fini_array_size); dd += 16;
+    }
+    w64(&mut out, dd, DT_NULL as u64); w64(&mut out, dd+8, 0);
+
+    std::fs::write(output_path, &out).map_err(|e| format!("failed to write '{}': {}", output_path, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(output_path, std::fs::Permissions::from_mode(0o755));
+    }
+    Ok(())
+}
+
 fn load_file(
     path: &str, objects: &mut Vec<ElfObject>, globals: &mut HashMap<String, GlobalSymbol>,
     needed_sonames: &mut Vec<String>, lib_paths: &[String],

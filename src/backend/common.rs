@@ -217,36 +217,42 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
     // Default (gcc_linker disabled): use the built-in native linker
     #[cfg(not(feature = "gcc_linker"))]
     {
-        if !is_shared && !is_relocatable {
+        if !is_relocatable {
             if config.expected_elf_machine == 62 {
                 return link_builtin_x86(
                     object_files, output_path, user_args,
-                    is_nostdlib, is_static,
+                    is_nostdlib, is_static, is_shared,
                 );
             }
-            if config.expected_elf_machine == 3 {
-                return link_builtin_i686(
-                    object_files, output_path, user_args,
-                    is_nostdlib, is_static,
-                );
-            }
-            if config.expected_elf_machine == 183 {
-                return link_builtin_aarch64(
-                    object_files, output_path, user_args,
-                    is_nostdlib, is_static,
-                );
-            }
-            if config.expected_elf_machine == 243 {
-                return link_builtin_riscv(
-                    object_files, output_path, user_args,
-                    is_nostdlib, is_static,
-                );
+            if !is_shared {
+                if config.expected_elf_machine == 3 {
+                    return link_builtin_i686(
+                        object_files, output_path, user_args,
+                        is_nostdlib, is_static,
+                    );
+                }
+                if config.expected_elf_machine == 183 {
+                    return link_builtin_aarch64(
+                        object_files, output_path, user_args,
+                        is_nostdlib, is_static,
+                    );
+                }
+                if config.expected_elf_machine == 243 {
+                    return link_builtin_riscv(
+                        object_files, output_path, user_args,
+                        is_nostdlib, is_static,
+                    );
+                }
             }
         }
 
         if is_shared {
-            return Err("Shared library linking (-shared) requires the gcc_linker feature. \
-                       Rebuild with: cargo build --features gcc_linker".to_string());
+            return Err(format!(
+                "Shared library linking (-shared) is only supported for x86-64. \
+                 Target '{}' requires the gcc_linker feature. \
+                 Rebuild with: cargo build --features gcc_linker",
+                config.arch_name
+            ));
         }
         if is_relocatable {
             return Err("Relocatable linking (-r) requires the gcc_linker feature. \
@@ -656,8 +662,22 @@ pub(crate) fn link_builtin_x86(
     user_args: &[String],
     is_nostdlib: bool,
     is_static: bool,
+    is_shared: bool,
 ) -> Result<(), String> {
     use crate::backend::x86::linker;
+
+    if is_shared {
+        // Shared libraries: no CRT objects, no default libs (like -nostdlib).
+        // Library paths are still useful for resolving -l flags.
+        let setup = resolve_builtin_link_setup(&DIRECT_LD_X86_64, user_args, true, false);
+        let lib_path_refs: Vec<&str> = setup.lib_paths.iter().map(|s| s.as_str()).collect();
+        return linker::link_shared(
+            object_files,
+            output_path,
+            user_args,
+            &lib_path_refs,
+        );
+    }
 
     let setup = resolve_builtin_link_setup(&DIRECT_LD_X86_64, user_args, is_nostdlib, is_static);
 

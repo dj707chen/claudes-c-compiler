@@ -734,7 +734,8 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
     match lower.as_str() {
         "ish" | "ishld" | "ishst" | "sy" | "ld" | "st" | "osh" | "oshld" | "oshst"
         | "nsh" | "nshld" | "nshst" => {
-            return Ok(Operand::Barrier(lower));
+            // Store original case: this name may be a C symbol colliding with an ARM keyword
+            return Ok(Operand::Barrier(s.to_string()));
         }
         _ => {}
     }
@@ -743,7 +744,8 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
     match lower.as_str() {
         "eq" | "ne" | "cs" | "hs" | "cc" | "lo" | "mi" | "pl" | "vs" | "vc"
         | "hi" | "ls" | "ge" | "lt" | "gt" | "le" | "al" | "nv" => {
-            return Ok(Operand::Cond(lower));
+            // Store original case: this name may be a C symbol colliding with an ARM keyword
+            return Ok(Operand::Cond(s.to_string()));
         }
         _ => {}
     }

@@ -2450,7 +2450,7 @@ fn encode_uaddlv(operands: &[Operand]) -> Result<EncodeResult, String> {
 
 fn encode_dmb(operands: &[Operand]) -> Result<EncodeResult, String> {
     let option = match operands.first() {
-        Some(Operand::Barrier(b)) => match b.as_str() {
+        Some(Operand::Barrier(b)) => match b.to_lowercase().as_str() {
             "sy" => 0b1111,
             "ish" => 0b1011,
             "ishld" => 0b1001,
@@ -2481,7 +2481,7 @@ fn encode_dmb(operands: &[Operand]) -> Result<EncodeResult, String> {
 
 fn encode_dsb(operands: &[Operand]) -> Result<EncodeResult, String> {
     let option = match operands.first() {
-        Some(Operand::Barrier(b)) => match b.as_str() {
+        Some(Operand::Barrier(b)) => match b.to_lowercase().as_str() {
             "sy" => 0b1111u32,
             "ish" => 0b1011,
             "ishld" => 0b1001,

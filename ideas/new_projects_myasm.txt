@@ -75,3 +75,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | lzf | PASS | TODO | TODO | TODO | Passes x86 |
 | whetstone | PASS | TODO | TODO | TODO | Passes x86 |
 | dhrystone | PASS | TODO | TODO | TODO | Passes x86 |
+| cc65    | TODO | TODO | PASS | TODO | Fixed ARM asm: preserve original case for condition code/barrier symbol names (CS was lowercased to cs) |
