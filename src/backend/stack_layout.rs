@@ -1375,7 +1375,8 @@ fn classify_instructions(
                 // modified value instead of the original parameter value.
                 if *param_idx < func.param_alloca_values.len() {
                     let alloca_val = func.param_alloca_values[*param_idx];
-                    if !modified_param_allocas.contains(&alloca_val.0) {
+                    if !modified_param_allocas.contains(&alloca_val.0)
+                       && !reg_assigned.contains_key(&dest.0) {
                         if let Some(&slot) = state.value_locations.get(&alloca_val.0) {
                             state.value_locations.insert(dest.0, slot);
                             // Propagate type tracking even when reusing the alloca

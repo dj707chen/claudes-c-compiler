@@ -303,6 +303,7 @@ impl I686Codegen {
                 }
                 self.emit_store_acc_pair(dest);
             }
+            self.state.reg_cache.invalidate_acc();
             return;
         }
         // Delegate to default for other types
