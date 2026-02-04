@@ -406,11 +406,12 @@ single-block values.
   these.
 - **Dead parameter alloca elimination**: Unused parameter allocas are
   detected and skipped entirely (no stack slot needed).
-- **Small slot optimization**: On 64-bit targets, values of type I32, U32,
-  F32, and smaller use 4-byte stack slots instead of the default 8-byte,
-  reducing frame sizes by approximately 40%. The `small_slot_values` set in
-  `CodegenState` tracks these, and all store/load paths check this set to
-  emit appropriately-sized instructions.
+- **Small slot tracking**: The `small_slot_values` set in `CodegenState`
+  tracks values eligible for 4-byte slots (I32, U32, F32, and smaller on
+  64-bit targets), but slot allocation currently always uses 8 bytes. Using
+  4-byte movl store/load is unsafe because it zero-extends on reload, losing
+  sign information when 32-bit values are widened to 64 bits (see
+  `ideas/reduce_stack_frame_size_for_postgres.txt`).
 - **Deferred slot finalization**: Block-local slots use `DeferredSlot`
   entries whose final frame offset is computed only after all tiers have
   determined their space requirements, so Tier 3 slots are placed after the
