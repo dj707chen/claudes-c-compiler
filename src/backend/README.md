@@ -107,7 +107,7 @@ src/backend/
   elf.rs              Shared ELF constants, StringTable, read/write helpers, archive parsing
   linker_common.rs    Shared linker infrastructure: ELF64 parser, types, DynStrTab, hash, lib resolution
   asm_expr.rs         Shared integer expression evaluator (all 4 assembler parsers)
-  asm_preprocess.rs   Shared GAS preprocessing: comments, macros, .rept, .if/.else/.endif
+  asm_preprocess.rs   Shared GAS preprocessing: comments, macros, .rept, .if/.elseif/.else/.endif
   traits.rs           ArchCodegen trait (~185 methods, ~50 default impls)
   generation.rs       Module/function/instruction dispatch (arch-independent)
   state.rs            CodegenState, StackSlot, SlotAddr, RegCache

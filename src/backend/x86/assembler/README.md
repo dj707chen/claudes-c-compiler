@@ -889,9 +889,11 @@ provided flags/type instead of these defaults.
 
 The assembler implements what the compiler's codegen actually produces, plus
 what hand-written assembly in musl and similar projects requires.  This
-dramatically simplifies the implementation -- no macro system, no conditional
-assembly, no `.if`/`.else`.  Unknown directives are silently ignored with
-`AsmItem::Empty`, which provides forward compatibility as the codegen evolves.
+dramatically simplifies the implementation.  GAS macro support (`.macro`/`.endm`,
+`.if`/`.elseif`/`.else`/`.endif`, `.ifc`, `.irp`, `.rept`, `.set`) is provided
+by the shared `asm_preprocess` module for hand-written `.S` files.  Unknown
+directives are silently ignored with `AsmItem::Empty`, which provides forward
+compatibility as the codegen evolves.
 
 ### 2. Suffix Inference for Hand-Written Assembly
 

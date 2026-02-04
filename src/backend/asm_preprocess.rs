@@ -8,7 +8,7 @@
 //! - Semicolon splitting (GAS statement separator)
 //! - `.rept`/`.irp`/`.endr` block expansion
 //! - `.macro`/`.endm` definition and expansion
-//! - `.if`/`.else`/`.endif` conditional assembly evaluation
+//! - `.if`/`.elseif`/`.else`/`.endif` conditional assembly evaluation
 
 use crate::backend::asm_expr;
 
@@ -481,30 +481,181 @@ fn expand_macros_with(
 
 // ── .if / .else / .endif conditional assembly ──────────────────────────
 
+/// Map x86-64 register names to unique integer values for use in `.if` expressions.
+///
+/// GAS assigns internal register encoding numbers to register names, allowing
+/// comparisons like `.if %rsp == %rbp` in conditional assembly. The exact values
+/// match GAS's internal encoding (AT&T register numbers starting at 104 for %rax).
+/// Only the 64-bit GPRs are mapped since those are the only ones used in kernel
+/// `.if` comparisons (UNWIND_HINT_REGS).
+pub fn resolve_x86_registers(expr: &str) -> String {
+    // Replace register names with numeric values, longest first to avoid partial matches.
+    // Values match GAS internal encoding for x86-64 registers.
+    const REGS: &[(&str, &str)] = &[
+        ("%r10", "114"), ("%r11", "115"), ("%r12", "116"), ("%r13", "117"),
+        ("%r14", "118"), ("%r15", "119"), ("%r8", "112"), ("%r9", "113"),
+        ("%rax", "104"), ("%rcx", "105"), ("%rdx", "106"), ("%rbx", "107"),
+        ("%rsp", "108"), ("%rbp", "109"), ("%rsi", "110"), ("%rdi", "111"),
+        // 32-bit registers (used in some kernel macros)
+        ("%eax", "40"), ("%ecx", "41"), ("%edx", "42"), ("%ebx", "43"),
+        ("%esp", "44"), ("%ebp", "45"), ("%esi", "46"), ("%edi", "47"),
+    ];
+    let mut result = expr.to_string();
+    for &(name, val) in REGS {
+        result = result.replace(name, val);
+    }
+    result
+}
+
 /// Evaluate a simple `.if` condition expression.
 ///
-/// Supports: integer literals, `==`, `!=`, and simple arithmetic via
-/// `asm_expr::parse_integer_expr`. Non-zero result is true.
+/// Supports: integer literals, `==`, `!=`, `>=`, `<=`, `>`, `<`, and simple
+/// arithmetic via `asm_expr::parse_integer_expr`. Non-zero result is true.
 pub fn eval_if_condition(cond: &str) -> bool {
-    let cond = cond.trim();
-    // Try "A == B"
-    if let Some(pos) = cond.find("==") {
-        let lhs = cond[..pos].trim();
-        let rhs = cond[pos + 2..].trim();
-        let l = asm_expr::parse_integer_expr(lhs).unwrap_or(i64::MIN);
-        let r = asm_expr::parse_integer_expr(rhs).unwrap_or(i64::MAX);
-        return l == r;
+    eval_if_condition_inner(cond, |s| s.to_string())
+}
+
+/// Evaluate a `.if` condition with a pre-processing step for resolving names.
+///
+/// The `resolve` function is called on each side of a comparison operator
+/// before integer expression parsing. Use this to resolve register names
+/// or symbol values.
+pub fn eval_if_condition_with_resolver<F: Fn(&str) -> String>(cond: &str, resolve: F) -> bool {
+    eval_if_condition_inner(cond, resolve)
+}
+
+/// Find position of an isolated `>` or `<` that is not part of `>>`, `<<`, `>=`, or `<=`,
+/// and not inside parentheses.
+fn find_isolated_cmp(cond: &str, ch: char) -> Option<usize> {
+    let bytes = cond.as_bytes();
+    let target = ch as u8;
+    let mut depth = 0i32;
+    for i in 0..bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && bytes[i] == target {
+            let next = bytes.get(i + 1).copied();
+            let prev = if i > 0 { Some(bytes[i - 1]) } else { None };
+            if next != Some(b'>') && next != Some(b'<') && next != Some(b'=')
+                && prev != Some(b'>') && prev != Some(b'<')
+            {
+                return Some(i);
+            }
+        }
     }
-    // Try "A != B"
-    if let Some(pos) = cond.find("!=") {
-        let lhs = cond[..pos].trim();
-        let rhs = cond[pos + 2..].trim();
-        let l = asm_expr::parse_integer_expr(lhs).unwrap_or(i64::MIN);
-        let r = asm_expr::parse_integer_expr(rhs).unwrap_or(i64::MAX);
+    None
+}
+
+fn eval_if_condition_inner<F: Fn(&str) -> String>(cond: &str, resolve: F) -> bool {
+    let cond = cond.trim();
+    // Strip outer parentheses: (.Lfound != 1) -> .Lfound != 1
+    let cond = strip_outer_parens(cond);
+
+    // Find comparison operators at the top level (not inside parentheses).
+    // Check "!=" before "==" and ">="/"<=" before ">"/"<".
+    if let Some(pos) = find_top_level_op(cond, "!=") {
+        let lhs = resolve(cond[..pos].trim());
+        let rhs = resolve(cond[pos + 2..].trim());
+        let l = asm_expr::parse_integer_expr(&lhs).unwrap_or(i64::MIN);
+        let r = asm_expr::parse_integer_expr(&rhs).unwrap_or(i64::MAX);
         return l != r;
     }
+    if let Some(pos) = find_top_level_op(cond, "==") {
+        let lhs = resolve(cond[..pos].trim());
+        let rhs = resolve(cond[pos + 2..].trim());
+        let l = asm_expr::parse_integer_expr(&lhs).unwrap_or(i64::MIN);
+        let r = asm_expr::parse_integer_expr(&rhs).unwrap_or(i64::MAX);
+        return l == r;
+    }
+    if let Some(pos) = find_top_level_op(cond, ">=") {
+        let lhs = resolve(cond[..pos].trim());
+        let rhs = resolve(cond[pos + 2..].trim());
+        let l = asm_expr::parse_integer_expr(&lhs).unwrap_or(i64::MIN);
+        let r = asm_expr::parse_integer_expr(&rhs).unwrap_or(i64::MAX);
+        return l >= r;
+    }
+    if let Some(pos) = find_top_level_op(cond, "<=") {
+        let lhs = resolve(cond[..pos].trim());
+        let rhs = resolve(cond[pos + 2..].trim());
+        let l = asm_expr::parse_integer_expr(&lhs).unwrap_or(i64::MIN);
+        let r = asm_expr::parse_integer_expr(&rhs).unwrap_or(i64::MAX);
+        return l <= r;
+    }
+    // Try isolated ">" not part of ">>" or ">="
+    if let Some(pos) = find_isolated_cmp(cond, '>') {
+        let lhs = resolve(cond[..pos].trim());
+        let rhs = resolve(cond[pos + 1..].trim());
+        let l = asm_expr::parse_integer_expr(&lhs).unwrap_or(i64::MIN);
+        let r = asm_expr::parse_integer_expr(&rhs).unwrap_or(i64::MAX);
+        return l > r;
+    }
+    // Try isolated "<" not part of "<<" or "<="
+    if let Some(pos) = find_isolated_cmp(cond, '<') {
+        let lhs = resolve(cond[..pos].trim());
+        let rhs = resolve(cond[pos + 1..].trim());
+        let l = asm_expr::parse_integer_expr(&lhs).unwrap_or(i64::MIN);
+        let r = asm_expr::parse_integer_expr(&rhs).unwrap_or(i64::MAX);
+        return l < r;
+    }
     // Simple integer expression: non-zero is true
-    asm_expr::parse_integer_expr(cond).unwrap_or(0) != 0
+    let resolved = resolve(cond);
+    asm_expr::parse_integer_expr(&resolved).unwrap_or(0) != 0
+}
+
+/// Strip balanced outer parentheses from an expression.
+/// `(expr)` -> `expr`, `((expr))` -> `expr`, `(a) + (b)` -> unchanged.
+fn strip_outer_parens(s: &str) -> &str {
+    let s = s.trim();
+    if !s.starts_with('(') || !s.ends_with(')') {
+        return s;
+    }
+    // Check if the outer parens are truly balanced as a pair
+    let inner = &s[1..s.len() - 1];
+    let mut depth = 0i32;
+    for ch in inner.bytes() {
+        match ch {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth < 0 {
+                    // Unbalanced: the closing paren in the middle means
+                    // the outer parens are not a matching pair
+                    return s;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        inner.trim()
+    } else {
+        s
+    }
+}
+
+/// Find a comparison operator at the top level (not inside parentheses).
+fn find_top_level_op(s: &str, op: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let op_bytes = op.as_bytes();
+    let op_len = op_bytes.len();
+    if bytes.len() < op_len {
+        return None;
+    }
+    let mut depth = 0i32;
+    for i in 0..=bytes.len() - op_len {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && &bytes[i..i + op_len] == op_bytes {
+            return Some(i);
+        }
+    }
+    None
 }
 
 // ── Shared data-value helpers ──────────────────────────────────────────
@@ -614,6 +765,35 @@ mod tests {
         assert!(eval_if_condition("1 == 1"));
         assert!(!eval_if_condition("1 == 2"));
         assert!(eval_if_condition("1 != 2"));
+        assert!(eval_if_condition("3 >= 2"));
+        assert!(eval_if_condition("2 >= 2"));
+        assert!(!eval_if_condition("1 >= 2"));
+        assert!(eval_if_condition("1 <= 2"));
+        assert!(eval_if_condition("3 > 2"));
+        assert!(!eval_if_condition("2 > 2"));
+        assert!(eval_if_condition("1 < 2"));
+    }
+
+    #[test]
+    fn test_eval_if_condition_with_x86_registers() {
+        // Test register equality (like kernel UNWIND_HINT_REGS)
+        assert!(eval_if_condition_with_resolver("%rsp == %rsp", |s| resolve_x86_registers(s)));
+        assert!(!eval_if_condition_with_resolver("%rsp == %rbp", |s| resolve_x86_registers(s)));
+        assert!(eval_if_condition_with_resolver("%rbp == %rbp", |s| resolve_x86_registers(s)));
+        assert!(eval_if_condition_with_resolver("%rdi == %rdi", |s| resolve_x86_registers(s)));
+        assert!(eval_if_condition_with_resolver("%rdx == %rdx", |s| resolve_x86_registers(s)));
+        assert!(eval_if_condition_with_resolver("%r10 == %r10", |s| resolve_x86_registers(s)));
+        assert!(eval_if_condition_with_resolver("%rsp != %rbp", |s| resolve_x86_registers(s)));
+    }
+
+    #[test]
+    fn test_resolve_x86_registers() {
+        assert_eq!(resolve_x86_registers("%rsp"), "108");
+        assert_eq!(resolve_x86_registers("%rbp"), "109");
+        assert_eq!(resolve_x86_registers("%rdi"), "111");
+        assert_eq!(resolve_x86_registers("%r10"), "114");
+        // Ordering matters: %r10 must be replaced before %r8/%r9 to avoid partial matches
+        assert_eq!(resolve_x86_registers("%r13"), "117");
     }
 
     #[test]

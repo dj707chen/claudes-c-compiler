@@ -1306,43 +1306,55 @@ fn expand_gas_macros_with_state(
             continue;
         }
 
-        // .if expr / .endif (with possible .else)
+        // .if expr / .elseif expr / .else / .endif
         if trimmed.starts_with(".if ") || trimmed.starts_with(".if\t") || trimmed.starts_with(".if(") {
             let rest = if trimmed.starts_with(".if(") {
                 &trimmed[".if".len()..]
             } else {
                 trimmed[".if".len()..].trim()
             };
-            let resolved = resolve_set_expr(rest, &symbols);
-            let cond = parse_integer_expr(&resolved).unwrap_or(0) != 0;
+            let cond = eval_if_expr(rest, symbols);
+            // Collect branches: a chain of (condition, lines) pairs ending with optional else
+            let mut branches: Vec<(bool, Vec<String>)> = vec![(cond, Vec::new())];
+            let mut current_idx = 0;
             let mut depth = 1;
-            let mut then_lines = Vec::new();
-            let mut else_lines = Vec::new();
-            let mut in_else = false;
             i += 1;
             while i < lines.len() {
                 let inner = strip_comment(&lines[i]).trim().to_string();
-                if inner.starts_with(".if ") || inner.starts_with(".if\t") || inner.starts_with(".if(")
-                    || inner.starts_with(".ifc ") || inner.starts_with(".ifc\t")
-                    || inner.starts_with(".ifdef ") || inner.starts_with(".ifndef ") {
+                if is_if_start(&inner) {
                     depth += 1;
-                    if in_else { else_lines.push(lines[i].clone()); } else { then_lines.push(lines[i].clone()); }
+                    branches[current_idx].1.push(lines[i].clone());
                 } else if inner == ".endif" {
                     depth -= 1;
                     if depth == 0 {
                         break;
                     }
-                    if in_else { else_lines.push(lines[i].clone()); } else { then_lines.push(lines[i].clone()); }
+                    branches[current_idx].1.push(lines[i].clone());
+                } else if depth == 1 && (inner.starts_with(".elseif ") || inner.starts_with(".elseif\t")) {
+                    let elseif_rest = inner[".elseif".len()..].trim();
+                    // All branch conditions are evaluated eagerly; harmless for pure comparisons.
+                    let elseif_cond = eval_if_expr(elseif_rest, symbols);
+                    branches.push((elseif_cond, Vec::new()));
+                    current_idx += 1;
                 } else if inner == ".else" && depth == 1 {
-                    in_else = true;
+                    // .else is like .elseif with condition=true (fallback)
+                    branches.push((true, Vec::new()));
+                    current_idx += 1;
                 } else {
-                    if in_else { else_lines.push(lines[i].clone()); } else { then_lines.push(lines[i].clone()); }
+                    branches[current_idx].1.push(lines[i].clone());
                 }
                 i += 1;
             }
-            let chosen = if cond { &then_lines } else { &else_lines };
-            // Recursively expand the chosen branch
-            let expanded = expand_gas_macros_with_state(chosen, macros, symbols)?;
+            // Choose the first branch whose condition is true
+            let empty: Vec<String> = Vec::new();
+            let mut chosen_lines: &Vec<String> = &empty;
+            for (bcond, blines) in &branches {
+                if *bcond {
+                    chosen_lines = blines;
+                    break;
+                }
+            }
+            let expanded = expand_gas_macros_with_state(chosen_lines, macros, symbols)?;
             result.extend(expanded);
             i += 1;
             continue;
@@ -1352,33 +1364,44 @@ fn expand_gas_macros_with_state(
         if trimmed.starts_with(".ifc ") || trimmed.starts_with(".ifc\t") {
             let rest = trimmed[".ifc".len()..].trim();
             let cond = eval_ifc(rest);
+            let mut branches: Vec<(bool, Vec<String>)> = vec![(cond, Vec::new())];
+            let mut current_idx = 0;
             let mut depth = 1;
-            let mut then_lines = Vec::new();
-            let mut else_lines = Vec::new();
-            let mut in_else = false;
             i += 1;
             while i < lines.len() {
                 let inner = strip_comment(&lines[i]).trim().to_string();
-                if inner.starts_with(".if ") || inner.starts_with(".if\t") || inner.starts_with(".if(")
-                    || inner.starts_with(".ifc ") || inner.starts_with(".ifc\t")
-                    || inner.starts_with(".ifdef ") || inner.starts_with(".ifndef ") {
+                if is_if_start(&inner) {
                     depth += 1;
-                    if in_else { else_lines.push(lines[i].clone()); } else { then_lines.push(lines[i].clone()); }
+                    branches[current_idx].1.push(lines[i].clone());
                 } else if inner == ".endif" {
                     depth -= 1;
                     if depth == 0 {
                         break;
                     }
-                    if in_else { else_lines.push(lines[i].clone()); } else { then_lines.push(lines[i].clone()); }
+                    branches[current_idx].1.push(lines[i].clone());
+                } else if depth == 1 && (inner.starts_with(".elseif ") || inner.starts_with(".elseif\t")) {
+                    let elseif_rest = inner[".elseif".len()..].trim();
+                    // All branch conditions are evaluated eagerly; harmless for pure comparisons.
+                    let elseif_cond = eval_if_expr(elseif_rest, symbols);
+                    branches.push((elseif_cond, Vec::new()));
+                    current_idx += 1;
                 } else if inner == ".else" && depth == 1 {
-                    in_else = true;
+                    branches.push((true, Vec::new()));
+                    current_idx += 1;
                 } else {
-                    if in_else { else_lines.push(lines[i].clone()); } else { then_lines.push(lines[i].clone()); }
+                    branches[current_idx].1.push(lines[i].clone());
                 }
                 i += 1;
             }
-            let chosen = if cond { &then_lines } else { &else_lines };
-            let expanded = expand_gas_macros_with_state(chosen, macros, symbols)?;
+            let empty: Vec<String> = Vec::new();
+            let mut chosen_lines: &Vec<String> = &empty;
+            for (bcond, blines) in &branches {
+                if *bcond {
+                    chosen_lines = blines;
+                    break;
+                }
+            }
+            let expanded = expand_gas_macros_with_state(chosen_lines, macros, symbols)?;
             result.extend(expanded);
             i += 1;
             continue;
@@ -1527,24 +1550,52 @@ fn parse_macro_args(args_str: &str, params: &[(String, Option<String>)]) -> Resu
     Ok(result)
 }
 
-/// Split macro arguments on commas, respecting parentheses
+/// Split macro arguments on commas and spaces, respecting parentheses.
+///
+/// GAS allows both commas and spaces/tabs as macro argument separators.
+/// e.g., `base=%rsp offset=0` or `base=%rsp, offset=0` both give two args.
+/// Consecutive separators are collapsed (no empty args from double spaces).
 fn split_macro_args(s: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut depth = 0;
     let mut current = String::new();
-    for ch in s.chars() {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
         match ch {
             '(' => { depth += 1; current.push(ch); }
             ')' => { depth -= 1; current.push(ch); }
             ',' if depth == 0 => {
-                parts.push(current.clone());
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed);
+                }
                 current.clear();
+                // Skip any whitespace after comma
+                while i + 1 < bytes.len() && (bytes[i + 1] == b' ' || bytes[i + 1] == b'\t') {
+                    i += 1;
+                }
+            }
+            ' ' | '\t' if depth == 0 => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed);
+                    current.clear();
+                }
+                // Skip remaining whitespace
+                while i + 1 < bytes.len() && (bytes[i + 1] == b' ' || bytes[i + 1] == b'\t') {
+                    i += 1;
+                }
+                // If next char is comma, let the comma handler deal with it
             }
             _ => current.push(ch),
         }
+        i += 1;
     }
-    if !current.is_empty() {
-        parts.push(current);
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        parts.push(trimmed);
     }
     parts
 }
@@ -1585,6 +1636,25 @@ fn resolve_set_expr(expr: &str, symbols: &std::collections::HashMap<String, i64>
         result = result.replace(name.as_str(), &val.to_string());
     }
     result
+}
+
+/// Check if a line starts a new conditional assembly block (.if, .ifc, .ifdef, .ifndef).
+fn is_if_start(trimmed: &str) -> bool {
+    trimmed.starts_with(".if ") || trimmed.starts_with(".if\t") || trimmed.starts_with(".if(")
+        || trimmed.starts_with(".ifc ") || trimmed.starts_with(".ifc\t")
+        || trimmed.starts_with(".ifdef ") || trimmed.starts_with(".ifndef ")
+}
+
+/// Evaluate a `.if` expression for the x86 assembler.
+///
+/// Resolves `.set` symbols and x86 register names (%rsp, %rbp, etc.) before
+/// evaluating the expression. Supports `==`, `!=`, `>=`, `<=`, `>`, `<`
+/// comparison operators and full arithmetic.
+fn eval_if_expr(expr: &str, symbols: &std::collections::HashMap<String, i64>) -> bool {
+    let resolved = resolve_set_expr(expr, symbols);
+    asm_preprocess::eval_if_condition_with_resolver(&resolved, |s| {
+        asm_preprocess::resolve_x86_registers(s)
+    })
 }
 
 #[cfg(test)]
