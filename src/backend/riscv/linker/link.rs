@@ -3004,7 +3004,7 @@ pub fn link_shared(
     // Also init_array/fini_array entries are pointers
     for ms in merged_sections.iter() {
         if ms.name == ".init_array" || ms.name == ".fini_array" {
-            max_rela_count += (ms.data.len() / 8) as usize;
+            max_rela_count += ms.data.len() / 8;
         }
     }
     // GOT entries for local symbols also need RELATIVE relocs
@@ -3332,7 +3332,7 @@ pub fn link_shared(
     elf[4] = ELFCLASS64; elf[5] = ELFDATA2LSB; elf[6] = 1; // EV_CURRENT
     elf[7] = 0; // ELFOSABI_NONE
     // e_type
-    elf[16..18].copy_from_slice(&(ET_DYN as u16).to_le_bytes());
+    elf[16..18].copy_from_slice(&ET_DYN.to_le_bytes());
     // e_machine
     elf[18..20].copy_from_slice(&EM_RISCV_ELF.to_le_bytes());
     // e_version
@@ -3481,10 +3481,8 @@ pub fn link_shared(
     for (gi, name) in got_symbols.iter().enumerate() {
         let entry_off = (got_offset + gi as u64 * 8) as usize;
         if let Some(gsym) = global_syms.get(name) {
-            if gsym.defined {
-                if entry_off + 8 <= elf.len() {
-                    elf[entry_off..entry_off+8].copy_from_slice(&gsym.value.to_le_bytes());
-                }
+            if gsym.defined && entry_off + 8 <= elf.len() {
+                elf[entry_off..entry_off+8].copy_from_slice(&gsym.value.to_le_bytes());
             }
         } else {
             // Try to resolve from local_sym_vaddrs via got_sym_key mapping
@@ -3996,7 +3994,7 @@ pub fn link_shared(
 
     // Write section headers
     // Align to 8 bytes
-    while elf.len() % 8 != 0 { elf.push(0); }
+    while !elf.len().is_multiple_of(8) { elf.push(0); }
     let shdr_offset = elf.len() as u64;
     let shdr_count = section_headers.len();
 

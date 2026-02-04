@@ -214,8 +214,7 @@ impl ArmCodegen {
                             }
                         }
                         let dest_reg = callee_saved_name(phys_reg);
-                        match class {
-                            ParamClass::IntReg { reg_idx } => {
+                        if let ParamClass::IntReg { reg_idx } = class {
                                 let actual_idx = if sret_shift > 0 && reg_idx == 0 && i == 0 {
                                     // sret: the pointer comes in x8
                                     self.state.emit_fmt(format_args!(
@@ -231,8 +230,6 @@ impl ArmCodegen {
                                 self.state.emit_fmt(format_args!(
                                     "    mov {}, {}", dest_reg, src_reg));
                                 self.state.param_pre_stored.insert(i);
-                            }
-                            _ => {} // Other GP-reg param classes not handled here
                         }
                     }
                 }

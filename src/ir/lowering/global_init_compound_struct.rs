@@ -274,7 +274,7 @@ impl Lowerer {
                 // than the bits actually used. Bytes beyond the last used bit
                 // may belong to subsequent non-bitfield fields and must not be
                 // overwritten with zeros from the storage unit buffer.
-                let actual_bytes_used = ((max_bit_end as usize) + 7) / 8;
+                let actual_bytes_used = (max_bit_end as usize).div_ceil(8);
                 let effective_size = actual_bytes_used.min(storage_unit_size);
 
                 // When the storage unit overlaps with already-written data

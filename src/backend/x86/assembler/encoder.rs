@@ -494,7 +494,7 @@ impl InstructionEncoder {
                     self.bytes.push(0xC8 | rm);
                     Ok(())
                 } else {
-                    Err(format!("rdsspq requires a 64-bit register operand"))
+                    Err("rdsspq requires a 64-bit register operand".to_string())
                 }
             }
             "rdsspd" => {
@@ -508,7 +508,7 @@ impl InstructionEncoder {
                     self.bytes.push(0xC8 | rm);
                     Ok(())
                 } else {
-                    Err(format!("rdsspd requires a 32-bit register operand"))
+                    Err("rdsspd requires a 32-bit register operand".to_string())
                 }
             }
             "pause" => { self.bytes.extend_from_slice(&[0xF3, 0x90]); Ok(()) }
@@ -1123,7 +1123,7 @@ impl InstructionEncoder {
 
             // AVX scalar float operations (VEX.NDS.LIG.F3/F2.0F)
             "vmovss" => self.encode_avx_scalar_mov(ops, 0x10, 0x11, 2), // F3 prefix
-            "vmovsd" if ops.len() > 0 => self.encode_avx_scalar_mov(ops, 0x10, 0x11, 3), // F2 prefix
+            "vmovsd" if !ops.is_empty() => self.encode_avx_scalar_mov(ops, 0x10, 0x11, 3), // F2 prefix
             "vaddss" => self.encode_avx_scalar_3op(ops, 0x58, 2),   // VEX.NDS.LIG.F3.0F 58
             "vsubss" => self.encode_avx_scalar_3op(ops, 0x5C, 2),   // VEX.NDS.LIG.F3.0F 5C
             "vmulss" => self.encode_avx_scalar_3op(ops, 0x59, 2),   // VEX.NDS.LIG.F3.0F 59
@@ -2707,8 +2707,8 @@ impl InstructionEncoder {
         let cc_str = &mnemonic[3..];
         // Try the condition code as-is first, then strip trailing 'b' suffix
         let cc = cc_from_mnemonic(cc_str).or_else(|_| {
-            if cc_str.ends_with('b') {
-                cc_from_mnemonic(&cc_str[..cc_str.len()-1])
+            if let Some(stripped) = cc_str.strip_suffix('b') {
+                cc_from_mnemonic(stripped)
             } else {
                 Err(format!("unknown condition code: {}", cc_str))
             }
@@ -3836,16 +3836,7 @@ impl InstructionEncoder {
 
     fn encode_fucomi(&mut self, ops: &[Operand]) -> Result<(), String> {
         // fucomi %st(i), %st -> DB E8+i (0 or 2 operands; 1-operand also accepted)
-        if ops.len() == 2 {
-            match &ops[0] {
-                Operand::Register(reg) => {
-                    let n = parse_st_num(&reg.name)?;
-                    self.bytes.extend_from_slice(&[0xDB, 0xE8 + n]);
-                    Ok(())
-                }
-                _ => Err("fucomi requires st register".to_string()),
-            }
-        } else if ops.len() == 1 {
+        if ops.len() == 2 || ops.len() == 1 {
             match &ops[0] {
                 Operand::Register(reg) => {
                     let n = parse_st_num(&reg.name)?;
@@ -4634,8 +4625,7 @@ impl InstructionEncoder {
         // Try to match a suffix (ps, pd, ss, sd)
         let suffixes = ["ps", "pd", "ss", "sd"];
         for suffix in &suffixes {
-            if rest.ends_with(suffix) {
-                let pred_str = &rest[..rest.len() - suffix.len()];
+            if let Some(pred_str) = rest.strip_suffix(*suffix) {
                 let pred = match pred_str {
                     "eq" => 0,
                     "lt" => 1,
@@ -4707,8 +4697,7 @@ impl InstructionEncoder {
         let rest = &mnemonic[4..];
         let suffixes = ["ps", "pd", "ss", "sd"];
         for suffix in &suffixes {
-            if rest.ends_with(suffix) {
-                let pred_str = &rest[..rest.len() - suffix.len()];
+            if let Some(pred_str) = rest.strip_suffix(*suffix) {
                 let pred = match pred_str {
                     "eq" => 0,
                     "lt" => 1,

@@ -435,7 +435,7 @@ impl Driver {
         // built-in preprocessor may not fully support in all edge cases.
         #[cfg(feature = "gcc_assembler")]
         {
-            return self.preprocess_assembly_gcc(input_file);
+            self.preprocess_assembly_gcc(input_file)
         }
 
         // Default: use built-in preprocessor

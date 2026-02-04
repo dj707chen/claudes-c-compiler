@@ -655,7 +655,6 @@ impl Driver {
             cmd.stdout(std::process::Stdio::inherit());
             cmd.stderr(std::process::Stdio::inherit());
             let _ = cmd.status();
-            return;
         }
         #[cfg(not(feature = "gcc_linker"))]
         {

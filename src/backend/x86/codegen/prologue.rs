@@ -243,17 +243,14 @@ impl X86Codegen {
                             // Safety check: if another param's dest is also assigned
                             // to this register, skip pre-store to avoid conflicts.
                             let shared = reg_to_params.get(&phys_reg.0)
-                                .map_or(false, |users| users.len() > 1);
+                                .is_some_and(|users| users.len() > 1);
                             if !shared {
                                 let dest_reg = phys_reg_name(phys_reg);
-                                match class {
-                                    ParamClass::IntReg { reg_idx } => {
-                                        self.state.out.emit_instr_reg_reg(
-                                            "    movq", X86_ARG_REGS[reg_idx], dest_reg);
-                                        self.state.param_pre_stored.insert(i);
-                                    }
-                                    _ => {} // TODO: handle StackSlot/SSE params
-                                }
+                                if let ParamClass::IntReg { reg_idx } = class {
+                                    self.state.out.emit_instr_reg_reg(
+                                        "    movq", X86_ARG_REGS[reg_idx], dest_reg);
+                                    self.state.param_pre_stored.insert(i);
+                                } // TODO: handle StackSlot/SSE params
                             }
                         }
                     }

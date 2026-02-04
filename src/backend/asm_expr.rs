@@ -12,7 +12,6 @@
 ///
 /// Integer literals: decimal, hex (0x), binary (0b), octal (leading 0).
 /// Used by all four assembler backends (x86, i686, ARM, RISC-V).
-
 /// Token type for the expression evaluator.
 #[derive(Debug)]
 enum ExprToken {

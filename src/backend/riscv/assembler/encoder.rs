@@ -2087,7 +2087,7 @@ fn encode_c_addi(operands: &[Operand]) -> Result<EncodeResult, String> {
     let imm = get_imm(operands, 1)? as i32;
     let bit5 = ((imm >> 5) & 1) as u16;
     let bits4_0 = (imm & 0x1F) as u16;
-    Ok(EncodeResult::Half(0b01 | (bits4_0 << 2) | ((rd as u16) << 7) | (bit5 << 12) | (0b000 << 13)))
+    Ok(EncodeResult::Half(0b01 | (bits4_0 << 2) | ((rd as u16) << 7) | (bit5 << 12)))
 }
 
 // c.mv rd, rs2

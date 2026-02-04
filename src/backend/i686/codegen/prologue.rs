@@ -298,7 +298,7 @@ impl I686Codegen {
                                 // Safety check: if another param's dest is also assigned
                                 // to this register, skip pre-store to avoid conflicts.
                                 let shared = reg_to_params.get(&phys_reg.0)
-                                    .map_or(false, |users| users.len() > 1);
+                                    .is_some_and(|users| users.len() > 1);
                                 if !shared {
                                     // Store directly to the callee-saved register
                                     let dest_reg = phys_reg_name(phys_reg);

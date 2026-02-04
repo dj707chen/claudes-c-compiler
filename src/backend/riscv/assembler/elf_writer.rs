@@ -461,15 +461,15 @@ impl ElfWriter {
                     info.flags_explicit,
                     Some(info.sec_type.as_str()),
                 );
-                return Ok(());
+                Ok(())
             }
             Directive::PopSection => {
                 self.base.pop_section();
-                return Ok(());
+                Ok(())
             }
             Directive::Previous => {
                 self.base.restore_previous_section();
-                return Ok(());
+                Ok(())
             }
             Directive::Section(info) => {
                 self.base.process_section_directive(
@@ -762,7 +762,7 @@ impl ElfWriter {
                         if def.size == 4 && off + 4 <= section.data.len() {
                             section.data[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes());
                         } else if def.size == 8 && off + 8 <= section.data.len() {
-                            section.data[off..off + 8].copy_from_slice(&(v as i64).to_le_bytes());
+                            section.data[off..off + 8].copy_from_slice(&v.to_le_bytes());
                         } else if def.size == 2 && off + 2 <= section.data.len() {
                             section.data[off..off + 2].copy_from_slice(&(v as u16).to_le_bytes());
                         } else if def.size == 1 && off < section.data.len() {

@@ -770,19 +770,16 @@ mod tests {
             source_spans: Vec::new(),
         }]);
 
-        let changes = narrow_function(&mut func);
+        let _changes = narrow_function(&mut func);
         // Phase 5 should NOT narrow this AND because the mask becomes all-ones
         // for U32 -- the AND acts as a zero-extension, not a pure bitwise op.
         let binop = &func.blocks[0].instructions[1];
-        match binop {
-            Instruction::BinOp { ty, .. } => {
-                assert!(
-                    *ty == IrType::I64 || *ty == IrType::U64,
-                    "AND with all-ones mask should NOT be narrowed, got {:?}", ty
-                );
-            }
-            _ => {} // Phase 4 might have transformed it differently
-        }
+        if let Instruction::BinOp { ty, .. } = binop {
+            assert!(
+                *ty == IrType::I64 || *ty == IrType::U64,
+                "AND with all-ones mask should NOT be narrowed, got {:?}", ty
+            );
+        } // Phase 4 might have transformed it differently
     }
 
     #[test]

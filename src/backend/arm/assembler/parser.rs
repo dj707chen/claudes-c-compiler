@@ -231,7 +231,7 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
         }
 
         // If we're inside a false .if block, skip this line
-        if if_stack.last().copied().unwrap_or(true) == false {
+        if !if_stack.last().copied().unwrap_or(true) {
             continue;
         }
 
@@ -807,7 +807,7 @@ fn parse_memory_operand(s: &str) -> Result<Operand, String> {
 
     // Handle bare immediate without # prefix (e.g., [sp, -16]! or [x0, 8])
     // Check if the second operand starts with a digit or minus sign followed by a digit
-    if second.starts_with('-') || second.starts_with('+') || second.bytes().next().map_or(false, |b| b.is_ascii_digit()) {
+    if second.starts_with('-') || second.starts_with('+') || second.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
         if let Ok(offset) = parse_int_literal(second) {
             if has_writeback {
                 return Ok(Operand::MemPreIndex { base, offset });

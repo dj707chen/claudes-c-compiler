@@ -1386,11 +1386,6 @@ impl InstructionEncoder {
                 self.bytes.push(0x8F);
                 self.encode_modrm_mem(0, mem)
             }
-            Operand::Memory(mem) => {
-                // popl mem32 → 8F /0
-                self.bytes.push(0x8F);
-                self.encode_modrm_mem(0, mem)
-            }
             _ => Err("unsupported pop operand".to_string()),
         }
     }
@@ -1436,15 +1431,14 @@ impl InstructionEncoder {
             (Operand::Immediate(ImmediateValue::Symbol(sym)), Operand::Register(dst)) => {
                 let dst_num = reg_num(&dst.name).ok_or("bad register")?;
                 if size == 2 { self.bytes.push(0x66); }
-                let opcode_len;
-                if dst_num == 0 {
+                let opcode_len = if dst_num == 0 {
                     self.bytes.push(0x05 + alu_op * 8);
-                    opcode_len = 1u32;
+                    1u32
                 } else {
                     self.bytes.push(0x81);
                     self.bytes.push(self.modrm(3, alu_op, dst_num));
-                    opcode_len = 2u32;
-                }
+                    2u32
+                };
                 // _GLOBAL_OFFSET_TABLE_ requires R_386_GOTPC (PC-relative to GOT).
                 // The implicit addend = opcode length so the PC correction works:
                 // ebx (= return addr of thunk call) + (GOT + addend - P) = GOT

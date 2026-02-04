@@ -964,7 +964,7 @@ fn emit_shared_library(
     // Define linker-provided symbols
     let linker_addrs = LinkerSymbolAddresses {
         base_addr,
-        got_addr: got_addr,
+        got_addr,
         dynamic_addr,
         bss_addr,
         bss_size,
@@ -1303,7 +1303,7 @@ fn emit_shared_library(
         (DT_STRTAB, dynstr_addr), (DT_SYMTAB, dynsym_addr), (DT_STRSZ, dynstr_size),
         (DT_SYMENT, 24),
         (DT_RELA, rela_dyn_addr), (DT_RELASZ, rela_dyn_size), (DT_RELAENT, 24),
-        (DT_RELACOUNT as i64, relative_count as u64),
+        (DT_RELACOUNT, relative_count as u64),
         (DT_GNU_HASH, gnu_hash_addr),
         // DT_TEXTREL not needed since we use PIC
     ] {
@@ -2919,12 +2919,12 @@ fn emit_executable(
     sh_count += 1;
 
     // Align and append .shstrtab data
-    while out.len() % 8 != 0 { out.push(0); }
+    while !out.len().is_multiple_of(8) { out.push(0); }
     let shstrtab_data_offset = out.len() as u64;
     out.extend_from_slice(&shstrtab);
 
     // Align section header table to 8 bytes
-    while out.len() % 8 != 0 { out.push(0); }
+    while !out.len().is_multiple_of(8) { out.push(0); }
     let shdr_offset = out.len() as u64;
 
     // Write section headers

@@ -1040,11 +1040,7 @@ impl ElfWriter {
                 }
             };
 
-            let needed_padding = if needed_end > current_offset {
-                needed_end - current_offset
-            } else {
-                0
-            };
+            let needed_padding = needed_end.saturating_sub(current_offset);
 
             // Use the stored padding size rather than counting consecutive fill bytes.
             // Counting 0x90 bytes greedily is wrong because subsequent code may also

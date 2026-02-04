@@ -833,7 +833,7 @@ mod tests {
         let hw = result.unwrap();
         // a0 = x10, imm = 5
         // 010 | 0 | 01010 | 00101 | 01
-        let expected: u16 = 0b010_0_01010_00101_01;
+        let expected: u16 = 0b0100_0101_0001_0101;
         assert_eq!(hw, expected, "c.li a0, 5 = 0x{:04x}, expected 0x{:04x}", hw, expected);
     }
 

@@ -21,6 +21,7 @@ use elf_writer::ElfWriter;
 /// Assemble RISC-V assembly text into an ELF object file.
 ///
 /// This is the default assembler (used when the `gcc_assembler` feature is disabled).
+#[allow(dead_code)]
 pub fn assemble(asm_text: &str, output_path: &str) -> Result<(), String> {
     assemble_with_args(asm_text, output_path, &[])
 }

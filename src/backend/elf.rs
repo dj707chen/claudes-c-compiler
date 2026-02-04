@@ -778,6 +778,7 @@ pub fn get_standard_linker_symbols(addrs: &LinkerSymbolAddresses) -> Vec<LinkerD
 /// - `*COM*` → `SHN_COMMON` (0xFFF2) for COMMON symbols
 /// - `*UND*` or empty → `SHN_UNDEF` (0) for undefined symbols
 /// - Otherwise, looks up the section in the content section list (1-based index)
+///
 /// `shndx_offset` is the number of section headers before the content sections
 /// (typically 1 for NULL, or 1 + num_groups when COMDAT groups are present).
 pub fn section_index(section_name: &str, content_sections: &[String], shndx_offset: u16) -> u16 {

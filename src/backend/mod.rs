@@ -345,7 +345,7 @@ impl Target {
         // When gcc_assembler feature is enabled, use GCC for assembling
         #[cfg(feature = "gcc_assembler")]
         {
-            return common::assemble_with_extra(&self.assembler_config(), asm_text, output_path, extra_args);
+            common::assemble_with_extra(&self.assembler_config(), asm_text, output_path, extra_args)
         }
 
         // Default (gcc_assembler disabled): use the built-in assembler

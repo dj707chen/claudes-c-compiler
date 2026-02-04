@@ -1361,11 +1361,7 @@ impl ElfWriter {
             let fill_byte: u8 = if is_exec { 0x90 } else { 0x00 };
 
             // The needed padding is target - data_offset (if target > data_offset)
-            let needed_padding = if target > data_offset {
-                target - data_offset
-            } else {
-                0
-            };
+            let needed_padding = target.saturating_sub(data_offset);
 
             if current_padding == needed_padding {
                 continue;

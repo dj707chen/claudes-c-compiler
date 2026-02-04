@@ -4137,7 +4137,7 @@ fn encode_swp(mnemonic: &str, operands: &[Operand]) -> Result<EncodeResult, Stri
     let r = if suffix.contains('l') { 1u32 } else { 0u32 };
     // size 111000 A R 1 Rs 1 000 00 Rn Rt
     let word = (size << 30) | (0b111000 << 24) | (a << 23) | (r << 22) | (1 << 21)
-        | (rs << 16) | (1 << 15) | (0b000 << 12) | (0b00 << 10) | (rn << 5) | rt;
+        | (rs << 16) | (1 << 15) | (rn << 5) | rt;
     Ok(EncodeResult::Word(word))
 }
 
@@ -4172,7 +4172,7 @@ fn encode_ldop(mnemonic: &str, operands: &[Operand]) -> Result<EncodeResult, Str
     let r = if suffix.contains('l') { 1u32 } else { 0u32 };
     // size 111000 A R 1 Rs 0 opc 00 Rn Rt
     let word = (size << 30) | (0b111000 << 24) | (a << 23) | (r << 22) | (1 << 21)
-        | (rs << 16) | (0 << 15) | (base << 12) | (0b00 << 10) | (rn << 5) | rt;
+        | (rs << 16) | (base << 12) | (rn << 5) | rt;
     Ok(EncodeResult::Word(word))
 }
 

@@ -498,10 +498,8 @@ fn merge_sections(
             };
 
             // COMDAT deduplication by section name
-            if sec.flags & SHF_GROUP != 0 {
-                if !included_comdat_sections.insert(sec.name.clone()) {
-                    continue;
-                }
+            if sec.flags & SHF_GROUP != 0 && !included_comdat_sections.insert(sec.name.clone()) {
+                continue;
             }
 
             let out_idx = if let Some(&idx) = section_name_to_idx.get(&out_name) {
@@ -1679,7 +1677,7 @@ fn emit_executable(
 fn layout_section(
     name: &str,
     section_name_to_idx: &HashMap<String, usize>,
-    output_sections: &mut Vec<OutputSection>,
+    output_sections: &mut [OutputSection],
     file_offset: &mut u32,
     vaddr: &mut u32,
     min_align: u32,
@@ -1702,7 +1700,7 @@ fn layout_section(
 
 fn layout_tls(
     section_name_to_idx: &HashMap<String, usize>,
-    output_sections: &mut Vec<OutputSection>,
+    output_sections: &mut [OutputSection],
     file_offset: &mut u32,
     vaddr: &mut u32,
 ) -> (u32, u32, u32, u32, u32) {
@@ -1870,7 +1868,7 @@ fn build_plt(
     plt_data
 }
 
-fn write_elf_header(output: &mut Vec<u8>, entry_point: u32, ehdr_size: u32, num_phdrs: u32) {
+fn write_elf_header(output: &mut [u8], entry_point: u32, ehdr_size: u32, num_phdrs: u32) {
     output[0..4].copy_from_slice(&ELF_MAGIC);
     output[4] = ELFCLASS32;
     output[5] = ELFDATA2LSB;

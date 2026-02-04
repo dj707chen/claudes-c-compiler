@@ -210,8 +210,8 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
     // When gcc_linker feature is enabled, use GCC for ALL linking
     #[cfg(feature = "gcc_linker")]
     {
-        return link_with_gcc(config, object_files, output_path, user_args,
-                            is_shared, is_nostdlib, is_relocatable);
+        link_with_gcc(config, object_files, output_path, user_args,
+                            is_shared, is_nostdlib, is_relocatable)
     }
 
     // Default (gcc_linker disabled): use the built-in native linker
@@ -242,13 +242,11 @@ pub fn link_with_args(config: &LinkerConfig, object_files: &[&str], output_path:
                     is_nostdlib, is_static, is_shared,
                 );
             }
-            if !is_shared {
-                if config.expected_elf_machine == 3 {
-                    return link_builtin_i686(
-                        object_files, output_path, user_args,
-                        is_nostdlib, is_static,
-                    );
-                }
+            if !is_shared && config.expected_elf_machine == 3 {
+                return link_builtin_i686(
+                    object_files, output_path, user_args,
+                    is_nostdlib, is_static,
+                );
             }
         }
 
@@ -783,10 +781,8 @@ pub(crate) fn link_builtin_aarch64(
             if let Some(pos) = setup.needed_libs.iter().position(|l| l == "gcc") {
                 setup.needed_libs.insert(pos + 1, "gcc_eh".to_string());
             }
-        } else {
-            if let Some(pos) = setup.needed_libs.iter().position(|l| l == "gcc") {
-                setup.needed_libs.insert(pos + 1, "gcc_s".to_string());
-            }
+        } else if let Some(pos) = setup.needed_libs.iter().position(|l| l == "gcc") {
+            setup.needed_libs.insert(pos + 1, "gcc_s".to_string());
         }
     }
 

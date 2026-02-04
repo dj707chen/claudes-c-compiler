@@ -114,7 +114,7 @@ impl Driver {
         // When gcc_assembler feature is enabled, use GCC for assembling
         #[cfg(feature = "gcc_assembler")]
         {
-            return self.assemble_source_file_gcc(input_file, output_path, None);
+            self.assemble_source_file_gcc(input_file, output_path, None)
         }
 
         // Default (gcc_assembler disabled): use built-in assembler

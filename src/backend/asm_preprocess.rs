@@ -375,14 +375,14 @@ pub fn expand_macros(
         if trimmed.starts_with(".macro ") || trimmed.starts_with(".macro\t") {
             // Parse: .macro name [param1[, param2, ...]]
             let rest = trimmed[".macro".len()..].trim();
-            let (name, params_str) = match rest.find(|c: char| c == ' ' || c == '\t' || c == ',') {
+            let (name, params_str) = match rest.find([' ', '\t', ',']) {
                 Some(pos) => (rest[..pos].trim(), rest[pos..].trim().trim_start_matches(',')),
                 None => (rest, ""),
             };
             let params: Vec<String> = if params_str.is_empty() {
                 Vec::new()
             } else {
-                params_str.split(|c: char| c == ',' || c == ' ' || c == '\t')
+                params_str.split([',', ' ', '\t'])
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect()
@@ -407,7 +407,7 @@ pub fn expand_macros(
         } else if trimmed == ".endm" || trimmed.starts_with(".endm ") || trimmed.starts_with(".endm\t") {
             // stray .endm — skip
         } else if !trimmed.is_empty() && !trimmed.starts_with('.') && !trimmed.starts_with('#') {
-            let first_word = trimmed.split(|c: char| c == ' ' || c == '\t').next().unwrap_or("");
+            let first_word = trimmed.split([' ', '\t']).next().unwrap_or("");
             let potential_name = first_word.trim_end_matches(':');
             if potential_name != first_word {
                 // It's a label, not a macro invocation
@@ -452,7 +452,7 @@ fn expand_macros_with(
             result.push(line.to_string());
             continue;
         }
-        let first_word = trimmed.split(|c: char| c == ' ' || c == '\t').next().unwrap_or("");
+        let first_word = trimmed.split([' ', '\t']).next().unwrap_or("");
         let potential_name = first_word.trim_end_matches(':');
         if potential_name != first_word {
             result.push(line.to_string());
@@ -777,13 +777,13 @@ mod tests {
     #[test]
     fn test_eval_if_condition_with_x86_registers() {
         // Test register equality (like kernel UNWIND_HINT_REGS)
-        assert!(eval_if_condition_with_resolver("%rsp == %rsp", |s| resolve_x86_registers(s)));
-        assert!(!eval_if_condition_with_resolver("%rsp == %rbp", |s| resolve_x86_registers(s)));
-        assert!(eval_if_condition_with_resolver("%rbp == %rbp", |s| resolve_x86_registers(s)));
-        assert!(eval_if_condition_with_resolver("%rdi == %rdi", |s| resolve_x86_registers(s)));
-        assert!(eval_if_condition_with_resolver("%rdx == %rdx", |s| resolve_x86_registers(s)));
-        assert!(eval_if_condition_with_resolver("%r10 == %r10", |s| resolve_x86_registers(s)));
-        assert!(eval_if_condition_with_resolver("%rsp != %rbp", |s| resolve_x86_registers(s)));
+        assert!(eval_if_condition_with_resolver("%rsp == %rsp", resolve_x86_registers));
+        assert!(!eval_if_condition_with_resolver("%rsp == %rbp", resolve_x86_registers));
+        assert!(eval_if_condition_with_resolver("%rbp == %rbp", resolve_x86_registers));
+        assert!(eval_if_condition_with_resolver("%rdi == %rdi", resolve_x86_registers));
+        assert!(eval_if_condition_with_resolver("%rdx == %rdx", resolve_x86_registers));
+        assert!(eval_if_condition_with_resolver("%r10 == %r10", resolve_x86_registers));
+        assert!(eval_if_condition_with_resolver("%rsp != %rbp", resolve_x86_registers));
     }
 
     #[test]

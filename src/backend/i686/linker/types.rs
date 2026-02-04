@@ -30,16 +30,22 @@ pub(super) use crate::backend::elf::{
 // These either differ in type (i32 vs i64 for DT_*) or aren't in the shared module.
 
 pub(super) const SHT_NOTE: u32 = 7;
+#[allow(dead_code)]
 pub(super) const SHT_GNU_HASH: u32 = 0x6ffffff6;
+#[allow(dead_code)]
 pub(super) const SHT_GNU_VERSYM_CONST: u32 = 0x6fffffff;
+#[allow(dead_code)]
 pub(super) const SHT_GNU_VERNEED: u32 = 0x6ffffffe;
 
 // Section flags (i686 uses u32 instead of shared module's u64)
 pub(super) const SHF_WRITE: u32 = 0x1;
 pub(super) const SHF_ALLOC: u32 = 0x2;
 pub(super) const SHF_EXECINSTR: u32 = 0x4;
+#[allow(dead_code)]
 pub(super) const SHF_MERGE: u32 = 0x10;
+#[allow(dead_code)]
 pub(super) const SHF_STRINGS: u32 = 0x20;
+#[allow(dead_code)]
 pub(super) const SHF_INFO_LINK: u32 = 0x40;
 pub(super) const SHF_GROUP: u32 = 0x200;
 pub(super) const SHF_TLS: u32 = 0x400;
@@ -106,6 +112,7 @@ pub(super) struct Elf32Sym {
     pub shndx: u16,
 }
 
+#[allow(dead_code)]
 impl Elf32Sym {
     pub fn binding(&self) -> u8 { self.info >> 4 }
     pub fn sym_type(&self) -> u8 { self.info & 0xf }
@@ -116,6 +123,7 @@ pub(super) struct Elf32Shdr {
     pub name: u32,
     pub sh_type: u32,
     pub flags: u32,
+    #[allow(dead_code)]
     pub addr: u32,
     pub offset: u32,
     pub size: u32,
@@ -139,7 +147,9 @@ pub(super) struct InputSection {
     pub relocations: Vec<(u32, u32, u32, i32)>,
     /// Index in the input file's section header table.
     pub input_index: usize,
+    #[allow(dead_code)]
     pub entsize: u32,
+    #[allow(dead_code)]
     pub link: u32,
     pub info: u32,
 }
@@ -152,6 +162,7 @@ pub(super) struct InputSymbol {
     pub size: u32,
     pub binding: u8,
     pub sym_type: u8,
+    #[allow(dead_code)]
     pub visibility: u8,
     pub section_index: u16,
 }
@@ -172,6 +183,7 @@ pub(super) struct LinkerSymbol {
     pub size: u32,
     pub sym_type: u8,
     pub binding: u8,
+    #[allow(dead_code)]
     pub visibility: u8,
     pub is_defined: bool,
     pub needs_plt: bool,
@@ -206,6 +218,7 @@ pub(super) struct DynSymInfo {
     pub name: String,
     pub sym_type: u8,
     pub size: u32,
+    #[allow(dead_code)]
     pub binding: u8,
     pub version: Option<String>,
     pub is_default_ver: bool,

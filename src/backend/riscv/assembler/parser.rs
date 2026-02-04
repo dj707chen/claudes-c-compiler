@@ -244,7 +244,7 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
         }
 
         // If we're inside a false .if block, skip this line
-        if if_stack.last().copied().unwrap_or(true) == false {
+        if !if_stack.last().copied().unwrap_or(true) {
             continue;
         }
 

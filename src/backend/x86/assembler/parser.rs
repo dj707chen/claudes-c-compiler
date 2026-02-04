@@ -89,6 +89,7 @@ pub struct SectionDirective {
     pub section_type: Option<String>,
     /// For sections with linked-to or group info (4th arg), e.g.
     /// `__patchable_function_entries,"awo",@progbits,.LPFE0`
+    #[allow(dead_code)]
     pub extra: Option<String>,
     /// COMDAT group name from `.section name,"axG",@progbits,group_name,comdat`
     /// Set when flags contain 'G' and a 5th argument is "comdat".
@@ -688,7 +689,7 @@ fn parse_size_directive(args: &str) -> Result<AsmItem, String> {
         Ok(AsmItem::Size(name, SizeExpr::CurrentMinusSymbol(sym)))
     } else if let Ok(val) = parse_integer_expr(expr_str) {
         Ok(AsmItem::Size(name, SizeExpr::Constant(val as u64)))
-    } else if expr_str.starts_with('.') || expr_str.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_') {
+    } else if expr_str.starts_with('.') || expr_str.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') {
         // Symbol reference (e.g., .L__sym_size_*) - resolve through .set aliases
         // Treat as a symbol that will be resolved during ELF writing
         Ok(AsmItem::Size(name, SizeExpr::SymbolRef(expr_str.to_string())))
@@ -1252,7 +1253,7 @@ fn expand_gas_macros_with_state(
                 let sym_name = rest[..comma_pos].trim().to_string();
                 let expr_str = rest[comma_pos+1..].trim();
                 // Try to evaluate expression with current symbol values
-                let resolved = resolve_set_expr(expr_str, &symbols);
+                let resolved = resolve_set_expr(expr_str, symbols);
                 if let Ok(val) = parse_integer_expr(&resolved) {
                     symbols.insert(sym_name.clone(), val);
                     // For local symbols (.L*), don't emit the .set - we handle them internally
@@ -1417,7 +1418,7 @@ fn expand_gas_macros_with_state(
         // Strip label prefix if present (e.g., "label: macroname args")
         let macro_name = if first_word.ends_with(':') {
             // There might be a macro after the label
-            trimmed[first_word.len()..].trim().split_whitespace().next().unwrap_or("")
+            trimmed[first_word.len()..].split_whitespace().next().unwrap_or("")
         } else {
             first_word
         };
@@ -1452,7 +1453,7 @@ fn expand_gas_macros_with_state(
 
         // For regular lines, resolve any .set symbol references
         if !symbols.is_empty() {
-            let resolved = resolve_set_expr(&lines[i], &symbols);
+            let resolved = resolve_set_expr(&lines[i], symbols);
             result.push(resolved);
         } else {
             result.push(lines[i].clone());

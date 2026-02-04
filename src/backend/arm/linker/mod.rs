@@ -227,8 +227,7 @@ pub fn link_builtin(
     for (name, sym) in &globals {
         if sym.defined_in.is_none() && !sym.is_dynamic && sym.section_idx == SHN_UNDEF {
             let binding = sym.info >> 4;
-            if binding != STB_WEAK {
-                if !matches!(name.as_str(), "__bss_start" | "_edata" | "_end" | "__end"
+            if binding != STB_WEAK && !matches!(name.as_str(), "__bss_start" | "_edata" | "_end" | "__end"
                     | "_GLOBAL_OFFSET_TABLE_" | "__dso_handle" | "_DYNAMIC"
                     | "__GNU_EH_FRAME_HDR" | "__ehdr_start" | "__executable_start"
                     | "_init" | "_fini"
@@ -239,8 +238,7 @@ pub fn link_builtin(
                     | "_etext" | "etext" | "__data_start" | "data_start"
                     | "__getauxval"
                     | "_start") {
-                    unresolved.push(name.clone());
-                }
+                unresolved.push(name.clone());
             }
         }
     }
@@ -815,9 +813,7 @@ fn create_plt_got(
                             if !copy_reloc_names.contains(&sym.name) {
                                 copy_reloc_names.push(sym.name.clone());
                             }
-                        } else {
-                            if !plt_names.contains(&sym.name) { plt_names.push(sym.name.clone()); }
-                        }
+                        } else if !plt_names.contains(&sym.name) { plt_names.push(sym.name.clone()); }
                     }
                     R_AARCH64_ADR_PREL_PG_HI21 | R_AARCH64_ADD_ABS_LO12_NC
                     | R_AARCH64_LDST64_ABS_LO12_NC | R_AARCH64_LDST32_ABS_LO12_NC
@@ -2497,7 +2493,7 @@ fn emit_shared_library(
     w16(&mut out, 56, phdr_count as u16);
     w16(&mut out, 58, 64); // e_shentsize
     w16(&mut out, 60, sh_count); // e_shnum
-    w16(&mut out, 62, (sh_count - 1) as u16); // e_shstrndx (last section)
+    w16(&mut out, 62, sh_count - 1); // e_shstrndx (last section)
 
     // Program headers
     let mut ph = 64usize;
@@ -2653,7 +2649,7 @@ fn emit_shared_library(
                     R_AARCH64_ADR_PREL_PG_HI21 => {
                         // For undefined/dynamic symbols in shared libs, redirect through GOT
                         if let Some(&gea) = got_sym_addrs.get(&sym.name) {
-                            if s == 0 || globals_snap.get(&sym.name).map_or(false, |g| g.is_dynamic || g.defined_in.is_none()) {
+                            if s == 0 || globals_snap.get(&sym.name).is_some_and(|g| g.is_dynamic || g.defined_in.is_none()) {
                                 let page_g = gea & !0xFFF;
                                 let page_p = p & !0xFFF;
                                 let imm = (page_g as i64 - page_p as i64) >> 12;
@@ -2676,7 +2672,7 @@ fn emit_shared_library(
                     R_AARCH64_ADD_ABS_LO12_NC => {
                         // For undefined/dynamic symbols in shared libs, convert ADD to LDR from GOT
                         if let Some(&gea) = got_sym_addrs.get(&sym.name) {
-                            if s == 0 || globals_snap.get(&sym.name).map_or(false, |g| g.is_dynamic || g.defined_in.is_none()) {
+                            if s == 0 || globals_snap.get(&sym.name).is_some_and(|g| g.is_dynamic || g.defined_in.is_none()) {
                                 // Convert: ADD Xd, Xn, #imm -> LDR Xd, [Xn, #imm]
                                 // The ADD instruction loaded address = base + lo12
                                 // We need LDR to dereference the GOT entry instead
@@ -2881,7 +2877,7 @@ fn emit_shared_library(
         (DT_STRTAB, dynstr_addr), (DT_SYMTAB, dynsym_addr), (DT_STRSZ, dynstr_size),
         (DT_SYMENT, 24),
         (DT_RELA, rela_dyn_addr), (DT_RELASZ, rela_dyn_size), (DT_RELAENT, 24),
-        (DT_RELACOUNT as i64, relative_count as u64),
+        (DT_RELACOUNT, relative_count as u64),
         (DT_GNU_HASH, gnu_hash_addr),
     ] {
         w64(&mut out, dd, tag as u64); w64(&mut out, dd+8, val); dd += 16;

@@ -764,10 +764,10 @@ fn assign_one_scratch(
         return;
     }
     match &operands[i].kind {
-        AsmOperandKind::Memory | AsmOperandKind::Immediate => return,
-        AsmOperandKind::Tied(_) => return,
-        AsmOperandKind::X87St0 => { operands[i].reg = "st(0)".to_string(); return; }
-        AsmOperandKind::X87St1 => { operands[i].reg = "st(1)".to_string(); return; }
+        AsmOperandKind::Memory | AsmOperandKind::Immediate => {},
+        AsmOperandKind::Tied(_) => {},
+        AsmOperandKind::X87St0 => { operands[i].reg = "st(0)".to_string(); }
+        AsmOperandKind::X87St1 => { operands[i].reg = "st(1)".to_string(); }
         kind => {
             if i >= outputs.len() {
                 let input_idx = i - outputs.len();

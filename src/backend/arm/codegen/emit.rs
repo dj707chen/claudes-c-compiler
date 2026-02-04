@@ -519,7 +519,7 @@ impl ArmCodegen {
             _ => return None,
         };
         let neg = v.checked_neg()?;
-        if neg >= 1 && neg <= 4095 {
+        if (1..=4095).contains(&neg) {
             Some(neg as u64)
         } else {
             None

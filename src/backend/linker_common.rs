@@ -114,6 +114,7 @@ pub struct DynSymbol {
     /// GLIBC version string for this symbol (e.g. "GLIBC_2.3"), if any.
     pub version: Option<String>,
     /// Whether this is the default version (@@GLIBC_x.y vs @GLIBC_x.y).
+    #[allow(dead_code)]
     pub is_default_ver: bool,
 }
 
