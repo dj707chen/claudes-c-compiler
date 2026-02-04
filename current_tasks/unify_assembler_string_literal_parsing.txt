@@ -1,0 +1,14 @@
+Unify assembler string literal parsing across all backends.
+
+Currently each backend (x86, ARM, RISC-V) has its own parse_string_literal
+implementation with different behavior:
+- x86: Returns Vec<u8>, scans char-by-char until closing quote, supports all escape sequences
+- ARM: Returns Vec<u8>, uses s[1..s.len()-1] to strip quotes, supports all escape sequences
+- RISC-V: Returns String (NOT Vec<u8>), uses s[1..s.len()-1], missing \a \b \f \v escapes
+
+The RISC-V version has a data corruption bug: octal/hex escapes for byte values > 127
+produce multi-byte UTF-8 sequences when stored as String, then get incorrectly expanded
+when converted back via .as_bytes().
+
+Fix: Extract a shared parse_string_literal into elf.rs, make all backends use it.
+Also change RISC-V Asciz/Ascii directives from String to Vec<u8>.
