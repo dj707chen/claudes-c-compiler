@@ -708,8 +708,9 @@ pub fn link_builtin(
     // Also identify symbols that need GOT entries (referenced via GOT_HI20)
     let mut got_symbols: Vec<String> = Vec::new();
     let mut tls_got_symbols: HashSet<String> = HashSet::new();
-    // Track local GOT symbols: name -> (obj_idx, sym_idx) for symbols not in global_syms
-    let mut local_got_sym_refs: HashMap<String, (usize, usize)> = HashMap::new();
+    // Track local symbol info for GOT entries: got_key -> (obj_idx, sym_idx, addend)
+    // This is needed because local symbols aren't in global_syms
+    let mut local_got_sym_info: HashMap<String, (usize, usize, i64)> = HashMap::new();
     {
         let mut got_set: HashSet<String> = HashSet::new();
         for (obj_idx, (_, obj)) in input_objs.iter().enumerate() {
@@ -720,18 +721,12 @@ pub fn link_builtin(
                         || reloc.reloc_type == R_RISCV_TLS_GD_HI20
                     {
                         let sym = &obj.symbols[reloc.symbol_idx as usize];
-                        let name = if sym.sym_type == STT_SECTION {
-                            let sec = &obj.sections[sym.section_idx as usize];
-                            sec.name.clone()
-                        } else {
-                            sym.name.clone()
-                        };
+                        let (name, is_local) = got_sym_key(obj_idx, sym, reloc.addend);
                         if !name.is_empty() && !got_set.contains(&name) {
                             got_set.insert(name.clone());
                             got_symbols.push(name.clone());
-                            // Track local symbol references for GOT data building
-                            if sym.binding == STB_LOCAL && sym.sym_type != STT_SECTION {
-                                local_got_sym_refs.insert(name.clone(), (obj_idx, reloc.symbol_idx as usize));
+                            if is_local {
+                                local_got_sym_info.insert(name.clone(), (obj_idx, reloc.symbol_idx as usize, reloc.addend));
                             }
                         }
                         // Track TLS GOT symbols so we can fill them with TP offsets
@@ -1458,12 +1453,7 @@ pub fn link_builtin(
                         patch_s_type(data, off, hi_val as u32);
                     }
                     R_RISCV_GOT_HI20 => {
-                        // Symbol needs GOT entry
-                        let sym_name = if sym.sym_type == STT_SECTION {
-                            obj.sections[sym.section_idx as usize].name.clone()
-                        } else {
-                            sym.name.clone()
-                        };
+                        let (sym_name, _) = got_sym_key(obj_idx, sym, reloc.addend);
 
                         let got_entry_vaddr = if let Some(gs) = global_syms.get(&sym_name) {
                             if let Some(got_off) = gs.got_offset {
@@ -1716,11 +1706,7 @@ pub fn link_builtin(
                     R_RISCV_TLS_GOT_HI20 | R_RISCV_TLS_GD_HI20 => {
                         // TLS GOT reference: auipc should point to the GOT entry
                         // that holds the TP offset for this TLS symbol
-                        let sym_name = if sym.sym_type == STT_SECTION {
-                            obj.sections[sym.section_idx as usize].name.clone()
-                        } else {
-                            sym.name.clone()
-                        };
+                        let (sym_name, _) = got_sym_key(obj_idx, sym, reloc.addend);
 
                         let got_entry_vaddr = if let Some(gs) = global_syms.get(&sym_name) {
                             if let Some(got_off) = gs.got_offset {
@@ -1773,13 +1759,31 @@ pub fn link_builtin(
             } else {
                 gs.value
             }
-        } else if let Some(&(oi, si)) = local_got_sym_refs.get(name) {
-            // Local symbol (not in global_syms) - resolve via local_sym_vaddrs
-            let sym_vaddr = local_sym_vaddrs[oi][si];
-            if tls_got_symbols.contains(name) {
-                sym_vaddr.wrapping_sub(tls_vaddr)
+        } else if let Some(&(obj_idx, sym_idx, addend)) = local_got_sym_info.get(name) {
+            // Local symbol: compute value from object's symbol table and section mapping
+            let obj = &input_objs[obj_idx].1;
+            let sym = &obj.symbols[sym_idx];
+            let final_val = if sym.sym_type == STT_SECTION {
+                // Section symbol: vaddr = merged_base + sec_offset + addend
+                // sec_offset is where this object's contribution starts in merged section
+                // addend is the offset within the original section
+                if let Some(&(merged_idx, sec_offset)) = sec_mapping.get(&(obj_idx, sym.section_idx as usize)) {
+                    (section_vaddrs[merged_idx] + sec_offset) as i64 + addend
+                } else {
+                    0
+                }
             } else {
-                sym_vaddr
+                // Regular local symbol: vaddr = merged_base + sec_offset + sym.value + addend
+                if let Some(&(merged_idx, sec_offset)) = sec_mapping.get(&(obj_idx, sym.section_idx as usize)) {
+                    (section_vaddrs[merged_idx] + sec_offset + sym.value) as i64 + addend
+                } else {
+                    0
+                }
+            } as u64;
+            if tls_got_symbols.contains(name) {
+                final_val.wrapping_sub(tls_vaddr)
+            } else {
+                final_val
             }
         } else {
             0
@@ -2597,6 +2601,24 @@ fn encode_uleb128_in_place(data: &mut [u8], off: usize, value: u64) {
     }
 }
 
+/// Build a unique GOT key for a symbol referenced via GOT_HI20 or TLS_GOT_HI20.
+///
+/// Local and section symbols aren't in `global_syms`, so they need synthetic keys
+/// that incorporate the object index to avoid collisions between objects. The addend
+/// is included because different offsets within the same section need distinct GOT
+/// entries pointing to different addresses.
+///
+/// Returns (key, is_local) where is_local indicates the symbol won't be in global_syms.
+fn got_sym_key(obj_idx: usize, sym: &ObjSymbol, addend: i64) -> (String, bool) {
+    if sym.sym_type == STT_SECTION {
+        (format!("__local_sec_{}_{}_{}", obj_idx, sym.section_idx, addend), true)
+    } else if sym.binding == STB_LOCAL {
+        (format!("__local_{}_{}_{}", obj_idx, sym.name, addend), true)
+    } else {
+        (sym.name.clone(), false)
+    }
+}
+
 /// Find the hi20 value for a pcrel_lo12 relocation.
 /// The pcrel_lo12 references an auipc instruction; we need to find the hi20
 /// relocation at that auipc and compute the full offset, then return the low 12 bits.
@@ -2638,14 +2660,10 @@ fn find_hi20_value(
                     return offset & 0xFFF;
                 }
                 R_RISCV_GOT_HI20 | R_RISCV_TLS_GOT_HI20 | R_RISCV_TLS_GD_HI20 => {
-                    // For GOT references, the target is the GOT entry address, not the symbol address
+                    // For GOT references, the target is the GOT entry address
                     let hi_sym_idx = reloc.symbol_idx as usize;
                     let sym = &obj.symbols[hi_sym_idx];
-                    let sym_name = if sym.sym_type == STT_SECTION {
-                        obj.sections[sym.section_idx as usize].name.clone()
-                    } else {
-                        sym.name.clone()
-                    };
+                    let (sym_name, _) = got_sym_key(obj_idx, sym, reloc.addend);
 
                     let got_entry_vaddr = if let Some(gs) = global_syms.get(&sym_name) {
                         if let Some(got_off) = gs.got_offset {
