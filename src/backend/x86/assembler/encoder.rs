@@ -545,6 +545,21 @@ impl InstructionEncoder {
         }
     }
 
+    /// Emit segment override prefix (0x64 for %fs, 0x65 for %gs) if present.
+    /// Must be emitted before any operand-size override, REX prefix, or opcode.
+    // TODO: emit_segment_prefix is currently only called in mov (reg-mem, mem-reg) and ALU ops.
+    // Other instruction families that accept memory operands should also call this.
+    fn emit_segment_prefix(&mut self, mem: &MemoryOperand) -> Result<(), String> {
+        if let Some(ref seg) = mem.segment {
+            match seg.as_str() {
+                "fs" => self.bytes.push(0x64),
+                "gs" => self.bytes.push(0x65),
+                _ => return Err(format!("unsupported segment override: %{}", seg)),
+            }
+        }
+        Ok(())
+    }
+
     /// Emit REX prefix for a memory operand where 'reg' is the reg field.
     fn emit_rex_rm(&mut self, size: u8, reg: &str, mem: &MemoryOperand) {
         let w = size == 8;
@@ -833,13 +848,7 @@ impl InstructionEncoder {
         let dst_num = reg_num(&dst.name).ok_or_else(|| format!("bad register: {}", dst.name))?;
 
         // Handle segment prefix
-        if let Some(ref seg) = mem.segment {
-            match seg.as_str() {
-                "fs" => self.bytes.push(0x64),
-                "gs" => self.bytes.push(0x65),
-                _ => return Err(format!("unsupported segment: {}", seg)),
-            }
-        }
+        self.emit_segment_prefix(mem)?;
 
         if size == 2 {
             self.bytes.push(0x66);
@@ -856,13 +865,7 @@ impl InstructionEncoder {
     fn encode_mov_reg_mem(&mut self, src: &Register, mem: &MemoryOperand, size: u8) -> Result<(), String> {
         let src_num = reg_num(&src.name).ok_or_else(|| format!("bad register: {}", src.name))?;
 
-        if let Some(ref seg) = mem.segment {
-            match seg.as_str() {
-                "fs" => self.bytes.push(0x64),
-                "gs" => self.bytes.push(0x65),
-                _ => return Err(format!("unsupported segment: {}", seg)),
-            }
-        }
+        self.emit_segment_prefix(mem)?;
 
         if size == 2 {
             self.bytes.push(0x66);
@@ -1115,6 +1118,7 @@ impl InstructionEncoder {
             }
             (Operand::Memory(mem), Operand::Register(dst)) => {
                 let dst_num = reg_num(&dst.name).ok_or("bad dst register")?;
+                self.emit_segment_prefix(mem)?;
                 if size == 2 { self.bytes.push(0x66); }
                 self.emit_rex_rm(size, &dst.name, mem);
                 self.bytes.push(if size == 1 { 0x02 } else { 0x03 } + alu_op * 8);
@@ -1122,6 +1126,7 @@ impl InstructionEncoder {
             }
             (Operand::Register(src), Operand::Memory(mem)) => {
                 let src_num = reg_num(&src.name).ok_or("bad src register")?;
+                self.emit_segment_prefix(mem)?;
                 if size == 2 { self.bytes.push(0x66); }
                 self.emit_rex_rm(size, &src.name, mem);
                 self.bytes.push(if size == 1 { 0x00 } else { 0x01 } + alu_op * 8);
@@ -1129,6 +1134,7 @@ impl InstructionEncoder {
             }
             (Operand::Immediate(ImmediateValue::Integer(val)), Operand::Memory(mem)) => {
                 let val = *val;
+                self.emit_segment_prefix(mem)?;
                 if size == 2 { self.bytes.push(0x66); }
                 self.emit_rex_rm(size, "", mem);
 

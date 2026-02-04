@@ -133,9 +133,10 @@ pub fn link_builtin(
         load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings)?;
     }
 
-    // Parse user args
+    // Parse user args: extract -L paths, -l libs, and bare .o/.a file paths
     let mut extra_lib_paths: Vec<String> = Vec::new();
     let mut libs_to_load: Vec<String> = Vec::new();
+    let mut extra_object_files: Vec<String> = Vec::new();
     let mut i = 0;
     let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
     while i < args.len() {
@@ -154,8 +155,17 @@ pub fn link_builtin(
                     libs_to_load.push(lib.to_string());
                 }
             }
+        } else if !arg.starts_with('-') && Path::new(arg).exists() {
+            // Bare file path: .o object file, .a static archive, or other input file
+            extra_object_files.push(arg.to_string());
         }
         i += 1;
+    }
+
+    // Load extra object/archive files from user args (these come from
+    // linker_ordered_items when the driver passes pre-existing .o/.a files)
+    for path in &extra_object_files {
+        load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings)?;
     }
 
     let mut all_lib_paths: Vec<String> = extra_lib_paths;
@@ -575,7 +585,8 @@ fn create_plt_got(
                             if !plt_names.contains(&sym.name) { plt_names.push(sym.name.clone()); }
                         }
                     }
-                    R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX | R_X86_64_REX_GOTPCRELX => {
+                    R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX | R_X86_64_REX_GOTPCRELX
+                    | R_X86_64_GOTTPOFF => {
                         if !got_only_names.contains(&sym.name) && !plt_names.contains(&sym.name) {
                             got_only_names.push(sym.name.clone());
                         }
@@ -1024,7 +1035,14 @@ fn emit_executable(
         if name.is_empty() || *is_plt { continue; }
         if let Some(gsym) = globals.get(name) {
             if gsym.defined_in.is_some() && !gsym.is_dynamic {
-                w64(&mut out, go, gsym.value);
+                let sym_val = gsym.value;
+                if has_tls && (gsym.info & 0xf) == STT_TLS {
+                    // TLS GOT entry: store the TPOFF value
+                    let tpoff = (sym_val as i64 - tls_addr as i64) - tls_mem_size as i64;
+                    w64(&mut out, go, tpoff as u64);
+                } else {
+                    w64(&mut out, go, sym_val);
+                }
             }
         }
         go += 8;
@@ -1083,6 +1101,46 @@ fn emit_executable(
                     }
                     R_X86_64_32 => { w32(&mut out, fp, (s as i64 + a) as u32); }
                     R_X86_64_32S => { w32(&mut out, fp, (s as i64 + a) as u32); }
+                    R_X86_64_GOTTPOFF => {
+                        // Initial Exec TLS via GOT: GOT entry contains TPOFF value
+                        let mut resolved = false;
+                        if !sym.name.is_empty() {
+                            if let Some(g) = globals_snap.get(&sym.name) {
+                                if let Some(gi) = g.got_idx {
+                                    let entry = &got_entries[gi];
+                                    let gea = if entry.1 {
+                                        got_plt_addr + 24 + g.plt_idx.unwrap_or(0) as u64 * 8
+                                    } else {
+                                        let nb = got_entries[..gi].iter().filter(|(n,p)| !n.is_empty() && !*p).count();
+                                        got_addr + nb as u64 * 8
+                                    };
+                                    w32(&mut out, fp, (gea as i64 + a - p as i64) as u32);
+                                    resolved = true;
+                                }
+                            }
+                        }
+                        if !resolved {
+                            // IE-to-LE relaxation: convert GOT-indirect to immediate TPOFF.
+                            // Transform: movq GOT(%rip), %reg -> movq $tpoff, %reg
+                            // Encoding: 48 8b XX YY YY YY YY -> 48 c7 CX YY YY YY YY
+                            //   where XX encodes the register via ModR/M
+                            let tpoff = (s as i64 - tls_addr as i64) - tls_mem_size as i64;
+                            if fp >= 2 && fp + 4 <= out.len() && out[fp-2] == 0x8b {
+                                // Get the register from ModR/M byte
+                                let modrm = out[fp-1];
+                                let reg = (modrm >> 3) & 7;
+                                // Change mov r/m64,reg to mov $imm32,reg (opcode 0xc7, /0)
+                                out[fp-2] = 0xc7;
+                                out[fp-1] = 0xc0 | reg;
+                                w32(&mut out, fp, (tpoff + a) as u32);
+                            } else {
+                                // Can't relax non-movq pattern; write raw TPOFF displacement.
+                                // This may produce wrong code if the instruction expected a GOT-relative value.
+                                eprintln!("WARNING: GOTTPOFF IE-to-LE relaxation: unrecognized instruction pattern at offset 0x{:x} for symbol '{}', writing raw TPOFF", fp, sym.name);
+                                w32(&mut out, fp, (tpoff + a) as u32);
+                            }
+                        }
+                    }
                     R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX | R_X86_64_REX_GOTPCRELX => {
                         if !sym.name.is_empty() {
                             if let Some(g) = globals_snap.get(&sym.name) {

@@ -1,2 +1,0 @@
-Fixing json-c project to work with MY_ASM=builtin MY_LD=builtin environment variables.
-The project passes without these flags but segfaults with either MY_ASM=builtin or MY_LD=builtin on x86.

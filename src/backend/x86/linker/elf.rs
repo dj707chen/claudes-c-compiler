@@ -76,6 +76,7 @@ pub const R_X86_64_PLT32: u32 = 4;
 pub const R_X86_64_GOTPCREL: u32 = 9;
 pub const R_X86_64_32: u32 = 10;
 pub const R_X86_64_32S: u32 = 11;
+pub const R_X86_64_GOTTPOFF: u32 = 22;
 pub const R_X86_64_TPOFF32: u32 = 23;
 pub const R_X86_64_PC64: u32 = 24;
 pub const R_X86_64_GOTPCRELX: u32 = 41;
