@@ -1,0 +1,4 @@
+Fix ARM assembler symbol definition bug for musl.
+When assembling .s/.S files, .global + label results in undefined symbols
+instead of defined text symbols. This prevents musl's memcpy, memset,
+__set_thread_area from being properly linked.
