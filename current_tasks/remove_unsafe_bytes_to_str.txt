@@ -1,0 +1,6 @@
+Replace unsafe from_utf8_unchecked with safe from_utf8 in bytes_to_str.
+
+In src/frontend/preprocessor/utils.rs, the bytes_to_str function uses
+unsafe { std::str::from_utf8_unchecked() }. Benchmarking on SQLite (265k lines)
+shows no measurable performance difference vs safe std::str::from_utf8().
+Remove the unsafe block and use the safe version.
