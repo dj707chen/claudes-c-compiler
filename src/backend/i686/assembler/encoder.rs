@@ -169,12 +169,12 @@ impl InstructionEncoder {
             "notl" => self.encode_unary_rm(ops, 2, 4),
             "notw" => self.encode_unary_rm(ops, 2, 2),
             "notb" => self.encode_unary_rm(ops, 2, 1),
-            "incl" => self.encode_unary_rm(ops, 0, 4),
-            "incw" => self.encode_unary_rm(ops, 0, 2),
-            "incb" => self.encode_unary_rm(ops, 0, 1),
-            "decl" => self.encode_unary_rm(ops, 1, 4),
-            "decw" => self.encode_unary_rm(ops, 1, 2),
-            "decb" => self.encode_unary_rm(ops, 1, 1),
+            "incl" => self.encode_inc_dec(ops, 0, 4),
+            "incw" => self.encode_inc_dec(ops, 0, 2),
+            "incb" => self.encode_inc_dec(ops, 0, 1),
+            "decl" => self.encode_inc_dec(ops, 1, 4),
+            "decw" => self.encode_inc_dec(ops, 1, 2),
+            "decb" => self.encode_inc_dec(ops, 1, 1),
 
             // Shifts
             "shll" | "shlw" | "shlb" => self.encode_shift(ops, mnemonic, 4),
@@ -997,6 +997,43 @@ impl InstructionEncoder {
                 self.encode_modrm_mem(op_ext, mem)
             }
             _ => Err("unsupported unary operand".to_string()),
+        }
+    }
+
+    /// Encode inc/dec instructions.
+    /// In 32-bit mode, inc/dec have compact single-byte encodings for 32-bit registers:
+    ///   inc: 0x40+reg, dec: 0x48+reg
+    /// For memory operands or byte/word sizes, use opcode 0xFE (byte) / 0xFF (word/dword)
+    /// with modrm extension /0 (inc) or /1 (dec).
+    fn encode_inc_dec(&mut self, ops: &[Operand], op_ext: u8, size: u8) -> Result<(), String> {
+        if ops.len() != 1 {
+            return Err("inc/dec requires 1 operand".to_string());
+        }
+        match &ops[0] {
+            Operand::Register(reg) => {
+                let num = reg_num(&reg.name).ok_or("bad register")?;
+                if size == 4 {
+                    // Use compact single-byte encoding: 0x40+reg (inc) or 0x48+reg (dec)
+                    let base = if op_ext == 0 { 0x40 } else { 0x48 };
+                    self.bytes.push(base + num);
+                } else if size == 2 {
+                    // 16-bit: operand size prefix + 0x40+reg (inc) or 0x48+reg (dec)
+                    self.bytes.push(0x66);
+                    let base = if op_ext == 0 { 0x40 } else { 0x48 };
+                    self.bytes.push(base + num);
+                } else {
+                    // 8-bit: use 0xFE /0 (inc) or 0xFE /1 (dec) with modrm
+                    self.bytes.push(0xFE);
+                    self.bytes.push(self.modrm(3, op_ext, num));
+                }
+                Ok(())
+            }
+            Operand::Memory(mem) => {
+                if size == 2 { self.bytes.push(0x66); }
+                self.bytes.push(if size == 1 { 0xFE } else { 0xFF });
+                self.encode_modrm_mem(op_ext, mem)
+            }
+            _ => Err("unsupported inc/dec operand".to_string()),
         }
     }
 
