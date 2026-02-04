@@ -1,0 +1,10 @@
+Fix builtin linkers (x86, ARM, i686, RISC-V) to properly error on unresolved symbols.
+
+Currently, the builtin linkers silently accept undefined symbols that are not found
+in any linked library or object file. This causes configure scripts to incorrectly
+detect functions as available (e.g., memset_s in libsodium), leading to compile errors.
+
+The fix should report undefined symbol errors similar to GNU ld, e.g.:
+  "undefined reference to `memset_s'"
+
+This affects all 4 architecture linkers.
