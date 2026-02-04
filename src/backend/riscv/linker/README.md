@@ -22,7 +22,7 @@ RISC-V backend.
 - Full RISC-V relocation processing (30+ relocation types)
 - PLT/GOT generation for function calls into shared libraries
 - COPY relocations for data symbols imported from shared libraries
-- TLS support (Local-Exec model via TPREL relocations; PT_TLS segment)
+- TLS support (Local-Exec and Initial-Exec models; GD->LE relaxation for static binaries; PT_TLS segment)
 - GNU RELRO segment for .dynamic, .got, init/fini arrays
 - Linker-defined symbols (__global_pointer$, _start, _edata, __bss_start, ...)
 - CRT startup object discovery and automatic linking of libc/libgcc
@@ -323,6 +323,8 @@ Input sections are grouped into output sections by name prefix:
 | `.text`, `.text.*`             | `.text`          |
 | `.rodata`, `.rodata.*`         | `.rodata`        |
 | `.data`, `.data.*`, `.data.rel.ro*` | `.data`    |
+| `.tdata`, `.tdata.*`           | `.tdata`         |
+| `.tbss`, `.tbss.*`             | `.tbss`          |
 | `.bss`, `.bss.*`               | `.bss`           |
 | `.sdata`, `.sdata.*`           | `.sdata`         |
 | `.sbss`, `.sbss.*`             | `.sbss`          |
@@ -490,7 +492,7 @@ linker:
 | `R_RISCV_CALL_PLT`      | 19   | S + A - P            | AUIPC+JALR pair        |
 | `R_RISCV_GOT_HI20`      | 20   | G + A - P            | U-type (AUIPC)         |
 | `R_RISCV_TLS_GOT_HI20`  | 21   | G + A - P            | U-type (AUIPC)         |
-| `R_RISCV_TLS_GD_HI20`   | 22   | G + A - P            | U-type (AUIPC)         |
+| `R_RISCV_TLS_GD_HI20`   | 22   | G + A - P (relaxed to LE in static) | U-type (AUIPC→LUI) |
 | `R_RISCV_PCREL_HI20`    | 23   | S + A - P            | U-type (AUIPC)         |
 | `R_RISCV_PCREL_LO12_I`  | 24   | lo12(hi20_target)    | I-type                 |
 | `R_RISCV_PCREL_LO12_S`  | 25   | lo12(hi20_target)    | S-type                 |
@@ -650,14 +652,21 @@ circular dependencies between archive members naturally, at the cost of
 potentially O(N^2) scans for pathological cases. In practice, convergence
 is fast (2-3 passes for typical C programs with libc).
 
-### 4. No linker relaxation
+### 4. Limited linker relaxation
 
-The linker recognizes `R_RISCV_RELAX` relocations but does not perform any
+The linker recognizes `R_RISCV_RELAX` relocations but does not perform general
 relaxation optimizations (e.g., converting `auipc+jalr` to `jal`, or `auipc+addi`
 to `addi` when the target is within GP range). All instructions retain their
-original encoding width. This simplifies the linker significantly, as relaxation
-would require iterative section resizing and relocation re-application. The
-resulting executables are slightly larger but always correct.
+original encoding width, avoiding the complexity of iterative section resizing.
+
+The one exception is **TLS GD→LE relaxation** for static binaries. When
+`R_RISCV_TLS_GD_HI20` relocations are encountered in a static link, the General
+Dynamic TLS access sequence (`auipc`/`addi`/`call __tls_get_addr`) is rewritten
+to Local Exec (`lui %tprel_hi`/`addi %tprel_lo`/`add a0,a0,tp` + `nop`). This
+is required because `__tls_get_addr` depends on dynamic linker state that does
+not exist in static binaries. The relaxation is performed in a pre-pass that
+collects GD auipc addresses and their associated `__tls_get_addr` call sites,
+then rewrites the instructions during the main relocation application phase.
 
 ### 5. COPY relocations for data imports
 

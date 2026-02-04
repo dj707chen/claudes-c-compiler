@@ -442,6 +442,14 @@ pub fn link_builtin(
             let _ = rest;
             return Some(".bss".into());
         }
+        if let Some(rest) = name.strip_prefix(".tdata.") {
+            let _ = rest;
+            return Some(".tdata".into());
+        }
+        if let Some(rest) = name.strip_prefix(".tbss.") {
+            let _ = rest;
+            return Some(".tbss".into());
+        }
         if let Some(rest) = name.strip_prefix(".sdata.") {
             let _ = rest;
             return Some(".sdata".into());
@@ -1182,7 +1190,12 @@ pub fn link_builtin(
             section_offsets[si] = file_offset;
             let size = ms.data.len() as u64;
             vaddr += size;
-            tls_memsz += size;
+        }
+        // Compute tls_memsz as the full span including alignment padding between
+        // TLS sections (not just the sum of raw sizes). This is critical when
+        // multiple .tbss sections have alignment gaps between them.
+        if tls_vaddr != 0 {
+            tls_memsz = vaddr - tls_vaddr;
         }
     }
 
@@ -1362,6 +1375,58 @@ pub fn link_builtin(
 
     // ── Phase 6: Apply relocations ──────────────────────────────────────
 
+    // Pre-pass: collect GD TLS auipc vaddrs for GD->LE relaxation in static binaries.
+    // For each R_RISCV_TLS_GD_HI20 relocation, we record the vaddr of the auipc
+    // instruction so we can:
+    // 1. Rewrite the auipc to lui (tprel_hi)
+    // 2. Have find_hi20_value return tprel_lo instead of GOT offset
+    // 3. Rewrite the __tls_get_addr call to add+nop
+    // This relaxation is only valid for static binaries where all TLS is local.
+    let mut gd_tls_relax_info: HashMap<u64, (u64, i64)> = HashMap::new(); // auipc_vaddr -> (sym_value, addend)
+    let mut gd_tls_call_nop: HashSet<u64> = HashSet::new(); // vaddrs of __tls_get_addr calls to NOP
+
+    if is_static {
+    for (obj_idx, (_, obj)) in input_objs.iter().enumerate() {
+        for (sec_idx, relocs) in obj.relocations.iter().enumerate() {
+            if relocs.is_empty() { continue; }
+            let (merged_idx, sec_offset) = match sec_mapping.get(&(obj_idx, sec_idx)) {
+                Some(&v) => v,
+                None => continue,
+            };
+            let ms_vaddr = section_vaddrs[merged_idx];
+
+            // Find GD HI20 relocations and associated __tls_get_addr calls
+            for (ri, reloc) in relocs.iter().enumerate() {
+                if reloc.rela_type == R_RISCV_TLS_GD_HI20 {
+                    let offset = sec_offset + reloc.offset;
+                    let auipc_vaddr = ms_vaddr + offset;
+                    let sym = &obj.symbols[reloc.sym_idx as usize];
+                    let sym_val = resolve_symbol_value(
+                        sym, reloc.sym_idx as usize, obj, obj_idx,
+                        &sec_mapping, &section_vaddrs, &local_sym_vaddrs, &global_syms,
+                    );
+                    gd_tls_relax_info.insert(auipc_vaddr, (sym_val, reloc.addend));
+
+                    // Find the __tls_get_addr CALL_PLT that follows
+                    // It's typically 2-3 instructions after the auipc
+                    for j in (ri + 1)..relocs.len().min(ri + 8) {
+                        let call_reloc = &relocs[j];
+                        if call_reloc.rela_type == R_RISCV_CALL_PLT {
+                            let call_sym = &obj.symbols[call_reloc.sym_idx as usize];
+                            if call_sym.name == "__tls_get_addr" {
+                                let call_offset = sec_offset + call_reloc.offset;
+                                let call_vaddr = ms_vaddr + call_offset;
+                                gd_tls_call_nop.insert(call_vaddr);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    } // if is_static
+
     // We need to collect all relocations and apply them to the merged section data
     for (obj_idx, (obj_name, obj)) in input_objs.iter().enumerate() {
         for (sec_idx, relocs) in obj.relocations.iter().enumerate() {
@@ -1440,27 +1505,41 @@ pub fn link_builtin(
                         patch_u_type(data, off, offset_val as u32);
                     }
                     R_RISCV_PCREL_LO12_I => {
-                        // The symbol points to the AUIPC instruction
+                        // The symbol points to the AUIPC instruction (or LUI for GD->LE relaxed)
                         // We need to find the hi20 relocation that it references
                         // and compute the low 12 bits of that relocation's value
                         let auipc_addr = s as i64 + a;
 
-                        // Find the hi20 relocation at the auipc address
-                        let hi_val = find_hi20_value(
-                            obj, obj_idx, sec_idx, &sec_mapping, &section_vaddrs,
-                            &local_sym_vaddrs, &global_syms, auipc_addr as u64,
-                            sec_offset, got_vaddr, &got_symbols, got_plt_vaddr,
-                        );
-                        patch_i_type(data, off, hi_val as u32);
+                        // Check if the referenced auipc was GD->LE relaxed to a lui
+                        if let Some(&(sym_val, gd_addend)) = gd_tls_relax_info.get(&(auipc_addr as u64)) {
+                            // For GD->LE relaxed: rewrite addi to use tprel_lo
+                            let tprel = (sym_val as i64 + gd_addend - tls_vaddr as i64) as u32;
+                            patch_i_type(data, off, tprel & 0xFFF);
+                        } else {
+                            // Find the hi20 relocation at the auipc address
+                            let hi_val = find_hi20_value(
+                                obj, obj_idx, sec_idx, &sec_mapping, &section_vaddrs,
+                                &local_sym_vaddrs, &global_syms, auipc_addr as u64,
+                                sec_offset, got_vaddr, &got_symbols, got_plt_vaddr,
+                                &gd_tls_relax_info, tls_vaddr,
+                            );
+                            patch_i_type(data, off, hi_val as u32);
+                        }
                     }
                     R_RISCV_PCREL_LO12_S => {
                         let auipc_addr = s as i64 + a;
-                        let hi_val = find_hi20_value(
-                            obj, obj_idx, sec_idx, &sec_mapping, &section_vaddrs,
-                            &local_sym_vaddrs, &global_syms, auipc_addr as u64,
-                            sec_offset, got_vaddr, &got_symbols, got_plt_vaddr,
-                        );
-                        patch_s_type(data, off, hi_val as u32);
+                        if let Some(&(sym_val, gd_addend)) = gd_tls_relax_info.get(&(auipc_addr as u64)) {
+                            let tprel = (sym_val as i64 + gd_addend - tls_vaddr as i64) as u32;
+                            patch_s_type(data, off, tprel & 0xFFF);
+                        } else {
+                            let hi_val = find_hi20_value(
+                                obj, obj_idx, sec_idx, &sec_mapping, &section_vaddrs,
+                                &local_sym_vaddrs, &global_syms, auipc_addr as u64,
+                                sec_offset, got_vaddr, &got_symbols, got_plt_vaddr,
+                                &gd_tls_relax_info, tls_vaddr,
+                            );
+                            patch_s_type(data, off, hi_val as u32);
+                        }
                     }
                     R_RISCV_GOT_HI20 => {
                         let (sym_name, _) = got_sym_key(obj_idx, sym, reloc.addend);
@@ -1486,28 +1565,42 @@ pub fn link_builtin(
                         patch_u_type(data, off, offset_val as u32);
                     }
                     R_RISCV_CALL_PLT => {
-                        // AUIPC + JALR pair (8 bytes)
-                        let target = if !sym.name.is_empty() && sym.binding() != STB_LOCAL {
-                            if let Some(gs) = global_syms.get(&sym.name) {
-                                gs.value as i64
-                            } else {
-                                s as i64
+                        // Check if this is a __tls_get_addr call that should be relaxed
+                        if gd_tls_call_nop.contains(&p) {
+                            // GD->LE relaxation: replace call with add a0, a0, tp + nop
+                            if off + 8 <= data.len() {
+                                // add a0, a0, tp: opcode=0110011, funct3=000, funct7=0000000
+                                // rd=a0(10), rs1=a0(10), rs2=tp(4)
+                                let add_insn: u32 = 0x00450533; // add a0, a0, tp
+                                data[off..off + 4].copy_from_slice(&add_insn.to_le_bytes());
+                                // nop = addi x0, x0, 0
+                                let nop: u32 = 0x00000013;
+                                data[off + 4..off + 8].copy_from_slice(&nop.to_le_bytes());
                             }
                         } else {
-                            s as i64
-                        };
-                        let offset_val = target + a - p as i64;
-                        let hi = ((offset_val + 0x800) >> 12) & 0xFFFFF;
-                        let lo = offset_val & 0xFFF;
-                        // Patch AUIPC (first 4 bytes)
-                        if off + 8 <= data.len() {
-                            let auipc = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
-                            let auipc = (auipc & 0xFFF) | ((hi as u32) << 12);
-                            data[off..off + 4].copy_from_slice(&auipc.to_le_bytes());
-                            // Patch JALR (next 4 bytes)
-                            let jalr = u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap());
-                            let jalr = (jalr & 0x000FFFFF) | ((lo as u32) << 20);
-                            data[off + 4..off + 8].copy_from_slice(&jalr.to_le_bytes());
+                            // Normal AUIPC + JALR pair (8 bytes)
+                            let target = if !sym.name.is_empty() && sym.binding() != STB_LOCAL {
+                                if let Some(gs) = global_syms.get(&sym.name) {
+                                    gs.value as i64
+                                } else {
+                                    s as i64
+                                }
+                            } else {
+                                s as i64
+                            };
+                            let offset_val = target + a - p as i64;
+                            let hi = ((offset_val + 0x800) >> 12) & 0xFFFFF;
+                            let lo = offset_val & 0xFFF;
+                            // Patch AUIPC (first 4 bytes)
+                            if off + 8 <= data.len() {
+                                let auipc = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+                                let auipc = (auipc & 0xFFF) | ((hi as u32) << 12);
+                                data[off..off + 4].copy_from_slice(&auipc.to_le_bytes());
+                                // Patch JALR (next 4 bytes)
+                                let jalr = u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap());
+                                let jalr = (jalr & 0x000FFFFF) | ((lo as u32) << 20);
+                                data[off + 4..off + 8].copy_from_slice(&jalr.to_le_bytes());
+                            }
                         }
                     }
                     R_RISCV_BRANCH => {
@@ -1709,8 +1802,19 @@ pub fn link_builtin(
                             j += 1;
                         }
                     }
-                    R_RISCV_TLS_GOT_HI20 | R_RISCV_TLS_GD_HI20 => {
-                        // TLS GOT reference: auipc should point to the GOT entry
+                    R_RISCV_TLS_GD_HI20 => {
+                        // GD->LE relaxation for static linking:
+                        // Rewrite auipc a0, X -> lui a0, %tprel_hi(sym)
+                        let tprel = (s as i64 + a - tls_vaddr as i64) as u32;
+                        let hi = tprel.wrapping_add(0x800) & 0xFFFFF000;
+                        if off + 4 <= data.len() {
+                            // LUI a0, imm: opcode=0110111, rd=01010(a0)
+                            let lui_insn: u32 = 0x00000537 | hi; // lui a0, hi
+                            data[off..off + 4].copy_from_slice(&lui_insn.to_le_bytes());
+                        }
+                    }
+                    R_RISCV_TLS_GOT_HI20 => {
+                        // TLS IE GOT reference: auipc should point to the GOT entry
                         // that holds the TP offset for this TLS symbol
                         let (sym_name, _) = got_sym_key(obj_idx, sym, reloc.addend);
 
@@ -2628,7 +2732,16 @@ fn find_hi20_value(
     got_vaddr: u64,
     got_symbols: &[String],
     got_plt_vaddr: u64,
+    gd_tls_relax_info: &HashMap<u64, (u64, i64)>,
+    tls_vaddr: u64,
 ) -> i64 {
+    // Check if this references a GD->LE relaxed auipc (now a lui)
+    if let Some(&(sym_val, addend)) = gd_tls_relax_info.get(&auipc_vaddr) {
+        // For GD->LE relaxation, the addi should get tprel_lo
+        let tprel = (sym_val as i64 + addend - tls_vaddr as i64) as u32;
+        return (tprel & 0xFFF) as i64;
+    }
+
     // Find the hi20 relocation targeting the same address
     if sec_idx < obj.relocations.len() {
         let relocs = &obj.relocations[sec_idx];
@@ -2653,7 +2766,7 @@ fn find_hi20_value(
                     let offset = target - auipc_vaddr as i64;
                     return offset & 0xFFF;
                 }
-                R_RISCV_GOT_HI20 | R_RISCV_TLS_GOT_HI20 | R_RISCV_TLS_GD_HI20 => {
+                R_RISCV_GOT_HI20 | R_RISCV_TLS_GOT_HI20 => {
                     // For GOT references, the target is the GOT entry address
                     let hi_sym_idx = reloc.sym_idx as usize;
                     let sym = &obj.symbols[hi_sym_idx];
