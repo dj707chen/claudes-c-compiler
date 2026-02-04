@@ -13,8 +13,10 @@ set.  It accepts the same textual assembly that GCC's gas would consume and
 produces ABI-compatible `.o` files that any standard AArch64 ELF linker (or
 the companion built-in linker) can link.
 
-The implementation spans roughly 6,260 lines of Rust across four files and is
-organized as a clean three-stage pipeline.
+The implementation spans roughly 5,930 lines of Rust across four files and is
+organized as a clean three-stage pipeline.  Shared ELF infrastructure (section
+management, symbol tables, ELF serialization) lives in `ElfWriterBase` in
+`elf.rs`; this file only contains AArch64-specific logic.
 
 ```
                     AArch64 Built-in Assembler
@@ -32,8 +34,8 @@ organized as a clean three-stage pipeline.
        v
   +------------------+
   |   elf_writer.rs   |   Stage 2: Process + Encode + Emit
-  |   (797 lines)     |   Walks statements, calls encoder,
-  |                    |   builds sections, symbols, relocs
+  |   (413 lines)     |   AArch64-specific: branch resolution,
+  |                    |   sym diffs (uses ElfWriterBase)
   +------------------+
        |         ^
        |         |  encode_instruction()
@@ -268,34 +270,29 @@ relocatable object file.
 
 | Type | Role |
 |------|------|
-| `ElfWriter` | The central state machine -- holds all sections, symbols, labels, pending relocations. |
-| `Section` | A section being built: name, type, flags, data bytes, alignment, relocation list. |
-| `ElfReloc` | A relocation entry: offset, type, symbol name, addend. |
-| `ElfSymbol` | A symbol entry: name, value, size, binding, type, visibility, section. |
+| `ElfWriter` | AArch64-specific ELF writer; composes with `ElfWriterBase` for shared infrastructure. |
+| `ElfWriterBase` | Shared state machine from `elf.rs` -- section management, symbols, labels, directive processing, ELF serialization. |
+| `ObjSection` | A section being built: name, type, flags, data bytes, alignment, relocation list (from `elf.rs`). |
+| `ObjReloc` | A relocation entry: offset, type, symbol name, addend (from `elf.rs`). |
 | `PendingReloc` | A relocation for a local branch label (resolved after all labels are known). |
 | `PendingSymDiff` | A deferred symbol-difference expression (e.g., `.long .LBB3 - .Ljt_0`). |
-| `StringTable` | Builder for NUL-terminated ELF string tables (`.strtab`, `.shstrtab`). |
-| `SymEntry` | A finalized `Elf64_Sym` record ready for serialization. |
 
 ### ElfWriter State
 
 ```rust
 pub struct ElfWriter {
-    current_section: String,              // Active section name
-    sections: HashMap<String, Section>,   // All sections by name
-    section_order: Vec<String>,           // Insertion order (deterministic output)
-    section_stack: Vec<String>,           // Stack for .pushsection/.popsection
-    symbols: Vec<ElfSymbol>,              // Built symbol table
-    labels: HashMap<String, (String, u64)>, // label -> (section, offset)
+    pub base: ElfWriterBase,              // Shared: sections, labels, symbols, directives
     pending_branch_relocs: Vec<PendingReloc>,  // Local branches to fix up
     pending_sym_diffs: Vec<PendingSymDiff>,     // Deferred A-B expressions
-    global_symbols: HashMap<String, bool>,     // .globl declarations
-    weak_symbols: HashMap<String, bool>,       // .weak declarations
-    symbol_types: HashMap<String, u8>,         // .type declarations
-    symbol_sizes: HashMap<String, u64>,        // .size declarations
-    symbol_visibility: HashMap<String, u8>,    // .hidden/.protected/.internal
 }
 ```
+
+The `ElfWriterBase` (defined in `elf.rs`) holds all shared state: `current_section`,
+`sections`, `section_order`, `labels`, `global_symbols`, `weak_symbols`,
+`symbol_types`, `symbol_sizes`, `symbol_visibility`, and `aliases`. It also
+provides shared methods for section management, directive processing, data
+emission, and ELF serialization. This file only adds AArch64-specific branch
+resolution and symbol difference handling.
 
 ### Processing Algorithm
 
@@ -445,8 +442,8 @@ relaxation passes (unlike x86).  The only multi-word output is the
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `mod.rs` | 221 | Public API: `assemble()` entry point, module declarations |
-| `parser.rs` | 1,234 | Tokenizer and parser: text -> `Vec<AsmStatement>` |
-| `encoder.rs` | 4,012 | Instruction encoder: mnemonic + operands -> `u32` machine code |
-| `elf_writer.rs` | 797 | ELF object file writer: statements -> `.o` file on disk |
-| **Total** | **6,264** | |
+| `mod.rs` | 221 | Public API: `assemble()` entry point, numeric label resolution |
+| `parser.rs` | 1,241 | Tokenizer and parser: text -> `Vec<AsmStatement>` |
+| `encoder.rs` | 4,054 | Instruction encoder: mnemonic + operands -> `u32` machine code |
+| `elf_writer.rs` | 413 | ELF object file writer: composes with `ElfWriterBase` (from `elf.rs`), adds AArch64-specific branch resolution and symbol difference handling |
+| **Total** | **5,929** | |

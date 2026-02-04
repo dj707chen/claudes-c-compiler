@@ -89,42 +89,42 @@ and optional RV64C instruction compression.
 | `parser.rs`     | ~980  | Line tokenizer and operand parser; splits assembly text into structured `ParsedLine` records |
 | `encoder.rs`    | ~1900 | Instruction encoder; maps every mnemonic to its binary encoding, handles pseudo-instruction expansion, relocation modifier parsing |
 | `compress.rs`   | ~830  | Post-encoding RV64C compression pass; rewrites eligible 32-bit instructions to 16-bit compressed equivalents |
-| `elf_writer.rs` | ~1600 | ELF object file serializer; section/symbol management, directive handling, local branch resolution, builds headers, symbol tables, relocation sections, and writes the final `.o` bytes |
+| `elf_writer.rs` | ~835  | ELF object file serializer; composes with `ElfWriterBase` (from `elf.rs`) for shared section/symbol management, adds RISC-V-specific pcrel_hi/lo pairing, branch resolution, and RVC compression dispatch |
 
 ## Key Data Structures
 
-### `Assembler` (mod.rs)
+### `ElfWriter` (elf_writer.rs)
 
-The central state object that accumulates the results of the entire assembly
-process.
+The ELF writer composes with `ElfWriterBase` (from `elf.rs`) for shared
+infrastructure and adds RISC-V-specific logic.
 
 ```
-Assembler {
-    sections:              HashMap<String, Section>,   // ".text", ".data", ...
-    section_order:         Vec<String>,                // insertion-order tracking
-    current_section:       String,                     // currently active section
-    section_stack:         Vec<String>,                // saved sections for .pushsection/.popsection
-    labels:                HashMap<String, (String, u64)>,  // name -> (section, offset)
+ElfWriter {
+    pub base:              ElfWriterBase,               // Shared: sections, labels, symbols, directives
+    pending_branch_relocs: Vec<PendingReloc>,           // unresolved local branches
+    pcrel_hi_counter:      u32,                          // counter for synthetic .Lpcrel_hi labels
     numeric_labels:        HashMap<String, Vec<(String, u64)>>,  // "1" -> [(sec, off), ...]
-    symbols:               Vec<ElfSymbol>,              // accumulated symbol table
-    pending_branch_relocs: Vec<PendingBranchReloc>,     // unresolved local branches
-    global_names:          HashSet<String>,             // names marked .globl
-    weak_names:            HashSet<String>,              // names marked .weak
 }
 ```
 
-### `Section` (mod.rs)
+The `ElfWriterBase` (defined in `elf.rs`) holds all shared state: `current_section`,
+`sections` (as `HashMap<String, ObjSection>`), `section_order`, `labels`,
+`global_symbols`, `weak_symbols`, `symbol_types`, `symbol_sizes`,
+`symbol_visibility`, and `aliases`. It provides shared methods for section
+management, directive processing, data emission, and ELF serialization.
 
-Represents a single ELF section being built.
+### `ObjSection` (elf.rs)
+
+Represents a single ELF section being built (shared across ARM and RISC-V).
 
 ```
-Section {
+ObjSection {
+    name:           String,           // section name
     data:           Vec<u8>,          // accumulated bytes
     sh_type:        u32,              // SHT_PROGBITS, SHT_NOBITS, ...
     sh_flags:       u64,              // SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR
     sh_addralign:   u64,              // required alignment
-    sh_entsize:     u64,              // entry size for fixed-size sections
-    relocs:         Vec<ElfReloc>,    // pending relocations for this section
+    relocs:         Vec<ObjReloc>,    // pending relocations for this section
 }
 ```
 
@@ -309,7 +309,7 @@ current section's data buffer. For instructions with relocations:
 
 - **Intra-section branches** (same section, label already defined or to be
   defined): recorded as `PendingBranchReloc` entries for later resolution.
-- **External symbol references**: recorded as `ElfReloc` entries in the
+- **External symbol references**: recorded as `ObjReloc` entries in the
   section's relocation list, to be emitted as `.rela.*` sections.
 
 For multi-word expansions (e.g., `call` emitting AUIPC+JALR), the assembler
@@ -438,7 +438,7 @@ The writer performs several bookkeeping tasks:
   Section symbols are emitted for every content section. The `sh_info` field
   of `.symtab` is set to the index of the first global symbol, per ELF spec.
 
-- **Relocation entries**: Each `ElfReloc` is serialized as an `Elf64_Rela`
+- **Relocation entries**: Each `ObjReloc` is serialized as an `Elf64_Rela`
   entry (offset, r_info = symbol_index << 32 | type, addend). A companion
   `R_RISCV_RELAX` relocation is emitted alongside `PCREL_HI20`, `CALL_PLT`,
   `TPREL_*`, and `GOT_HI20` relocations to allow the linker to perform
