@@ -117,6 +117,9 @@ pub struct ElfWriter {
     symbol_visibility: HashMap<String, u8>,
     /// Counter for generating synthetic pcrel_hi labels
     pcrel_hi_counter: u32,
+    /// GNU numeric labels: e.g., "1" -> [(section, offset), ...] in definition order.
+    /// Used to resolve `1b` (backward ref) and `1f` (forward ref) references.
+    numeric_labels: HashMap<String, Vec<(String, u64)>>,
 }
 
 struct PendingReloc {
@@ -129,6 +132,157 @@ struct PendingReloc {
     /// corresponding auipc (pcrel_hi) instruction. The lo12 value is
     /// computed relative to the auipc's PC, not the pcrel_lo instruction's PC.
     pcrel_hi_offset: Option<u64>,
+}
+
+/// Check if a label name is a GNU numeric label (e.g., "1", "42").
+fn is_numeric_label(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Check if a symbol reference is a GNU numeric label reference (e.g., "1b", "1f", "42b").
+/// Returns Some((label_name, is_backward)) if it is, None otherwise.
+fn parse_numeric_label_ref(symbol: &str) -> Option<(&str, bool)> {
+    if symbol.len() < 2 {
+        return None;
+    }
+    let last_char = symbol.as_bytes()[symbol.len() - 1];
+    let is_backward = last_char == b'b' || last_char == b'B';
+    let is_forward = last_char == b'f' || last_char == b'F';
+    if !is_backward && !is_forward {
+        return None;
+    }
+    let label_part = &symbol[..symbol.len() - 1];
+    if label_part.is_empty() || !label_part.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((label_part, is_backward))
+}
+
+/// Pre-process assembly statements to resolve GNU numeric label references.
+/// Numeric labels like `1:` can be defined multiple times. References like `1b`
+/// (backward) and `1f` (forward) must resolve to the nearest matching definition.
+/// This function renames all numeric labels to unique `.Lnum_N_K` names and
+/// rewrites all `Nb`/`Nf` references in instruction operands to the resolved name.
+fn resolve_numeric_label_refs(statements: &[AsmStatement]) -> Vec<AsmStatement> {
+    use super::parser::Operand;
+
+    // First pass: collect all numeric label definition positions (by statement index).
+    // Map: label_name -> [(stmt_index, instance_id), ...]
+    let mut label_defs: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    let mut instance_counter: HashMap<String, usize> = HashMap::new();
+
+    for (i, stmt) in statements.iter().enumerate() {
+        if let AsmStatement::Label(name) = stmt {
+            if is_numeric_label(name) {
+                let instance = instance_counter.entry(name.clone()).or_insert(0);
+                label_defs.entry(name.clone()).or_default().push((i, *instance));
+                *instance += 1;
+            }
+        }
+    }
+
+    // If no numeric labels exist, return a clone of the original statements
+    if label_defs.is_empty() {
+        return statements.to_vec();
+    }
+
+    // Second pass: rewrite labels and references
+    let mut result = Vec::with_capacity(statements.len());
+
+    for (i, stmt) in statements.iter().enumerate() {
+        match stmt {
+            AsmStatement::Label(name) if is_numeric_label(name) => {
+                // Find this definition's instance id
+                if let Some(defs) = label_defs.get(name) {
+                    for &(def_idx, inst_id) in defs {
+                        if def_idx == i {
+                            let new_name = format!(".Lnum_{}_{}", name, inst_id);
+                            result.push(AsmStatement::Label(new_name));
+                            break;
+                        }
+                    }
+                } else {
+                    result.push(stmt.clone());
+                }
+            }
+            AsmStatement::Instruction { mnemonic, operands, raw_operands } => {
+                let new_operands: Vec<Operand> = operands.iter().map(|op| {
+                    rewrite_numeric_ref_in_operand(op, i, &label_defs)
+                }).collect();
+                result.push(AsmStatement::Instruction {
+                    mnemonic: mnemonic.clone(),
+                    operands: new_operands,
+                    raw_operands: raw_operands.clone(),
+                });
+            }
+            _ => result.push(stmt.clone()),
+        }
+    }
+
+    result
+}
+
+/// Rewrite a numeric label reference in an operand to a synthetic label name.
+fn rewrite_numeric_ref_in_operand(
+    op: &super::parser::Operand,
+    stmt_idx: usize,
+    label_defs: &HashMap<String, Vec<(usize, usize)>>,
+) -> super::parser::Operand {
+    use super::parser::Operand;
+
+    match op {
+        Operand::Symbol(s) => {
+            if let Some(new_name) = resolve_numeric_ref_name(s, stmt_idx, label_defs) {
+                Operand::Symbol(new_name)
+            } else {
+                op.clone()
+            }
+        }
+        Operand::Label(s) => {
+            if let Some(new_name) = resolve_numeric_ref_name(s, stmt_idx, label_defs) {
+                Operand::Label(new_name)
+            } else {
+                op.clone()
+            }
+        }
+        Operand::SymbolOffset(s, off) => {
+            if let Some(new_name) = resolve_numeric_ref_name(s, stmt_idx, label_defs) {
+                Operand::SymbolOffset(new_name, *off)
+            } else {
+                op.clone()
+            }
+        }
+        _ => op.clone(),
+    }
+}
+
+/// Resolve a numeric label reference like "1b" or "2f" to a synthetic label name.
+fn resolve_numeric_ref_name(
+    symbol: &str,
+    stmt_idx: usize,
+    label_defs: &HashMap<String, Vec<(usize, usize)>>,
+) -> Option<String> {
+    let (label_name, is_backward) = parse_numeric_label_ref(symbol)?;
+    let defs = label_defs.get(label_name)?;
+
+    if is_backward {
+        // Find the last definition at or before stmt_idx
+        let mut best: Option<usize> = None;
+        for &(def_idx, inst_id) in defs {
+            if def_idx < stmt_idx {
+                best = Some(inst_id);
+            }
+        }
+        best.map(|inst_id| format!(".Lnum_{}_{}", label_name, inst_id))
+    } else {
+        // Find the first definition after stmt_idx
+        for &(def_idx, inst_id) in defs {
+            if def_idx > stmt_idx {
+                return Some(format!(".Lnum_{}_{}", label_name, inst_id));
+            }
+        }
+        None
+    }
 }
 
 impl ElfWriter {
@@ -146,6 +300,7 @@ impl ElfWriter {
             symbol_sizes: HashMap::new(),
             symbol_visibility: HashMap::new(),
             pcrel_hi_counter: 0,
+            numeric_labels: HashMap::new(),
         }
     }
 
@@ -299,7 +454,10 @@ impl ElfWriter {
 
     /// Process all parsed assembly statements.
     pub fn process_statements(&mut self, statements: &[AsmStatement]) -> Result<(), String> {
-        for stmt in statements {
+        // Pre-process: resolve GNU numeric label references (e.g., "1b", "2f") by
+        // renaming numeric labels to unique synthetic names like ".Lnum_1_0".
+        let statements = resolve_numeric_label_refs(statements);
+        for stmt in &statements {
             self.process_statement(stmt)?;
         }
         self.compress_executable_sections();
@@ -319,7 +477,16 @@ impl ElfWriter {
                 }
                 let section = self.current_section.clone();
                 let offset = self.current_offset();
-                self.labels.insert(name.clone(), (section, offset));
+                self.labels.insert(name.clone(), (section.clone(), offset));
+                // Track GNU numeric labels (e.g., "1:", "2:") for Nb/Nf resolution.
+                // Numeric labels can be defined multiple times; each definition is
+                // appended so that forward/backward refs can find the correct one.
+                if is_numeric_label(name) {
+                    self.numeric_labels
+                        .entry(name.clone())
+                        .or_default()
+                        .push((section, offset));
+                }
                 Ok(())
             }
 
@@ -649,7 +816,8 @@ impl ElfWriter {
                     self.labels.insert(label, (section, offset));
                 }
 
-                let is_local = reloc.symbol.starts_with(".L") || reloc.symbol.starts_with(".l");
+                let is_local = reloc.symbol.starts_with(".L") || reloc.symbol.starts_with(".l")
+                            || parse_numeric_label_ref(&reloc.symbol).is_some();
 
                 if is_local {
                     let offset = self.current_offset();
@@ -720,7 +888,8 @@ impl ElfWriter {
                         }
 
                         // Non-pcrel relocation, handle normally
-                        let is_local = reloc.symbol.starts_with(".L") || reloc.symbol.starts_with(".l");
+                        let is_local = reloc.symbol.starts_with(".L") || reloc.symbol.starts_with(".l")
+                            || parse_numeric_label_ref(&reloc.symbol).is_some();
                         if is_local {
                             let offset = self.current_offset();
                             self.pending_branch_relocs.push(PendingReloc {
@@ -816,6 +985,15 @@ impl ElfWriter {
                 }
             }
 
+            // Update numeric labels pointing into this section
+            for (_, defs) in self.numeric_labels.iter_mut() {
+                for (def_sec, def_offset) in defs.iter_mut() {
+                    if def_sec == sec_name {
+                        *def_offset = compress::remap_offset(*def_offset, &offset_map);
+                    }
+                }
+            }
+
             // Update symbol values pointing into this section
             for sym in &mut self.symbols {
                 if sym.section_name == *sec_name {
@@ -825,11 +1003,49 @@ impl ElfWriter {
         }
     }
 
+    /// Resolve a numeric label reference like "1b" or "1f" to a (section, offset).
+    /// For `Nb` (backward), find the most recent definition of label N at or before `ref_offset`.
+    /// For `Nf` (forward), find the first definition of label N after `ref_offset`.
+    fn resolve_numeric_label_ref(
+        &self,
+        label_name: &str,
+        is_backward: bool,
+        ref_section: &str,
+        ref_offset: u64,
+    ) -> Option<(String, u64)> {
+        let defs = self.numeric_labels.get(label_name)?;
+        if is_backward {
+            // Find the last definition at or before ref_offset in the same section
+            let mut best: Option<&(String, u64)> = None;
+            for def in defs {
+                if def.0 == ref_section && def.1 <= ref_offset {
+                    best = Some(def);
+                }
+            }
+            best.cloned()
+        } else {
+            // Find the first definition after ref_offset in the same section
+            for def in defs {
+                if def.0 == ref_section && def.1 > ref_offset {
+                    return Some(def.clone());
+                }
+            }
+            None
+        }
+    }
+
     /// Resolve local branch labels to PC-relative offsets.
     fn resolve_local_branches(&mut self) -> Result<(), String> {
         for reloc in &self.pending_branch_relocs {
-            let (target_section, target_offset) = match self.labels.get(&reloc.symbol) {
-                Some(v) => v.clone(),
+            // Try resolving as a numeric label reference (e.g., "1b", "1f")
+            let resolved = if let Some((label_name, is_backward)) = parse_numeric_label_ref(&reloc.symbol) {
+                self.resolve_numeric_label_ref(label_name, is_backward, &reloc.section, reloc.offset)
+            } else {
+                self.labels.get(&reloc.symbol).cloned()
+            };
+
+            let (target_section, target_offset) = match resolved {
+                Some(v) => v,
                 None => {
                     // Undefined local label - leave as external relocation
                     if let Some(section) = self.sections.get_mut(&reloc.section) {

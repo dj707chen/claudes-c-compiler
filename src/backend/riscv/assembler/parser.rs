@@ -161,7 +161,11 @@ fn parse_instruction(line: &str) -> Result<AsmStatement, String> {
     };
 
     let mnemonic = mnemonic.to_lowercase();
-    let operands = parse_operands(operands_str)?;
+    // Only classify FenceArg operands when the instruction is actually "fence".
+    // Otherwise, single-letter variable names like "i", "o", "r", "w" would be
+    // misclassified as fence arguments (e.g., "lla t0, i" for a global named "i").
+    let is_fence = mnemonic == "fence";
+    let operands = parse_operands(operands_str, is_fence)?;
 
     Ok(AsmStatement::Instruction {
         mnemonic,
@@ -171,7 +175,8 @@ fn parse_instruction(line: &str) -> Result<AsmStatement, String> {
 }
 
 /// Parse an operand list separated by commas.
-fn parse_operands(s: &str) -> Result<Vec<Operand>, String> {
+/// `is_fence`: when true, single-char subsets of "iorw" are parsed as FenceArg.
+fn parse_operands(s: &str, is_fence: bool) -> Result<Vec<Operand>, String> {
     if s.is_empty() {
         return Ok(Vec::new());
     }
@@ -191,7 +196,7 @@ fn parse_operands(s: &str) -> Result<Vec<Operand>, String> {
                 current.push(')');
             }
             ',' if paren_depth == 0 => {
-                let op = parse_single_operand(current.trim())?;
+                let op = parse_single_operand(current.trim(), is_fence)?;
                 operands.push(op);
                 current.clear();
             }
@@ -204,14 +209,16 @@ fn parse_operands(s: &str) -> Result<Vec<Operand>, String> {
     // Last operand
     let trimmed = current.trim().to_string();
     if !trimmed.is_empty() {
-        let op = parse_single_operand(&trimmed)?;
+        let op = parse_single_operand(&trimmed, is_fence)?;
         operands.push(op);
     }
 
     Ok(operands)
 }
 
-fn parse_single_operand(s: &str) -> Result<Operand, String> {
+/// Parse a single operand.
+/// `is_fence`: when true, classify subsets of "iorw" as FenceArg.
+fn parse_single_operand(s: &str, is_fence: bool) -> Result<Operand, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("empty operand".to_string());
@@ -234,7 +241,9 @@ fn parse_single_operand(s: &str) -> Result<Operand, String> {
     }
 
     // Fence operands: iorw, ior, iow, etc.
-    if is_fence_arg(s) {
+    // Only classify as FenceArg when we're actually parsing a "fence" instruction,
+    // to avoid misclassifying single-letter symbol names like "i", "o", "r", "w".
+    if is_fence && is_fence_arg(s) {
         return Ok(Operand::FenceArg(s.to_string()));
     }
 
