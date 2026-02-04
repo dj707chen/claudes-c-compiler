@@ -92,3 +92,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | rc      | PASS | TODO | TODO | TODO | Passes x86 |
 | s7      | PASS | TODO | TODO | TODO | Passes x86 |
 | wolfssl | PASS | TODO | TODO | TODO | Passes x86 |
+| darkhttpd | PASS | PASS | PASS | PASS | Fixed i686: set_permissions on /dev/null was hard-erroring (now ignores errors like other backends) |

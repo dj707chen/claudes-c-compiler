@@ -2979,13 +2979,11 @@ pub fn link_builtin(
     std::fs::write(output_path, &output)
         .map_err(|e| format!("failed to write output: {}", e))?;
 
-    // Make executable
+    // Make executable (ignore errors for special files like /dev/null)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(output_path, perms)
-            .map_err(|e| format!("failed to set permissions: {}", e))?;
+        let _ = std::fs::set_permissions(output_path, std::fs::Permissions::from_mode(0o755));
     }
 
     Ok(())
