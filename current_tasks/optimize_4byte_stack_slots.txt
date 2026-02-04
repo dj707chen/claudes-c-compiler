@@ -1,0 +1,10 @@
+Optimize stack frame size: use 4-byte slots for small types on 64-bit targets
+
+Currently all SSA values use 8-byte stack slots on 64-bit targets, even for
+I8/U8/I16/U16/I32/U32/F32 types. The small_slot_values infrastructure already
+tracks which values could use 4-byte slots, but slot allocation still uses 8.
+
+Plan:
+1. Change slot_size to 4 when is_small is true in classify_value
+2. Update x86, ARM, RISC-V backend store/load paths to use 4-byte ops for small slots
+3. Expected ~40% reduction in stack frame sizes for typical C code
