@@ -643,10 +643,30 @@ pub fn compress_section(
     let mut offset_map = Vec::new(); // (old_offset, new_offset)
 
     let mut pos = 0;
-    while pos + 4 <= data.len() {
+    while pos < data.len() {
         let old_offset = pos as u64;
         let new_offset = new_data.len() as u64;
         offset_map.push((old_offset, new_offset));
+
+        // Check if this is already a compressed (2-byte) instruction.
+        // In RISC-V, bits [1:0] != 0b11 indicates a 16-bit instruction.
+        if pos + 2 <= data.len() {
+            let low_byte = data[pos];
+            if (low_byte & 0x03) != 0x03 {
+                // Already a 2-byte compressed instruction — pass through as-is
+                new_data.extend_from_slice(&data[pos..pos + 2]);
+                pos += 2;
+                continue;
+            }
+        }
+
+        // Need 4 bytes for a full-width instruction
+        if pos + 4 > data.len() {
+            // Trailing bytes — copy them directly
+            new_data.extend_from_slice(&data[pos..]);
+            pos = data.len();
+            break;
+        }
 
         // Don't compress instructions that have relocations
         if reloc_offsets.contains(&old_offset) {

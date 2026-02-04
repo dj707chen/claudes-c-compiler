@@ -158,8 +158,38 @@ pub enum AsmStatement {
     Empty,
 }
 
+/// Strip C-style /* ... */ comments from assembly text, handling multi-line spans.
+/// Preserves newlines inside comments so line numbers remain correct for error messages.
+fn strip_c_comments(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() {
+                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    i += 2;
+                    break;
+                }
+                if bytes[i] == b'\n' {
+                    result.push('\n');
+                }
+                i += 1;
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
 /// Parse assembly text into a list of statements.
 pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
+    // Pre-process: strip C-style /* ... */ comments
+    let text = strip_c_comments(text);
+
     let mut statements = Vec::new();
     for (line_num, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -170,7 +200,7 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
             continue;
         }
 
-        // Strip comments (// style and /* */ style for single-line)
+        // Strip comments (// style)
         let line = strip_comment(line);
         let line = line.trim();
         if line.is_empty() {

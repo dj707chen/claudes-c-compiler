@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use super::parser::{AsmStatement, Operand, Directive, DataValue, SymbolType, Visibility, SizeExpr};
-use super::encoder::{encode_instruction, EncodeResult, RelocType};
+use super::encoder::{encode_instruction, encode_insn_directive, EncodeResult, RelocType};
 use super::compress;
 use crate::backend::elf::{self,
     SHT_PROGBITS, SHT_NOBITS, SHT_NOTE,
@@ -301,6 +301,10 @@ impl ElfWriter {
         if let Some(section) = self.sections.get_mut(&self.current_section) {
             section.data.extend_from_slice(bytes);
         }
+    }
+
+    fn emit_u16_le(&mut self, val: u16) {
+        self.emit_bytes(&val.to_le_bytes());
     }
 
     fn emit_u32_le(&mut self, val: u32) {
@@ -608,6 +612,26 @@ impl ElfWriter {
 
             Directive::Cfi | Directive::Ignored => Ok(()),
 
+            Directive::Insn(args) => {
+                // .insn directive: emit a raw instruction encoding
+                if self.current_section.is_empty() {
+                    self.ensure_section(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 2);
+                    self.current_section = ".text".to_string();
+                }
+                match encode_insn_directive(args) {
+                    Ok(EncodeResult::Word(word)) => {
+                        self.emit_u32_le(word);
+                        Ok(())
+                    }
+                    Ok(EncodeResult::Half(half)) => {
+                        self.emit_u16_le(half);
+                        Ok(())
+                    }
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(e),
+                }
+            }
+
             Directive::Unknown { name, args } => {
                 Err(format!("unsupported RISC-V assembler directive: {} {}", name, args))
             }
@@ -666,6 +690,10 @@ impl ElfWriter {
         match encode_instruction(mnemonic, operands, raw_operands) {
             Ok(EncodeResult::Word(word)) => {
                 self.emit_u32_le(word);
+                Ok(())
+            }
+            Ok(EncodeResult::Half(half)) => {
+                self.emit_u16_le(half);
                 Ok(())
             }
             Ok(EncodeResult::WordWithReloc { word, reloc }) => {

@@ -15,6 +15,8 @@ use super::parser::Operand;
 pub enum EncodeResult {
     /// Successfully encoded as a 4-byte instruction word
     Word(u32),
+    /// Successfully encoded as a 2-byte compressed instruction
+    Half(u16),
     /// Two 4-byte instruction words (e.g., pseudo-instructions like `call`, `li` with large imm)
     Words(Vec<u32>),
     /// Instruction needs a relocation to be applied later
@@ -440,27 +442,81 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
         "srai" => encode_shift_imm(operands, 0b101, 0b010000),
 
         // Register-register arithmetic (R-type)
-        "add" => encode_alu_reg(operands, 0b000, 0b0000000),
+        // Auto-convert to immediate variants when 3rd operand is an immediate
+        "add" => if operands.len() >= 3 && matches!(operands[2], Operand::Imm(_)) {
+            encode_alu_imm(operands, 0b000) // -> addi
+        } else {
+            encode_alu_reg(operands, 0b000, 0b0000000)
+        },
         "sub" => encode_alu_reg(operands, 0b000, 0b0100000),
-        "sll" => encode_alu_reg(operands, 0b001, 0b0000000),
-        "slt" => encode_alu_reg(operands, 0b010, 0b0000000),
-        "sltu" => encode_alu_reg(operands, 0b011, 0b0000000),
-        "xor" => encode_alu_reg(operands, 0b100, 0b0000000),
-        "srl" => encode_alu_reg(operands, 0b101, 0b0000000),
-        "sra" => encode_alu_reg(operands, 0b101, 0b0100000),
-        "or" => encode_alu_reg(operands, 0b110, 0b0000000),
-        "and" => encode_alu_reg(operands, 0b111, 0b0000000),
+        "sll" => if operands.len() >= 3 && matches!(operands[2], Operand::Imm(_)) {
+            encode_shift_imm(operands, 0b001, 0b000000)
+        } else {
+            encode_alu_reg(operands, 0b001, 0b0000000)
+        },
+        "slt" => if operands.len() >= 3 && matches!(operands[2], Operand::Imm(_)) {
+            encode_alu_imm(operands, 0b010) // -> slti
+        } else {
+            encode_alu_reg(operands, 0b010, 0b0000000)
+        },
+        "sltu" => if operands.len() >= 3 && matches!(operands[2], Operand::Imm(_)) {
+            encode_alu_imm(operands, 0b011) // -> sltiu
+        } else {
+            encode_alu_reg(operands, 0b011, 0b0000000)
+        },
+        "xor" => if operands.len() >= 3 && matches!(operands[2], Operand::Imm(_)) {
+            encode_alu_imm(operands, 0b100) // -> xori
+        } else {
+            encode_alu_reg(operands, 0b100, 0b0000000)
+        },
+        "srl" => if operands.len() >= 3 && matches!(operands[2], Operand::Imm(_)) {
+            encode_shift_imm(operands, 0b101, 0b000000)
+        } else {
+            encode_alu_reg(operands, 0b101, 0b0000000)
+        },
+        "sra" => if operands.len() >= 3 && matches!(operands[2], Operand::Imm(_)) {
+            encode_shift_imm(operands, 0b101, 0b010000)
+        } else {
+            encode_alu_reg(operands, 0b101, 0b0100000)
+        },
+        "or" => if operands.len() >= 3 && matches!(operands[2], Operand::Imm(_)) {
+            encode_alu_imm(operands, 0b110) // -> ori
+        } else {
+            encode_alu_reg(operands, 0b110, 0b0000000)
+        },
+        "and" => if operands.len() >= 3 && matches!(operands[2], Operand::Imm(_)) {
+            encode_alu_imm(operands, 0b111) // -> andi
+        } else {
+            encode_alu_reg(operands, 0b111, 0b0000000)
+        },
 
         // RV64I word (32-bit) operations
         "addiw" => encode_alu_imm_w(operands, 0b000),
         "slliw" => encode_shift_imm_w(operands, 0b001, 0b0000000),
         "srliw" => encode_shift_imm_w(operands, 0b101, 0b0000000),
         "sraiw" => encode_shift_imm_w(operands, 0b101, 0b0100000),
-        "addw" => encode_alu_reg_w(operands, 0b000, 0b0000000),
+        "addw" => if operands.len() >= 3 && matches!(operands[2], Operand::Imm(_)) {
+            encode_alu_imm_w(operands, 0b000) // -> addiw
+        } else {
+            encode_alu_reg_w(operands, 0b000, 0b0000000)
+        },
         "subw" => encode_alu_reg_w(operands, 0b000, 0b0100000),
-        "sllw" => encode_alu_reg_w(operands, 0b001, 0b0000000),
-        "srlw" => encode_alu_reg_w(operands, 0b101, 0b0000000),
-        "sraw" => encode_alu_reg_w(operands, 0b101, 0b0100000),
+        // sllw/srlw/sraw: auto-convert to slliw/srliw/sraiw when 3rd operand is immediate
+        "sllw" => if operands.len() >= 3 && matches!(operands[2], Operand::Imm(_)) {
+            encode_shift_imm_w(operands, 0b001, 0b0000000)
+        } else {
+            encode_alu_reg_w(operands, 0b001, 0b0000000)
+        },
+        "srlw" => if operands.len() >= 3 && matches!(operands[2], Operand::Imm(_)) {
+            encode_shift_imm_w(operands, 0b101, 0b0000000)
+        } else {
+            encode_alu_reg_w(operands, 0b101, 0b0000000)
+        },
+        "sraw" => if operands.len() >= 3 && matches!(operands[2], Operand::Imm(_)) {
+            encode_shift_imm_w(operands, 0b101, 0b0100000)
+        } else {
+            encode_alu_reg_w(operands, 0b101, 0b0100000)
+        },
 
         // ── M Extension (multiply/divide) ──
         "mul" => encode_alu_reg(operands, 0b000, 0b0000001),
@@ -647,6 +703,67 @@ pub fn encode_instruction(mnemonic: &str, operands: &[Operand], raw_operands: &s
 
         // `jump` pseudo-instruction (our codegen emits this)
         "jump" => encode_jump(operands),
+
+        // F/D CSR pseudo-instructions
+        // frcsr rd -> csrrs rd, fcsr, x0
+        "frcsr" => {
+            let rd = get_reg(operands, 0)?;
+            Ok(EncodeResult::Word(encode_i(OP_SYSTEM, rd, 0b010, 0, 0x003)))
+        },
+        // fscsr rs -> csrrw x0, fcsr, rs   (or fscsr rd, rs -> csrrw rd, fcsr, rs)
+        "fscsr" => {
+            if operands.len() >= 2 {
+                let rd = get_reg(operands, 0)?;
+                let rs1 = get_reg(operands, 1)?;
+                Ok(EncodeResult::Word(encode_i(OP_SYSTEM, rd, 0b001, rs1, 0x003)))
+            } else {
+                let rs1 = get_reg(operands, 0)?;
+                Ok(EncodeResult::Word(encode_i(OP_SYSTEM, 0, 0b001, rs1, 0x003)))
+            }
+        },
+        // frrm rd -> csrrs rd, frm, x0
+        "frrm" => {
+            let rd = get_reg(operands, 0)?;
+            Ok(EncodeResult::Word(encode_i(OP_SYSTEM, rd, 0b010, 0, 0x002)))
+        },
+        // fsrm rs -> csrrw x0, frm, rs   (or fsrm rd, rs -> csrrw rd, frm, rs)
+        "fsrm" => {
+            if operands.len() >= 2 {
+                let rd = get_reg(operands, 0)?;
+                let rs1 = get_reg(operands, 1)?;
+                Ok(EncodeResult::Word(encode_i(OP_SYSTEM, rd, 0b001, rs1, 0x002)))
+            } else {
+                let rs1 = get_reg(operands, 0)?;
+                Ok(EncodeResult::Word(encode_i(OP_SYSTEM, 0, 0b001, rs1, 0x002)))
+            }
+        },
+        // frflags rd -> csrrs rd, fflags, x0
+        "frflags" => {
+            let rd = get_reg(operands, 0)?;
+            Ok(EncodeResult::Word(encode_i(OP_SYSTEM, rd, 0b010, 0, 0x001)))
+        },
+        // fsflags rs -> csrrw x0, fflags, rs
+        "fsflags" => {
+            if operands.len() >= 2 {
+                let rd = get_reg(operands, 0)?;
+                let rs1 = get_reg(operands, 1)?;
+                Ok(EncodeResult::Word(encode_i(OP_SYSTEM, rd, 0b001, rs1, 0x001)))
+            } else {
+                let rs1 = get_reg(operands, 0)?;
+                Ok(EncodeResult::Word(encode_i(OP_SYSTEM, 0, 0b001, rs1, 0x001)))
+            }
+        },
+
+        // Explicit compressed instructions
+        "c.nop" => Ok(EncodeResult::Half(0x0001)),
+        "c.ebreak" => Ok(EncodeResult::Half(0x9002)),
+        "c.lui" => encode_c_lui(operands),
+        "c.li" => encode_c_li(operands),
+        "c.addi" => encode_c_addi(operands),
+        "c.mv" => encode_c_mv(operands),
+        "c.add" => encode_c_add(operands),
+        "c.jr" => encode_c_jr(operands),
+        "c.jalr" => encode_c_jalr(operands),
 
         _ => {
             Err(format!("unsupported instruction: {} {}", mnemonic, raw_operands))
@@ -1917,4 +2034,199 @@ fn parse_reloc_modifier(s: &str) -> (RelocType, String) {
         // Plain symbol - use as PC-relative
         (RelocType::PcrelHi20, s.to_string())
     }
+}
+
+// ── Explicit compressed instruction encoders ──
+
+// c.lui rd, nzimm
+fn encode_c_lui(operands: &[Operand]) -> Result<EncodeResult, String> {
+    let rd = get_reg(operands, 0)?;
+    if rd == 0 || rd == 2 { return Err("c.lui: rd cannot be x0 or x2".into()); }
+    let imm = get_imm(operands, 1)?;
+    let nzimm = imm as i32;
+    if nzimm == 0 { return Err("c.lui: nzimm must not be zero".into()); }
+    let bit17 = ((nzimm >> 5) & 1) as u16;
+    let bits16_12 = (nzimm & 0x1F) as u16;
+    Ok(EncodeResult::Half(0b01 | ((bits16_12 & 0x1F) << 2) | ((rd as u16) << 7) | (bit17 << 12) | (0b011 << 13)))
+}
+
+// c.li rd, imm
+fn encode_c_li(operands: &[Operand]) -> Result<EncodeResult, String> {
+    let rd = get_reg(operands, 0)?;
+    let imm = get_imm(operands, 1)? as i32;
+    let bit5 = ((imm >> 5) & 1) as u16;
+    let bits4_0 = (imm & 0x1F) as u16;
+    Ok(EncodeResult::Half(0b01 | (bits4_0 << 2) | ((rd as u16) << 7) | (bit5 << 12) | (0b010 << 13)))
+}
+
+// c.addi rd, nzimm
+fn encode_c_addi(operands: &[Operand]) -> Result<EncodeResult, String> {
+    let rd = get_reg(operands, 0)?;
+    let imm = get_imm(operands, 1)? as i32;
+    let bit5 = ((imm >> 5) & 1) as u16;
+    let bits4_0 = (imm & 0x1F) as u16;
+    Ok(EncodeResult::Half(0b01 | (bits4_0 << 2) | ((rd as u16) << 7) | (bit5 << 12) | (0b000 << 13)))
+}
+
+// c.mv rd, rs2
+fn encode_c_mv(operands: &[Operand]) -> Result<EncodeResult, String> {
+    let rd = get_reg(operands, 0)?;
+    let rs2 = get_reg(operands, 1)?;
+    Ok(EncodeResult::Half(0b10 | ((rs2 as u16) << 2) | ((rd as u16) << 7) | (0b100 << 13)))
+}
+
+// c.add rd, rs2
+fn encode_c_add(operands: &[Operand]) -> Result<EncodeResult, String> {
+    let rd = get_reg(operands, 0)?;
+    let rs2 = get_reg(operands, 1)?;
+    Ok(EncodeResult::Half(0b10 | ((rs2 as u16) << 2) | ((rd as u16) << 7) | (1 << 12) | (0b100 << 13)))
+}
+
+// c.jr rs1
+fn encode_c_jr(operands: &[Operand]) -> Result<EncodeResult, String> {
+    let rs1 = get_reg(operands, 0)?;
+    Ok(EncodeResult::Half(0b10 | ((rs1 as u16) << 7) | (0b100 << 13)))
+}
+
+// c.jalr rs1
+fn encode_c_jalr(operands: &[Operand]) -> Result<EncodeResult, String> {
+    let rs1 = get_reg(operands, 0)?;
+    Ok(EncodeResult::Half(0b10 | ((rs1 as u16) << 7) | (1 << 12) | (0b100 << 13)))
+}
+
+// ── .insn directive encoder ──
+
+/// Encode an .insn directive that allows arbitrary instruction encoding
+pub fn encode_insn_directive(args: &str) -> Result<EncodeResult, String> {
+    let args = args.trim();
+
+    // Parse the format: .insn <format> <opcode>, <funct3>, <rd>, <rs1>, <imm>
+    // or .insn <format> <opcode>, <funct3>, <funct7>, <rd>, <rs1>, <rs2>
+    let parts: Vec<&str> = args.splitn(2, |c: char| c.is_whitespace() || c == ',').collect();
+    if parts.is_empty() {
+        return Err("empty .insn directive".into());
+    }
+
+    let format = parts[0].trim().to_lowercase();
+
+    // Get remaining args after the format keyword
+    let rest = if parts.len() > 1 { parts[1].trim_start_matches(',').trim() } else { "" };
+    let fields: Vec<&str> = rest.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+
+    match format.as_str() {
+        "r" => encode_insn_r(&fields),
+        "i" => encode_insn_i(&fields),
+        "s" => encode_insn_s(&fields),
+        "b" | "sb" => encode_insn_b(&fields),
+        "u" => encode_insn_u(&fields),
+        "j" | "uj" => encode_insn_j(&fields),
+        // Raw 32-bit word: .insn 0x12345678
+        _ => {
+            // Try parsing as a raw 32-bit value
+            if let Ok(word) = parse_insn_int(parts[0]) {
+                Ok(EncodeResult::Word(word as u32))
+            } else {
+                Err(format!("unsupported .insn format: {}", format))
+            }
+        }
+    }
+}
+
+fn parse_insn_int(s: &str) -> Result<i64, String> {
+    let s = s.trim();
+    if s.starts_with("0x") || s.starts_with("0X") {
+        i64::from_str_radix(&s[2..], 16).map_err(|e| format!("invalid hex in .insn: {}: {}", s, e))
+    } else if s.starts_with("0b") || s.starts_with("0B") {
+        i64::from_str_radix(&s[2..], 2).map_err(|e| format!("invalid bin in .insn: {}: {}", s, e))
+    } else {
+        s.parse::<i64>().map_err(|e| format!("invalid int in .insn: {}: {}", s, e))
+    }
+}
+
+fn parse_insn_reg(s: &str) -> Result<u32, String> {
+    let s = s.trim();
+    reg_num(s).ok_or_else(|| format!("invalid register in .insn: {}", s))
+}
+
+fn encode_insn_r(fields: &[&str]) -> Result<EncodeResult, String> {
+    // .insn r opcode, funct3, funct7, rd, rs1, rs2
+    if fields.len() < 6 {
+        return Err(format!(".insn r requires 6 fields (opcode, funct3, funct7, rd, rs1, rs2), got {}", fields.len()));
+    }
+    let opcode = parse_insn_int(fields[0])? as u32;
+    let funct3 = parse_insn_int(fields[1])? as u32;
+    let funct7 = parse_insn_int(fields[2])? as u32;
+    let rd = parse_insn_reg(fields[3])?;
+    let rs1 = parse_insn_reg(fields[4])?;
+    let rs2 = parse_insn_reg(fields[5])?;
+    Ok(EncodeResult::Word(encode_r(opcode, rd, funct3, rs1, rs2, funct7)))
+}
+
+fn encode_insn_i(fields: &[&str]) -> Result<EncodeResult, String> {
+    // .insn i opcode, funct3, rd, rs1, imm
+    if fields.len() < 5 {
+        return Err(format!(".insn i requires 5 fields (opcode, funct3, rd, rs1, imm), got {}", fields.len()));
+    }
+    let opcode = parse_insn_int(fields[0])? as u32;
+    let funct3 = parse_insn_int(fields[1])? as u32;
+    let rd = parse_insn_reg(fields[2])?;
+    let rs1 = parse_insn_reg(fields[3])?;
+    let imm = parse_insn_int(fields[4])? as i32;
+    Ok(EncodeResult::Word(encode_i(opcode, rd, funct3, rs1, imm)))
+}
+
+fn encode_insn_s(fields: &[&str]) -> Result<EncodeResult, String> {
+    // .insn s opcode, funct3, rs2, imm(rs1)
+    if fields.len() < 4 {
+        return Err(format!(".insn s requires 4 fields, got {}", fields.len()));
+    }
+    let opcode = parse_insn_int(fields[0])? as u32;
+    let funct3 = parse_insn_int(fields[1])? as u32;
+    let rs2 = parse_insn_reg(fields[2])?;
+    // Parse imm(rs1)
+    let last = fields[3].trim();
+    if let Some(paren_pos) = last.find('(') {
+        let imm_str = &last[..paren_pos];
+        let rs1_str = last[paren_pos+1..].trim_end_matches(')');
+        let imm = parse_insn_int(imm_str)? as i32;
+        let rs1 = parse_insn_reg(rs1_str)?;
+        Ok(EncodeResult::Word(encode_s(opcode, funct3, rs1, rs2, imm)))
+    } else {
+        Err(".insn s: expected imm(rs1) format for last field".into())
+    }
+}
+
+fn encode_insn_b(fields: &[&str]) -> Result<EncodeResult, String> {
+    // .insn b/sb opcode, funct3, rs1, rs2, offset
+    if fields.len() < 5 {
+        return Err(format!(".insn b requires 5 fields, got {}", fields.len()));
+    }
+    let opcode = parse_insn_int(fields[0])? as u32;
+    let funct3 = parse_insn_int(fields[1])? as u32;
+    let rs1 = parse_insn_reg(fields[2])?;
+    let rs2 = parse_insn_reg(fields[3])?;
+    let imm = parse_insn_int(fields[4])? as i32;
+    Ok(EncodeResult::Word(encode_b(opcode, funct3, rs1, rs2, imm)))
+}
+
+fn encode_insn_u(fields: &[&str]) -> Result<EncodeResult, String> {
+    // .insn u opcode, rd, imm
+    if fields.len() < 3 {
+        return Err(format!(".insn u requires 3 fields, got {}", fields.len()));
+    }
+    let opcode = parse_insn_int(fields[0])? as u32;
+    let rd = parse_insn_reg(fields[1])?;
+    let imm = parse_insn_int(fields[2])? as u32;
+    Ok(EncodeResult::Word(encode_u(opcode, rd, imm)))
+}
+
+fn encode_insn_j(fields: &[&str]) -> Result<EncodeResult, String> {
+    // .insn j/uj opcode, rd, imm
+    if fields.len() < 3 {
+        return Err(format!(".insn j requires 3 fields, got {}", fields.len()));
+    }
+    let opcode = parse_insn_int(fields[0])? as u32;
+    let rd = parse_insn_reg(fields[1])?;
+    let imm = parse_insn_int(fields[2])? as i32;
+    Ok(EncodeResult::Word(encode_j(opcode, rd, imm)))
 }
