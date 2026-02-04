@@ -66,7 +66,7 @@ pub fn link_builtin(
     let is_static = user_args.iter().any(|a| a == "-static");
 
     // Phase 1: Parse arguments and collect file lists
-    let (extra_libs, extra_lib_files, extra_lib_paths, extra_objects) = parse_user_args(user_args);
+    let (extra_libs, extra_lib_files, extra_lib_paths, extra_objects, defsym_defs) = parse_user_args(user_args);
 
     let all_lib_dirs: Vec<String> = extra_lib_paths.into_iter()
         .chain(lib_paths.iter().map(|s| s.to_string()))
@@ -90,7 +90,7 @@ pub fn link_builtin(
         all_objs.push(lib_path.clone());
     }
 
-    let (inputs, _archive_pool) = load_and_parse_objects(&all_objs)?;
+    let (inputs, _archive_pool) = load_and_parse_objects(&all_objs, &defsym_defs)?;
 
     // Phase 5: Merge sections
     let (mut output_sections, section_name_to_idx, section_map) = merge_sections(&inputs);
@@ -102,6 +102,14 @@ pub fn link_builtin(
 
     // Phase 7: Mark PLT/GOT needs and check undefined
     mark_plt_got_needs(&inputs, &mut global_symbols, is_static);
+
+    // Apply --defsym definitions: alias one symbol to another
+    for (alias, target) in &defsym_defs {
+        if let Some(target_sym) = global_symbols.get(target).cloned() {
+            global_symbols.insert(alias.clone(), target_sym);
+        }
+    }
+
     check_undefined_symbols(&global_symbols)?;
 
     // Phase 8: Build PLT/GOT structures
@@ -125,11 +133,12 @@ pub fn link_builtin(
 // Phase 1: Argument parsing
 // ══════════════════════════════════════════════════════════════════════════════
 
-fn parse_user_args(user_args: &[String]) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+fn parse_user_args(user_args: &[String]) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>, Vec<(String, String)>) {
     let mut extra_libs = Vec::new();
     let mut extra_lib_files = Vec::new();
     let mut extra_lib_paths = Vec::new();
     let mut extra_objects = Vec::new();
+    let mut defsym_defs: Vec<(String, String)> = Vec::new();
 
     for arg in user_args {
         if arg == "-nostdlib" || arg == "-shared" || arg == "-static" || arg == "-r" {
@@ -154,6 +163,12 @@ fn parse_user_args(user_args: &[String]) -> (Vec<String>, Vec<String>, Vec<Strin
                     }
                 } else if let Some(rest) = part.strip_prefix("-L") {
                     extra_lib_paths.push(rest.to_string());
+                } else if let Some(defsym_arg) = part.strip_prefix("--defsym=") {
+                    // --defsym=SYMBOL=EXPR: define a symbol alias
+                    // TODO: only supports symbol-to-symbol aliasing, not arbitrary expressions
+                    if let Some(eq_pos) = defsym_arg.find('=') {
+                        defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
+                    }
                 }
             }
         } else if !arg.starts_with('-') && Path::new(arg.as_str()).exists() {
@@ -161,7 +176,7 @@ fn parse_user_args(user_args: &[String]) -> (Vec<String>, Vec<String>, Vec<Strin
         }
     }
 
-    (extra_libs, extra_lib_files, extra_lib_paths, extra_objects)
+    (extra_libs, extra_lib_files, extra_lib_paths, extra_objects, defsym_defs)
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -351,7 +366,7 @@ fn insert_dynsym(
 // Phase 4: Parse objects with demand-driven archive extraction
 // ══════════════════════════════════════════════════════════════════════════════
 
-fn load_and_parse_objects(all_objects: &[String]) -> Result<(Vec<InputObject>, Vec<InputObject>), String> {
+fn load_and_parse_objects(all_objects: &[String], defsym_defs: &[(String, String)]) -> Result<(Vec<InputObject>, Vec<InputObject>), String> {
     let mut inputs: Vec<InputObject> = Vec::new();
     let mut archive_pool: Vec<InputObject> = Vec::new();
 
@@ -380,13 +395,13 @@ fn load_and_parse_objects(all_objects: &[String]) -> Result<(Vec<InputObject>, V
     }
 
     // Demand-driven archive member extraction
-    resolve_archive_members(&mut inputs, &mut archive_pool);
+    resolve_archive_members(&mut inputs, &mut archive_pool, defsym_defs);
 
     Ok((inputs, archive_pool))
 }
 
 /// Pull in archive members that satisfy undefined symbols, iterating until stable.
-fn resolve_archive_members(inputs: &mut Vec<InputObject>, archive_pool: &mut Vec<InputObject>) {
+fn resolve_archive_members(inputs: &mut Vec<InputObject>, archive_pool: &mut Vec<InputObject>, defsym_defs: &[(String, String)]) {
     let mut defined: HashSet<String> = HashSet::new();
     let mut undefined: HashSet<String> = HashSet::new();
 
@@ -403,6 +418,14 @@ fn resolve_archive_members(inputs: &mut Vec<InputObject>, archive_pool: &mut Vec
         }
     }
     undefined.retain(|s| !defined.contains(s));
+
+    // For --defsym aliases (e.g. fmod=__ieee754_fmod), if the alias is
+    // undefined we also need the target symbol to be pulled from archives.
+    for (alias, target) in defsym_defs {
+        if undefined.contains(alias) && !defined.contains(target) {
+            undefined.insert(target.clone());
+        }
+    }
 
     let mut changed = true;
     while changed {

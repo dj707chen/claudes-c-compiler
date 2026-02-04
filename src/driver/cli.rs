@@ -286,10 +286,26 @@ impl Driver {
 
                 // Linker pass-through: -Wl,flag1,flag2,...
                 arg if arg.starts_with("-Wl,") => {
-                    for flag in arg[4..].split(',') {
-                        if !flag.is_empty() {
-                            self.linker_ordered_items.push(format!("-Wl,{}", flag));
+                    let parts: Vec<&str> = arg[4..].split(',').collect();
+                    let mut j = 0;
+                    while j < parts.len() {
+                        let flag = parts[j];
+                        if flag.is_empty() {
+                            j += 1;
+                            continue;
                         }
+                        // --defsym takes the next comma-separated arg: --defsym,SYM=VAL
+                        if flag == "--defsym" {
+                            if j + 1 < parts.len() {
+                                self.linker_ordered_items.push(
+                                    format!("-Wl,--defsym={}", parts[j + 1])
+                                );
+                                j += 2;
+                                continue;
+                            }
+                        }
+                        self.linker_ordered_items.push(format!("-Wl,{}", flag));
+                        j += 1;
                     }
                 }
 

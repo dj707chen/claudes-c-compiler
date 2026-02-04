@@ -112,6 +112,7 @@ pub fn link_builtin(
     // Then load objects, archives and libraries from user_args in order.
     // user_args may contain .o files, .a files, -l flags, and -Wl, flags.
     let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
+    let mut defsym_defs: Vec<(String, String)> = Vec::new();
     let mut arg_i = 0;
     while arg_i < args.len() {
         let arg = args[arg_i];
@@ -125,6 +126,12 @@ pub fn link_builtin(
                 if let Some(lib) = part.strip_prefix("-l") {
                     if let Some(lib_path) = resolve_lib(lib, &all_lib_paths) {
                         load_file(&lib_path, &mut objects, &mut globals, &all_lib_paths)?;
+                    }
+                } else if let Some(defsym_arg) = part.strip_prefix("--defsym=") {
+                    // --defsym=SYMBOL=EXPR: define a symbol alias
+                    // TODO: only supports symbol-to-symbol aliasing, not arbitrary expressions
+                    if let Some(eq_pos) = defsym_arg.find('=') {
+                        defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
                     }
                 }
             }
@@ -181,6 +188,13 @@ pub fn link_builtin(
             if gsym.defined_in.is_some() {
                 eprintln!("  global: {} val=0x{:x} sec={} obj={:?}", name, gsym.value, gsym.section_idx, gsym.defined_in);
             }
+        }
+    }
+
+    // Apply --defsym definitions: alias one symbol to another
+    for (alias, target) in &defsym_defs {
+        if let Some(target_sym) = globals.get(target).cloned() {
+            globals.insert(alias.clone(), target_sym);
         }
     }
 

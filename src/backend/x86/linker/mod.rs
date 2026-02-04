@@ -120,6 +120,7 @@ pub fn link_builtin(
     let mut export_dynamic = false;
     let mut rpath_entries: Vec<String> = Vec::new();
     let mut use_runpath = false;
+    let mut defsym_defs: Vec<(String, String)> = Vec::new();
     let mut i = 0;
     let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
     while i < args.len() {
@@ -152,6 +153,12 @@ pub fn link_builtin(
                     extra_lib_paths.push(lpath.to_string());
                 } else if let Some(lib) = part.strip_prefix("-l") {
                     libs_to_load.push(lib.to_string());
+                } else if let Some(defsym_arg) = part.strip_prefix("--defsym=") {
+                    // --defsym=SYMBOL=EXPR: define a symbol alias
+                    // TODO: only supports symbol-to-symbol aliasing, not arbitrary expressions
+                    if let Some(eq_pos) = defsym_arg.find('=') {
+                        defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
+                    }
                 }
                 j += 1;
             }
@@ -210,6 +217,13 @@ pub fn link_builtin(
 
     // Resolve remaining undefined symbols
     resolve_dynamic_symbols(&mut globals, &mut needed_sonames)?;
+
+    // Apply --defsym definitions: alias one symbol to another
+    for (alias, target) in &defsym_defs {
+        if let Some(target_sym) = globals.get(target).cloned() {
+            globals.insert(alias.clone(), target_sym);
+        }
+    }
 
     // Check for truly undefined (non-weak, non-dynamic, non-linker-defined) symbols
     {

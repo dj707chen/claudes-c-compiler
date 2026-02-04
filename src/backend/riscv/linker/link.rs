@@ -170,6 +170,7 @@ pub fn link_builtin(
     // Also parse user_args for any additional -l flags or -Wl,-l flags.
     let lib_search_paths: Vec<String> = lib_paths.iter().map(|s| s.to_string()).collect();
     let mut needed_libs: Vec<String> = needed_libs.iter().map(|s| s.to_string()).collect();
+    let mut defsym_defs: Vec<(String, String)> = Vec::new();
     {
         let mut i = 0;
         let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
@@ -187,6 +188,12 @@ pub fn link_builtin(
                 for part in wl.split(',') {
                     if let Some(lib) = part.strip_prefix("-l") {
                         needed_libs.push(lib.to_string());
+                    } else if let Some(defsym_arg) = part.strip_prefix("--defsym=") {
+                        // --defsym=SYMBOL=EXPR: define a symbol alias
+                        // TODO: only supports symbol-to-symbol aliasing, not arbitrary expressions
+                        if let Some(eq_pos) = defsym_arg.find('=') {
+                            defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
+                        }
                     }
                 }
             }
@@ -755,6 +762,13 @@ pub fn link_builtin(
                     plt_symbols.push(name.clone());
                 }
             }
+        }
+    }
+
+    // Apply --defsym definitions: alias one symbol to another
+    for (alias, target) in &defsym_defs {
+        if let Some(target_sym) = global_syms.get(target).cloned() {
+            global_syms.insert(alias.clone(), target_sym);
         }
     }
 
