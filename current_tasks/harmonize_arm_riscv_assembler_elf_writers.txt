@@ -1,0 +1,12 @@
+Harmonize ARM and RISC-V assembler ELF writers for consistency.
+
+Changes:
+- Fix ARM .align dead branch (|| true)
+- Add .rodata shortcut, .local, .set/.equ, .half alias to ARM
+- Consolidate .dword with .quad in ARM (like RISC-V)
+- Add .space fill byte support to ARM
+- Consolidate .string with .asciz in ARM
+- Extract default_section_flags(), section_index(), is_symbol_ref(),
+  parse_symbol_addend() helpers in ARM (matching RISC-V)
+- Fix ARM parse_string_literal octal/hex escape parsing (matches RISC-V)
+- Fix ARM parse_section_directive to auto-detect @nobits for .bss/.tbss
