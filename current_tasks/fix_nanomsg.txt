@@ -1,4 +1,0 @@
-Fixing nanomsg: builtin linker causes segfaults on x86_64.
-nanomsg passes with GCC asm/ld, passes with builtin asm + GCC ld,
-but segfaults with builtin ld (with or without builtin asm).
-Need to debug and fix the x86 builtin linker.

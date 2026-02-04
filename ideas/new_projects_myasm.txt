@@ -32,3 +32,8 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | mongoose | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | freetype | PASS | PASS | PASS | PASS | All architectures pass out of the box |
 | nuklear | PASS | FAIL (i686) | PASS | PASS | x86/arm/riscv pass |
+| inih    | PASS | PASS | PASS | PASS | All architectures pass out of the box |
+| sds     | PASS | TODO | TODO | TODO | Passes x86 |
+| klib    | PASS | TODO | TODO | TODO | Passes x86 |
+| oniguruma | PASS | TODO | TODO | TODO | Passes x86 |
+| stb_image | PASS | TODO | TODO | TODO | Passes x86 |
