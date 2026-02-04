@@ -195,6 +195,14 @@ impl ElfWriter {
         }
     }
 
+    // NOTE: R_RISCV_RELAX relocations are intentionally not emitted.
+    // Our assembler resolves local branches by patching immediates directly
+    // (in resolve_local_branches). If R_RISCV_RELAX were emitted, the linker
+    // could perform relaxation (e.g., shortening auipc+jalr to jal), which
+    // changes code layout and invalidates our locally-resolved branch offsets.
+    // To properly support RELAX, we would need to keep all references as
+    // relocations and let the linker resolve everything.
+
     /// Try to handle a symbol difference expression like "A - B" or "A - B + C".
     /// For .word/.long (size=4), emits R_RISCV_ADD32 + R_RISCV_SUB32 relocation pairs.
     /// For .quad/.dword (size=8), emits R_RISCV_ADD64 + R_RISCV_SUB64 relocation pairs.
@@ -306,7 +314,7 @@ impl ElfWriter {
             AsmStatement::Label(name) => {
                 // Ensure we have a section
                 if self.current_section.is_empty() {
-                    self.ensure_section(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 4);
+                    self.ensure_section(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 2);
                     self.current_section = ".text".to_string();
                 }
                 let section = self.current_section.clone();
@@ -328,7 +336,7 @@ impl ElfWriter {
     fn process_directive(&mut self, name: &str, args: &str) -> Result<(), String> {
         match name {
             ".section" => {
-                let (sec_name, flags, sec_type) = parse_section_directive(args);
+                let (sec_name, flags, sec_type, flags_explicit) = parse_section_directive(args);
                 let sh_type = match sec_type.as_str() {
                     "@nobits" => SHT_NOBITS,
                     "@note" => SHT_NOTE,
@@ -343,19 +351,22 @@ impl ElfWriter {
                 if flags.contains('T') { sh_flags |= SHF_TLS; }
                 if flags.contains('G') { sh_flags |= SHF_GROUP; }
 
-                // Set default flags based on section name
-                if sh_flags == 0 {
+                // Only use default flags if no flags were explicitly provided.
+                // An explicit empty flags string (e.g., "") means no flags (0).
+                if sh_flags == 0 && !flags_explicit {
                     sh_flags = default_section_flags(&sec_name);
                 }
 
-                let align = if sec_name == ".text" { 4 } else { 1 };
+                // Use alignment 2 for text sections (RV64C compressed instructions
+                // are 2-byte aligned), 1 for everything else unless specified.
+                let align = if sh_flags & SHF_EXECINSTR != 0 { 2 } else { 1 };
                 self.ensure_section(&sec_name, sh_type, sh_flags, align);
                 self.current_section = sec_name;
                 Ok(())
             }
 
             ".text" => {
-                self.ensure_section(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 4);
+                self.ensure_section(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 2);
                 self.current_section = ".text".to_string();
                 Ok(())
             }
@@ -615,7 +626,7 @@ impl ElfWriter {
     fn process_instruction(&mut self, mnemonic: &str, operands: &[Operand], raw_operands: &str) -> Result<(), String> {
         // Make sure we're in a text section
         if self.current_section.is_empty() {
-            self.ensure_section(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 4);
+            self.ensure_section(".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 2);
             self.current_section = ".text".to_string();
         }
 
@@ -1299,6 +1310,9 @@ impl ElfWriter {
         let mut referenced: HashMap<String, bool> = HashMap::new();
         for sec in self.sections.values() {
             for reloc in &sec.relocs {
+                if reloc.symbol_name.is_empty() {
+                    continue; // Skip relocations with no symbol (shouldn't happen normally)
+                }
                 if !reloc.symbol_name.starts_with(".L") && !reloc.symbol_name.starts_with(".l") {
                     referenced.insert(reloc.symbol_name.clone(), true);
                 }
@@ -1436,6 +1450,8 @@ fn default_section_flags(name: &str) -> u64 {
         SHF_ALLOC | SHF_WRITE
     } else if name == ".rodata" || name.starts_with(".rodata.") {
         SHF_ALLOC
+    } else if name == ".note.GNU-stack" {
+        0 // Non-executable stack marker, no flags
     } else if name.starts_with(".note") {
         SHF_ALLOC
     } else if name.starts_with(".tdata") {
@@ -1449,10 +1465,14 @@ fn default_section_flags(name: &str) -> u64 {
     }
 }
 
-fn parse_section_directive(args: &str) -> (String, String, String) {
+/// Returns (section_name, flags_string, section_type, flags_were_explicit).
+/// `flags_were_explicit` is true when the directive included a flags field (even if empty),
+/// e.g., `.section .note.GNU-stack,"",@progbits` has explicit empty flags.
+fn parse_section_directive(args: &str) -> (String, String, String, bool) {
     let parts: Vec<&str> = args.split(',').collect();
     let name = parts[0].trim().to_string();
-    let flags = if parts.len() > 1 {
+    let flags_explicit = parts.len() > 1;
+    let flags = if flags_explicit {
         parts[1].trim().trim_matches('"').to_string()
     } else {
         String::new()
@@ -1467,7 +1487,7 @@ fn parse_section_directive(args: &str) -> (String, String, String) {
             "@progbits".to_string()
         }
     };
-    (name, flags, sec_type)
+    (name, flags, sec_type, flags_explicit)
 }
 
 fn parse_data_value(s: &str) -> Result<i64, String> {
