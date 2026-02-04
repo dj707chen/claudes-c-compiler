@@ -1,0 +1,1 @@
+Testing and fixing cJSON project to work with builtin assembler and linker across all architectures.
