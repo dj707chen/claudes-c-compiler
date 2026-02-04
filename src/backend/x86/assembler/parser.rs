@@ -399,7 +399,7 @@ fn parse_line_items(line: &str) -> Result<Vec<AsmItem>, String> {
     // Parse the remaining content as a directive or instruction
     if rest.starts_with('.') {
         items.push(parse_directive(rest)?);
-    } else if rest.starts_with("lock ") || rest.starts_with("rep ") || rest.starts_with("repz ") || rest.starts_with("repnz ") || rest.starts_with("notrack ") {
+    } else if rest.starts_with("lock ") || rest.starts_with("rep ") || rest.starts_with("repz ") || rest.starts_with("repe ") || rest.starts_with("repnz ") || rest.starts_with("repne ") || rest.starts_with("notrack ") {
         items.push(parse_prefixed_instruction(rest)?);
     } else {
         items.push(parse_instruction(rest, None)?);
