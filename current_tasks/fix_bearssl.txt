@@ -1,0 +1,3 @@
+Working on adding bearssl project to passing tests.
+Fix: build script needs -DBR_GCC=0 to disable GCC vector type intrinsics.
+All 4 architectures pass with builtin asm/ld.
