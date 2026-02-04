@@ -628,21 +628,20 @@ impl InstructionEncoder {
             }
         }
 
-        // Handle symbol displacements that need relocations
-        let (disp_val, has_symbol) = match &mem.displacement {
-            Displacement::None => (0i64, false),
-            Displacement::Integer(v) => (*v, false),
+        // Handle symbol displacements that need relocations.
+        // We defer emitting the relocation until after the ModR/M and SIB bytes
+        // so the relocation offset correctly points to the displacement bytes.
+        let (disp_val, has_symbol, deferred_reloc) = match &mem.displacement {
+            Displacement::None => (0i64, false, None),
+            Displacement::Integer(v) => (*v, false, None),
             Displacement::Symbol(sym) => {
-                self.add_relocation(sym, R_X86_64_32S, 0);
-                (0i64, true)
+                (0i64, true, Some((sym.clone(), R_X86_64_32S, 0i64)))
             }
             Displacement::SymbolAddend(sym, addend) => {
-                self.add_relocation(sym, R_X86_64_32S, *addend);
-                (0i64, true)
+                (0i64, true, Some((sym.clone(), R_X86_64_32S, *addend)))
             }
             Displacement::SymbolPlusOffset(sym, offset) => {
-                self.add_relocation(sym, R_X86_64_32S, *offset);
-                (0i64, true)
+                (0i64, true, Some((sym.clone(), R_X86_64_32S, *offset)))
             }
             Displacement::SymbolMod(sym, modifier) => {
                 let reloc_type = match modifier.as_str() {
@@ -650,8 +649,7 @@ impl InstructionEncoder {
                     "GOTPCREL" => R_X86_64_GOTPCREL,
                     _ => R_X86_64_32S,
                 };
-                self.add_relocation(sym, reloc_type, 0);
-                (0i64, true)
+                (0i64, true, Some((sym.clone(), reloc_type, 0i64)))
             }
         };
 
@@ -660,6 +658,9 @@ impl InstructionEncoder {
             // Direct memory reference - mod=00, rm=100 (SIB), SIB: base=101 (no base)
             self.bytes.push(self.modrm(0, reg_field, 4));
             self.bytes.push(self.sib(1, 4, 5)); // index=100 (none), base=101 (disp32)
+            if let Some((sym, reloc_type, addend)) = deferred_reloc {
+                self.add_relocation(&sym, reloc_type, addend);
+            }
             self.bytes.extend_from_slice(&(disp_val as i32).to_le_bytes());
             return Ok(());
         }
@@ -693,10 +694,16 @@ impl InstructionEncoder {
                 // No base - disp32 with SIB
                 self.bytes.push(self.modrm(0, reg_field, 4));
                 self.bytes.push(self.sib(scale, idx_num, 5));
+                if let Some((sym, reloc_type, addend)) = deferred_reloc {
+                    self.add_relocation(&sym, reloc_type, addend);
+                }
                 self.bytes.extend_from_slice(&(disp_val as i32).to_le_bytes());
             } else {
                 self.bytes.push(self.modrm(mod_bits, reg_field, 4));
                 self.bytes.push(self.sib(scale, idx_num, base_num));
+                if let Some((sym, reloc_type, addend)) = deferred_reloc {
+                    self.add_relocation(&sym, reloc_type, addend);
+                }
                 match disp_size {
                     0 => {}
                     1 => self.bytes.push(disp_val as u8),
@@ -706,6 +713,9 @@ impl InstructionEncoder {
             }
         } else {
             self.bytes.push(self.modrm(mod_bits, reg_field, base_num));
+            if let Some((sym, reloc_type, addend)) = deferred_reloc {
+                self.add_relocation(&sym, reloc_type, addend);
+            }
             match disp_size {
                 0 => {}
                 1 => self.bytes.push(disp_val as u8),
