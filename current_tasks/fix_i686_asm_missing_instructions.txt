@@ -1,0 +1,10 @@
+Fix i686 native assembler missing instruction encodings
+
+The i686 assembler (MY_ASM=builtin) fails on ~51 tests that pass with GCC assembler.
+Main issues:
+1. cvttss2si/cvtsd2si without 'l' suffix not recognized (10 tests)
+2. addl with SymbolMod immediates (NTPOFF, etc.) not handled (7 tests)
+3. Missing instructions: fsqrt, fnstsw, f2xm1, cpuid, lock prefix,
+   pslldq, punpcklbw, paddd, paddw, psubusb, movnti, bt reg->mem,
+   movq for MMX, syscall
+4. shrl with implicit %cl register (3 tests)
