@@ -66,6 +66,9 @@ const R_RISCV_TPREL_HI20: u32 = 29;
 const R_RISCV_TPREL_LO12_I: u32 = 30;
 const R_RISCV_TPREL_LO12_S: u32 = 31;
 const R_RISCV_TPREL_ADD: u32 = 32;
+const R_RISCV_ALIGN: u32 = 43;
+const R_RISCV_RVC_BRANCH: u32 = 44;
+const R_RISCV_RVC_JUMP: u32 = 45;
 const R_RISCV_ADD8: u32 = 33;
 const R_RISCV_ADD16: u32 = 34;
 const R_RISCV_ADD32: u32 = 35;
@@ -81,6 +84,8 @@ const R_RISCV_SET8: u32 = 54;
 const R_RISCV_SET16: u32 = 55;
 const R_RISCV_SET32: u32 = 56;
 const R_RISCV_32_PCREL: u32 = 57;
+const R_RISCV_SET_ULEB128: u32 = 60;
+const R_RISCV_SUB_ULEB128: u32 = 61;
 
 const PAGE_SIZE: u64 = 0x1000;
 const BASE_ADDR: u64 = 0x10000;
@@ -1540,6 +1545,54 @@ pub fn link_to_executable(
                         let offset_val = target - p as i64;
                         patch_j_type(data, off, offset_val as u32);
                     }
+                    R_RISCV_RVC_BRANCH => {
+                        // Compressed branch: CB-type, 8-bit offset (bits [8|4:3|7:6|2:1|5])
+                        let target = s as i64 + a;
+                        let offset_val = (target - p as i64) as u32;
+                        if off + 2 <= data.len() {
+                            let insn = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
+                            // CB-type encoding: imm[8|4:3] in bits [12|11:10], imm[7:6|2:1|5] in bits [6:5|4:3|2]
+                            let bit8 = (offset_val >> 8) & 1;
+                            let bits4_3 = (offset_val >> 3) & 0x3;
+                            let bits7_6 = (offset_val >> 6) & 0x3;
+                            let bits2_1 = (offset_val >> 1) & 0x3;
+                            let bit5 = (offset_val >> 5) & 1;
+                            let insn = (insn & 0xE383)
+                                | ((bit8 as u16) << 12)
+                                | ((bits4_3 as u16) << 10)
+                                | ((bits7_6 as u16) << 5)
+                                | ((bits2_1 as u16) << 3)
+                                | ((bit5 as u16) << 2);
+                            data[off..off + 2].copy_from_slice(&insn.to_le_bytes());
+                        }
+                    }
+                    R_RISCV_RVC_JUMP => {
+                        // Compressed jump: CJ-type, 11-bit offset
+                        let target = s as i64 + a;
+                        let offset_val = (target - p as i64) as u32;
+                        if off + 2 <= data.len() {
+                            let insn = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
+                            // CJ-type encoding: imm[11|4|9:8|10|6|7|3:1|5] in bits [12:2]
+                            let bit11 = (offset_val >> 11) & 1;
+                            let bit4 = (offset_val >> 4) & 1;
+                            let bits9_8 = (offset_val >> 8) & 0x3;
+                            let bit10 = (offset_val >> 10) & 1;
+                            let bit6 = (offset_val >> 6) & 1;
+                            let bit7 = (offset_val >> 7) & 1;
+                            let bits3_1 = (offset_val >> 1) & 0x7;
+                            let bit5 = (offset_val >> 5) & 1;
+                            let encoded = ((bit11) << 10)
+                                | ((bit4) << 9)
+                                | ((bits9_8) << 7)
+                                | ((bit10) << 6)
+                                | ((bit6) << 5)
+                                | ((bit7) << 4)
+                                | ((bits3_1) << 1)
+                                | (bit5);
+                            let insn = (insn & 0xE003) | ((encoded as u16) << 2);
+                            data[off..off + 2].copy_from_slice(&insn.to_le_bytes());
+                        }
+                    }
                     R_RISCV_HI20 => {
                         let val = (s as i64 + a) as u32;
                         let hi = (val.wrapping_add(0x800)) & 0xFFFFF000;
@@ -1578,8 +1631,8 @@ pub fn link_to_executable(
                         let val = (s as i64 + a - tls_vaddr as i64) as u32;
                         patch_s_type(data, off, val & 0xFFF);
                     }
-                    R_RISCV_TPREL_ADD => {
-                        // Hint for linker relaxation - no patching needed
+                    R_RISCV_TPREL_ADD | R_RISCV_ALIGN => {
+                        // Hints for linker relaxation - no patching needed
                     }
                     R_RISCV_ADD8 => {
                         if off < data.len() {
@@ -1666,6 +1719,55 @@ pub fn link_to_executable(
                         if off + 4 <= data.len() {
                             let val = ((s as i64 + a) - p as i64) as u32;
                             data[off..off + 4].copy_from_slice(&val.to_le_bytes());
+                        }
+                    }
+                    R_RISCV_SET_ULEB128 => {
+                        // Set a ULEB128 encoded value
+                        let val = (s as i64 + a) as u64;
+                        let mut v = val;
+                        let mut i = off;
+                        loop {
+                            if i >= data.len() { break; }
+                            let byte = (v & 0x7F) as u8;
+                            v >>= 7;
+                            if v != 0 {
+                                data[i] = byte | 0x80;
+                            } else {
+                                data[i] = byte;
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                    R_RISCV_SUB_ULEB128 => {
+                        // Subtract from a ULEB128 encoded value
+                        // First decode current ULEB128
+                        let mut cur: u64 = 0;
+                        let mut shift = 0;
+                        let mut i = off;
+                        loop {
+                            if i >= data.len() { break; }
+                            let byte = data[i];
+                            cur |= ((byte & 0x7F) as u64) << shift;
+                            if byte & 0x80 == 0 { break; }
+                            shift += 7;
+                            i += 1;
+                        }
+                        // Subtract and re-encode
+                        let val = cur.wrapping_sub((s as i64 + a) as u64);
+                        let mut v = val;
+                        let mut j = off;
+                        loop {
+                            if j >= data.len() { break; }
+                            let byte = (v & 0x7F) as u8;
+                            v >>= 7;
+                            if v != 0 {
+                                data[j] = byte | 0x80;
+                            } else {
+                                data[j] = byte;
+                                break;
+                            }
+                            j += 1;
                         }
                     }
                     R_RISCV_TLS_GOT_HI20 | R_RISCV_TLS_GD_HI20 => {
