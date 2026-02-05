@@ -70,7 +70,11 @@ impl X86Arch for X86_64Arch {
     fn elf_class() -> u8 { ELFCLASS64 }
 
     fn reloc_abs(size: usize) -> u32 {
-        if size == 4 { R_X86_64_32 } else { R_X86_64_64 }
+        match size {
+            2 => R_X86_64_16,
+            4 => R_X86_64_32,
+            _ => R_X86_64_64,
+        }
     }
     fn reloc_abs64() -> u32 { R_X86_64_64 }
     fn reloc_pc32() -> u32 { R_X86_64_PC32 }

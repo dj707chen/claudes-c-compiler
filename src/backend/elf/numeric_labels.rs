@@ -91,6 +91,9 @@ pub fn resolve_numeric_labels(items: &[AsmItem]) -> Vec<AsmItem> {
                     operands: new_ops,
                 }));
             }
+            AsmItem::Short(vals) => {
+                result.push(AsmItem::Short(resolve_numeric_data_values(vals, i, &defs)));
+            }
             AsmItem::Long(vals) => {
                 result.push(AsmItem::Long(resolve_numeric_data_values(vals, i, &defs)));
             }
