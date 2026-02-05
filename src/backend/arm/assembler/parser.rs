@@ -1309,8 +1309,8 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
         }
         ".zero" | ".space" => {
             let parts: Vec<&str> = args.trim().split(',').collect();
-            let size: usize = parts[0].trim().parse()
-                .map_err(|_| format!("invalid .zero size: {}", args))?;
+            let size: usize = parse_int_literal(parts[0].trim())
+                .map_err(|_| format!("invalid .zero size: {}", args))? as usize;
             let fill: u8 = if parts.len() > 1 {
                 parse_data_value(parts[1].trim())? as u8
             } else {
