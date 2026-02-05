@@ -618,7 +618,6 @@ insertion into the preheader to ensure def-before-use ordering.
   through derived pointers may not be tracked.
 - **All other loads** (runtime-computed pointers) are conservatively rejected
   since there is no alias analysis.
-- **Float, long-double, and 128-bit loads** are excluded from hoisting.
 
 ### iv_strength_reduce -- Induction Variable Strength Reduction
 

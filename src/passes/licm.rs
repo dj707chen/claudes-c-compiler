@@ -28,7 +28,6 @@
 //! because stores through derived pointers may not be tracked in `stored_allocas`.
 
 use crate::common::fx_hash::{FxHashMap, FxHashSet};
-use crate::common::types::IrType;
 use crate::ir::analysis;
 use crate::ir::reexports::{
     Instruction,
@@ -747,12 +746,8 @@ fn hoist_loop_invariants(
                         }
                     }
                     all_invariant
-                } else if let Instruction::Load { ptr, ty, .. } = inst {
-                    // TODO: Extend to also hoist float, long double, and i128
-                    // loads once the backend register paths support them.
-                    !ty.is_float() && !ty.is_long_double()
-                        && !matches!(ty, IrType::I128 | IrType::U128)
-                        && is_load_hoistable(ptr, alloca_info, &loop_mem,
+                } else if let Instruction::Load { ptr, .. } = inst {
+                    is_load_hoistable(ptr, alloca_info, &loop_mem,
                                              &loop_defined, &invariant,
                                              &global_addr_values)
                 } else {
