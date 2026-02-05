@@ -6,6 +6,32 @@
 
 use crate::backend::x86::assembler::parser::*;
 
+/// Split a label string like `"pa_tr_efer + 4"` or `"symbol-8"` into (symbol, addend).
+/// Returns the original string with addend 0 if no offset is found.
+fn split_label_offset(label: &str) -> (&str, i64) {
+    // Scan for '+' or '-' that separates the symbol from the offset.
+    // Skip the first character to avoid splitting on leading sign/dot.
+    for (i, c) in label.char_indices().skip(1) {
+        if c == '+' || c == '-' {
+            let left = label[..i].trim();
+            if left.is_empty() {
+                continue;
+            }
+            // Extract the numeric part (including sign for '-')
+            let num_str = if c == '+' {
+                label[i + 1..].trim()
+            } else {
+                // Keep the '-' sign
+                label[i..].trim()
+            };
+            if let Ok(offset) = num_str.parse::<i64>() {
+                return (left, offset);
+            }
+        }
+    }
+    (label, 0)
+}
+
 /// Relocation entry for the linker to resolve.
 #[derive(Debug, Clone)]
 pub struct Relocation {
@@ -989,6 +1015,13 @@ impl InstructionEncoder {
         });
     }
 
+    /// Add a relocation for a label that may contain `symbol+offset` or `symbol-offset`.
+    /// Splits the label string and extracts the addend if present.
+    fn add_relocation_for_label(&mut self, label: &str, reloc_type: u32) {
+        let (sym, addend) = split_label_offset(label);
+        self.add_relocation(sym, reloc_type, addend);
+    }
+
     fn add_relocation_with_diff(&mut self, symbol: &str, reloc_type: u32, addend: i64, diff_sym: &str) {
         self.relocations.push(Relocation {
             offset: self.bytes.len() as u64,
@@ -1054,7 +1087,7 @@ impl InstructionEncoder {
                 if let Ok(addr) = label.parse::<i64>() {
                     self.bytes.extend_from_slice(&(addr as i32).to_le_bytes());
                 } else {
-                    self.add_relocation(label, R_386_32, 0);
+                    self.add_relocation_for_label(label, R_386_32);
                     self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 }
                 Ok(())
@@ -1068,7 +1101,7 @@ impl InstructionEncoder {
                 if let Ok(addr) = label.parse::<i64>() {
                     self.bytes.extend_from_slice(&(addr as i32).to_le_bytes());
                 } else {
-                    self.add_relocation(label, R_386_32, 0);
+                    self.add_relocation_for_label(label, R_386_32);
                     self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 }
                 Ok(())
@@ -1081,7 +1114,7 @@ impl InstructionEncoder {
                 if let Ok(addr) = label.parse::<i64>() {
                     self.bytes.extend_from_slice(&(addr as i32).to_le_bytes());
                 } else {
-                    self.add_relocation(label, R_386_32, 0);
+                    self.add_relocation_for_label(label, R_386_32);
                     self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 }
                 match imm {
@@ -1585,7 +1618,7 @@ impl InstructionEncoder {
                 self.bytes.push(if size == 1 { 0x00 } else { 0x01 } + alu_op * 8);
                 // Encode as disp32 (mod=00, rm=101)
                 self.bytes.push(self.modrm(0, src_num, 5));
-                self.add_relocation(label, R_386_32, 0);
+                self.add_relocation_for_label(label, R_386_32);
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 Ok(())
             }
@@ -1594,7 +1627,7 @@ impl InstructionEncoder {
                 if size == 2 { self.bytes.push(0x66); }
                 self.bytes.push(if size == 1 { 0x02 } else { 0x03 } + alu_op * 8);
                 self.bytes.push(self.modrm(0, dst_num, 5));
-                self.add_relocation(label, R_386_32, 0);
+                self.add_relocation_for_label(label, R_386_32);
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 Ok(())
             }
@@ -1612,14 +1645,7 @@ impl InstructionEncoder {
                 }
                 // mod=00, rm=101 for disp32 (no base)
                 self.bytes.push(self.modrm(0, alu_op, 5));
-                // Handle "symbol+offset" syntax
-                if let Some(plus_pos) = label.find('+') {
-                    let sym = &label[..plus_pos];
-                    let off: i64 = label[plus_pos+1..].parse().unwrap_or(0);
-                    self.add_relocation(sym, R_386_32, off);
-                } else {
-                    self.add_relocation(label, R_386_32, 0);
-                }
+                self.add_relocation_for_label(label, R_386_32);
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 if size == 1 || (-128..=127).contains(&val) {
                     self.bytes.push(val as u8);
@@ -1829,14 +1855,7 @@ impl InstructionEncoder {
                 self.bytes.push(if size == 1 { 0xFE } else { 0xFF });
                 // Encode as disp32 (mod=00, rm=101)
                 self.bytes.push(self.modrm(0, op_ext, 5));
-                // Handle "symbol+offset" syntax
-                if let Some(plus_pos) = label.find('+') {
-                    let sym = &label[..plus_pos];
-                    let off: i64 = label[plus_pos+1..].parse().unwrap_or(0);
-                    self.add_relocation(sym, R_386_32, off);
-                } else {
-                    self.add_relocation(label, R_386_32, 0);
-                }
+                self.add_relocation_for_label(label, R_386_32);
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 Ok(())
             }
@@ -2052,13 +2071,7 @@ impl InstructionEncoder {
                 self.bytes.extend_from_slice(&[0x0F, 0xBA]);
                 // mod=00, rm=101 for disp32 (no base register)
                 self.bytes.push(self.modrm(0, ext, 5));
-                if let Some(plus_pos) = label.find('+') {
-                    let sym = &label[..plus_pos];
-                    let off: i64 = label[plus_pos+1..].parse().unwrap_or(0);
-                    self.add_relocation(sym, R_386_32, off);
-                } else {
-                    self.add_relocation(label, R_386_32, 0);
-                }
+                self.add_relocation_for_label(label, R_386_32);
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 self.bytes.push(*val as u8);
                 Ok(())
@@ -2069,13 +2082,7 @@ impl InstructionEncoder {
                 self.bytes.extend_from_slice(&[0x0F, opcode_rr]);
                 // mod=00, rm=101 for disp32 (no base register)
                 self.bytes.push(self.modrm(0, src_num, 5));
-                if let Some(plus_pos) = label.find('+') {
-                    let sym = &label[..plus_pos];
-                    let off: i64 = label[plus_pos+1..].parse().unwrap_or(0);
-                    self.add_relocation(sym, R_386_32, off);
-                } else {
-                    self.add_relocation(label, R_386_32, 0);
-                }
+                self.add_relocation_for_label(label, R_386_32);
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 Ok(())
             }
@@ -2199,13 +2206,7 @@ impl InstructionEncoder {
                                 // ljmpl *symbol - indirect far jump via label
                                 self.bytes.push(0xFF);
                                 self.bytes.push(self.modrm(0, 5, 5));
-                                if let Some(plus_pos) = label.find('+') {
-                                    let sym = &label[..plus_pos];
-                                    let off: i64 = label[plus_pos+1..].parse().unwrap_or(0);
-                                    self.add_relocation(sym, R_386_32, off);
-                                } else {
-                                    self.add_relocation(label, R_386_32, 0);
-                                }
+                                self.add_relocation_for_label(label, R_386_32);
                                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                                 Ok(())
                             }
@@ -3238,13 +3239,7 @@ impl InstructionEncoder {
                 self.bytes.extend_from_slice(&[0x0F, 0x01]);
                 // mod=00, rm=101 for disp32 (no base register)
                 self.bytes.push(self.modrm(0, reg_ext, 5));
-                if let Some(plus_pos) = label.find('+') {
-                    let sym = &label[..plus_pos];
-                    let off: i64 = label[plus_pos+1..].parse().unwrap_or(0);
-                    self.add_relocation(sym, R_386_32, off);
-                } else {
-                    self.add_relocation(label, R_386_32, 0);
-                }
+                self.add_relocation_for_label(label, R_386_32);
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 Ok(())
             }

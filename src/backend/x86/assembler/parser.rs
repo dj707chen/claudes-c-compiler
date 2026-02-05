@@ -79,6 +79,9 @@ pub enum AsmItem {
     Incbin { path: String, skip: u64, count: Option<u64> },
     /// Symbol version: `.symver name, name2@@VERSION` or `.symver name, name2@VERSION`
     Symver(String, String),
+    /// Code mode switch: `.code16`, `.code32`, `.code64`
+    /// The value is the bit width (16, 32, or 64).
+    CodeMode(u8),
     /// Blank line or comment-only line
     Empty,
 }
@@ -592,7 +595,9 @@ fn parse_directive(line: &str) -> Result<AsmItem, String> {
             })
         }
         ".popsection" | ".previous" => Ok(AsmItem::PopSection),
-        ".code16gcc" => Ok(AsmItem::Empty), // i686 only, ignored
+        ".code16gcc" | ".code16" => Ok(AsmItem::CodeMode(16)),
+        ".code32" => Ok(AsmItem::CodeMode(32)),
+        ".code64" => Ok(AsmItem::CodeMode(64)),
         ".option" => Ok(AsmItem::OptionDirective(args.to_string())),
         ".incbin" => {
             let parts: Vec<&str> = args.splitn(3, ',').collect();

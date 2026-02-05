@@ -80,6 +80,20 @@ pub trait X86Arch {
     /// should be done during data value emission. x86-64 does this to
     /// handle DWARF debug info `.set .Lset0, .LECIE-.LSCIE` patterns.
     fn resolve_set_aliases_in_data() -> bool { false }
+
+    /// Default code mode for this architecture (64 for x86-64, 32 for i686).
+    fn default_code_mode() -> u8 { 64 }
+
+    /// Encode an instruction in 64-bit mode. Used by the i686 assembler when
+    /// encountering `.code64` sections (e.g. kernel realmode trampoline code).
+    /// Default implementation delegates to the normal encode_instruction.
+    fn encode_instruction_code64(
+        instr: &Instruction,
+        section_data_len: u64,
+    ) -> Result<EncodeResult, String> {
+        Self::encode_instruction(instr, section_data_len)
+    }
+
 }
 
 /// Result of encoding a single instruction.
@@ -270,6 +284,9 @@ pub struct ElfWriterCore<A: X86Arch> {
     deferred_skips: Vec<(usize, usize, String, u8)>,
     /// Deferred byte-sized symbol diffs: (section_index, offset, sym_a, sym_b, size, addend).
     deferred_byte_diffs: Vec<(usize, usize, String, String, usize, i64)>,
+    /// Current code mode (16, 32, or 64). Affects instruction encoding.
+    /// Set by `.code16`, `.code32`, `.code64` directives.
+    code_mode: u8,
     _arch: std::marker::PhantomData<A>,
 }
 
@@ -294,6 +311,7 @@ impl<A: X86Arch> ElfWriterCore<A> {
             section_stack: Vec::new(),
             deferred_skips: Vec::new(),
             deferred_byte_diffs: Vec::new(),
+            code_mode: A::default_code_mode(),
             _arch: std::marker::PhantomData,
         }
     }
@@ -510,6 +528,12 @@ impl<A: X86Arch> ElfWriterCore<A> {
             }
             AsmItem::Instruction(instr) => {
                 self.encode_instruction(instr)?;
+            }
+            AsmItem::CodeMode(bits) => {
+                // Code mode is global state that persists across section switches,
+                // matching GNU as behavior (e.g. kernel trampoline_64.S uses
+                // .code16gcc/.code32/.code64 across .text/.text32/.text64 sections).
+                self.code_mode = *bits;
             }
             AsmItem::Cfi(_) | AsmItem::File(_, _) | AsmItem::Loc(_, _, _)
             | AsmItem::OptionDirective(_) | AsmItem::Empty => {}
@@ -733,7 +757,14 @@ impl<A: X86Arch> ElfWriterCore<A> {
         let sec_idx = self.current_section.unwrap();
         let base_offset = self.sections[sec_idx].data.len() as u64;
 
-        let result = A::encode_instruction(instr, base_offset)?;
+        // Use the appropriate encoder based on current code mode.
+        // When the i686 assembler is in .code64 mode, it delegates to
+        // the x86-64 encoder for 64-bit instruction encoding.
+        let result = if self.code_mode == 64 && A::default_code_mode() != 64 {
+            A::encode_instruction_code64(instr, base_offset)?
+        } else {
+            A::encode_instruction(instr, base_offset)?
+        };
         let instr_len = result.bytes.len();
         self.sections[sec_idx].data.extend_from_slice(&result.bytes);
 
