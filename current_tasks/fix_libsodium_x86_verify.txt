@@ -1,0 +1,5 @@
+Fix verify_libsodium.py for x86: assembler jmp/jcc @PLT suffix and linker handling
+
+Root cause: encode_jmp and encode_jcc don't strip @PLT from labels or use PLT32 relocation.
+Also need linker defense-in-depth for any @PLT-suffixed symbols in object files.
+Includes regression tests.
