@@ -147,6 +147,35 @@ impl BigUint {
         (self.limbs.len() as u32 - 1) * 32 + top_bits
     }
 
+    /// Check if bit at position `pos` (0-indexed from LSB) is set.
+    fn bit_at(&self, pos: u32) -> bool {
+        let word_idx = (pos / 32) as usize;
+        let bit_idx = pos % 32;
+        if word_idx < self.limbs.len() {
+            (self.limbs[word_idx] >> bit_idx) & 1 != 0
+        } else {
+            false
+        }
+    }
+
+    /// Check if any bit in the range [0, pos) is set (i.e., any of the bottom `pos` bits).
+    fn any_bits_below(&self, pos: u32) -> bool {
+        let full_words = (pos / 32) as usize;
+        let remainder = pos % 32;
+        for i in 0..full_words {
+            if i < self.limbs.len() && self.limbs[i] != 0 {
+                return true;
+            }
+        }
+        if remainder > 0 && full_words < self.limbs.len() {
+            let mask = (1u32 << remainder) - 1;
+            if self.limbs[full_words] & mask != 0 {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Extract the top N bits (up to 128), with the MSB at bit (N-1).
     /// Returns (top_val, bits_shifted) where the value is approximately top_val * 2^bits_shifted.
     fn top_n_bits(&self, n: u32) -> (u128, i32) {
@@ -392,6 +421,44 @@ fn parse_decimal_digits(text: &str, capacity: usize) -> Option<ParsedDecimal> {
     Some(ParsedDecimal { digits, decimal_exp })
 }
 
+/// Apply IEEE 754 round-to-nearest-even to a BigUint value, extracting a 113-bit mantissa.
+/// Returns (mantissa113, binary_exp) after rounding, or None if zero.
+fn round_to_nearest_even_113(big_val: &BigUint) -> Option<(u128, i32)> {
+    let (top113, shift) = big_val.top_n_bits(113);
+    if top113 == 0 {
+        return None;
+    }
+
+    let lz = top113.leading_zeros() - (128 - 113);
+    let mut mantissa113 = top113 << lz;
+    let effective_shift = shift - lz as i32;
+    let binary_exp = shift + 112 - lz as i32;
+
+    // IEEE 754 round-to-nearest-even:
+    // guard bit = bit at position (effective_shift - 1)
+    // sticky bits = any bits below the guard bit
+    if effective_shift > 0 {
+        let guard_pos = (effective_shift - 1) as u32;
+        let guard = big_val.bit_at(guard_pos);
+        let sticky = if guard_pos > 0 { big_val.any_bits_below(guard_pos) } else { false };
+
+        if guard {
+            if sticky || (mantissa113 & 1 != 0) {
+                // Round up
+                mantissa113 = mantissa113.wrapping_add(1);
+                // If mantissa overflowed past 113 bits, we need to adjust
+                if mantissa113 >> 113 != 0 {
+                    // This means we went from 0x1FFF...FFF to 0x2000...000 (114 bits)
+                    // Shift right and increment exponent
+                    return Some((mantissa113 >> 1, binary_exp + 1));
+                }
+            }
+        }
+    }
+
+    Some((mantissa113, binary_exp))
+}
+
 /// Shared decimal-to-float bigint conversion for f128 (113-bit mantissa).
 fn decimal_to_float_bigint_f128(negative: bool, digits: &[u8], decimal_exp: i32) -> [u8; 16] {
     if decimal_exp >= 0 {
@@ -403,15 +470,10 @@ fn decimal_to_float_bigint_f128(negative: bool, digits: &[u8], decimal_exp: i32)
             return make_f128_zero(negative);
         }
 
-        let (top113, shift) = big_val.top_n_bits(113);
-        if top113 == 0 {
-            return make_f128_zero(negative);
+        match round_to_nearest_even_113(&big_val) {
+            Some((mantissa113, binary_exp)) => encode_f128(negative, binary_exp, mantissa113),
+            None => make_f128_zero(negative),
         }
-
-        let lz = top113.leading_zeros() - (128 - 113);
-        let mantissa113 = top113 << lz;
-        let binary_exp = shift + 112 - lz as i32;
-        encode_f128(negative, binary_exp, mantissa113)
     } else {
         let neg_exp = (-decimal_exp) as u32;
         let big_d = BigUint::from_decimal_digits(digits);
@@ -429,15 +491,12 @@ fn decimal_to_float_bigint_f128(negative: bool, digits: &[u8], decimal_exp: i32)
             return make_f128_zero(negative);
         }
 
-        let (top113, shift) = quotient.top_n_bits(113);
-        if top113 == 0 {
-            return make_f128_zero(negative);
+        match round_to_nearest_even_113(&quotient) {
+            Some((mantissa113, binary_exp)) => {
+                encode_f128(negative, binary_exp - extra_bits as i32, mantissa113)
+            }
+            None => make_f128_zero(negative),
         }
-
-        let lz = top113.leading_zeros() - (128 - 113);
-        let mantissa113 = top113 << lz;
-        let binary_exp = shift + 112 - lz as i32 - extra_bits as i32;
-        encode_f128(negative, binary_exp, mantissa113)
     }
 }
 
