@@ -1,0 +1,6 @@
+Fix sema: struct member access check gives false errors when struct tag is shadowed in inner scope.
+
+When an inner scope redefines `struct T`, the sema's check_member_exists function incorrectly
+uses the inner scope's layout for variables declared with the outer scope's `struct T`. This
+causes false "has no member named" errors. Fix: skip the member check when the struct tag is
+currently shadowed.
