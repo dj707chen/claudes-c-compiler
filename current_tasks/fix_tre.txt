@@ -1,0 +1,5 @@
+Fixing tre regex library project for x86 architecture.
+tre fails on x86 and i686 but passes on arm and riscv.
+Investigating compilation failures and fixing compiler bugs as needed.
+
+Started: 2026-02-05
