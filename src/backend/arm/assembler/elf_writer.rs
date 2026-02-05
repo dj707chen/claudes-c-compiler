@@ -205,6 +205,8 @@ impl ElfWriter {
         for stmt in statements {
             self.process_statement(stmt)?;
         }
+        // Merge subsections (e.g., .text.__subsection.1 → .text) before resolving
+        self.base.merge_subsections();
         // Resolve symbol differences first (needs all labels to be known)
         self.resolve_sym_diffs()?;
         self.resolve_pending_exprs()?;
@@ -263,6 +265,11 @@ impl ElfWriter {
 
             AsmDirective::Previous => {
                 self.base.restore_previous_section();
+                Ok(())
+            }
+
+            AsmDirective::Subsection(n) => {
+                self.base.set_subsection(*n);
                 Ok(())
             }
 

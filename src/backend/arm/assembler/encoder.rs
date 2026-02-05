@@ -1122,9 +1122,9 @@ fn encode_mov_wide_imm(rd: u32, is_64: bool, imm: u64) -> Result<EncodeResult, S
 /// If the expression contains a symbol reference, returns None (needs relocation).
 fn resolve_abs_g_modifier(kind: &str, symbol: &str) -> Result<Option<(u32, u32)>, String> {
     let shift = match kind {
-        "abs_g0" | "abs_g0_nc" => 0,
-        "abs_g1" | "abs_g1_nc" => 16,
-        "abs_g2" | "abs_g2_nc" => 32,
+        "abs_g0" | "abs_g0_nc" | "abs_g0_s" => 0,
+        "abs_g1" | "abs_g1_nc" | "abs_g1_s" => 16,
+        "abs_g2" | "abs_g2_nc" | "abs_g2_s" => 32,
         "abs_g3" => 48,
         _ => return Ok(None), // Not an abs_g modifier
     };
@@ -2231,7 +2231,7 @@ fn encode_ldr_str(operands: &[Operand], is_load: bool, size: u32, is_signed: boo
                     _ => return Err(format!("unsupported modifier in load/store: {}", kind)),
                 };
 
-                let word = ((actual_size << 30) | (0b111 << 27) | (v << 26) | (opc << 22)) | (rn << 5) | rt;
+                let word = ((actual_size << 30) | (0b111 << 27) | (v << 26) | (0b01 << 24) | (opc << 22)) | (rn << 5) | rt;
                 return Ok(EncodeResult::WordWithReloc {
                     word,
                     reloc: Relocation {
@@ -3056,27 +3056,20 @@ fn encode_cnt(operands: &[Operand]) -> Result<EncodeResult, String> {
 
 fn encode_dmb(operands: &[Operand]) -> Result<EncodeResult, String> {
     let option = match operands.first() {
-        Some(Operand::Barrier(b)) => match b.to_lowercase().as_str() {
-            "sy" => 0b1111,
-            "ish" => 0b1011,
-            "ishld" => 0b1001,
-            "ishst" => 0b1010,
-            "osh" => 0b0011,
-            "oshld" => 0b0001,
-            "oshst" => 0b0010,
-            "nsh" => 0b0111,
-            "nshld" => 0b0101,
-            "nshst" => 0b0110,
-            "ld" => 0b1101,
+        Some(Operand::Barrier(b)) | Some(Operand::Symbol(b)) => match b.to_lowercase().as_str() {
+            "sy" => 0b1111u32,
             "st" => 0b1110,
-            _ => 0b1111,
-        },
-        Some(Operand::Symbol(s)) => match s.to_lowercase().as_str() {
-            "sy" => 0b1111,
+            "ld" => 0b1101,
             "ish" => 0b1011,
-            "ishld" => 0b1001,
             "ishst" => 0b1010,
-            _ => 0b1111,
+            "ishld" => 0b1001,
+            "nsh" => 0b0111,
+            "nshst" => 0b0110,
+            "nshld" => 0b0101,
+            "osh" => 0b0011,
+            "oshst" => 0b0010,
+            "oshld" => 0b0001,
+            _ => return Err(format!("unknown dmb option: {}", b)),
         },
         _ => 0b1111,
     };
@@ -3087,17 +3080,20 @@ fn encode_dmb(operands: &[Operand]) -> Result<EncodeResult, String> {
 
 fn encode_dsb(operands: &[Operand]) -> Result<EncodeResult, String> {
     let option = match operands.first() {
-        Some(Operand::Barrier(b)) => match b.to_lowercase().as_str() {
+        Some(Operand::Barrier(b)) | Some(Operand::Symbol(b)) => match b.to_lowercase().as_str() {
             "sy" => 0b1111u32,
+            "st" => 0b1110,
+            "ld" => 0b1101,
             "ish" => 0b1011,
-            "ishld" => 0b1001,
             "ishst" => 0b1010,
-            _ => 0b1111,
-        },
-        Some(Operand::Symbol(s)) => match s.to_lowercase().as_str() {
-            "sy" => 0b1111u32,
-            "ish" => 0b1011,
-            _ => 0b1111,
+            "ishld" => 0b1001,
+            "nsh" => 0b0111,
+            "nshst" => 0b0110,
+            "nshld" => 0b0101,
+            "osh" => 0b0011,
+            "oshst" => 0b0010,
+            "oshld" => 0b0001,
+            _ => return Err(format!("unknown dsb option: {}", b)),
         },
         _ => 0b1111,
     };

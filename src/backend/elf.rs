@@ -858,6 +858,7 @@ pub struct ObjSection {
 ///
 /// Uses 64-bit offset/addend for all targets; the writer truncates to 32-bit
 /// for ELF32/REL when needed.
+#[derive(Clone)]
 pub struct ObjReloc {
     pub offset: u64,
     pub reloc_type: u32,
@@ -2210,6 +2211,122 @@ impl ElfWriterBase {
     pub fn pop_section(&mut self) {
         if let Some(prev) = self.section_stack.pop() {
             self.current_section = prev;
+        }
+    }
+
+    /// Switch to a numbered subsection within the current section.
+    ///
+    /// `.subsection N` creates an internal section `PARENT.__subsection.N` that
+    /// gets merged back into the parent section after all statements are processed.
+    /// Subsections are concatenated in numeric order (0 first, then 1, 2, ...).
+    pub fn set_subsection(&mut self, n: u64) {
+        // Determine the parent section name (strip any existing subsection suffix)
+        let parent = if let Some(pos) = self.current_section.find(".__subsection.") {
+            self.current_section[..pos].to_string()
+        } else {
+            self.current_section.clone()
+        };
+
+        if n == 0 {
+            // Switch back to parent section (subsection 0 = parent itself)
+            self.previous_section = std::mem::replace(&mut self.current_section, parent);
+        } else {
+            // Switch to subsection N
+            let sub_name = format!("{}.__subsection.{}", parent, n);
+            // Inherit properties from parent section
+            if !self.sections.contains_key(&sub_name) {
+                if let Some(parent_sec) = self.sections.get(&parent) {
+                    let sh_type = parent_sec.sh_type;
+                    let sh_flags = parent_sec.sh_flags;
+                    let align = parent_sec.sh_addralign;
+                    self.ensure_section(&sub_name, sh_type, sh_flags, align);
+                } else {
+                    // Parent doesn't exist yet; create subsection with code defaults
+                    self.ensure_section(&sub_name, 1, 0x6, self.text_align); // SHT_PROGBITS, AX
+                }
+            }
+            self.previous_section = std::mem::replace(&mut self.current_section, sub_name);
+        }
+    }
+
+    /// Merge all subsections back into their parent sections.
+    ///
+    /// After all statements are processed, subsections like `.text.__subsection.1`
+    /// are appended to their parent `.text` in numeric order. Labels and relocations
+    /// are adjusted to account for the new offsets.
+    pub fn merge_subsections(&mut self) {
+        // Collect subsection names grouped by parent
+        let mut subsections: std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>> =
+            std::collections::BTreeMap::new();
+
+        for name in &self.section_order {
+            if let Some(pos) = name.find(".__subsection.") {
+                let parent = name[..pos].to_string();
+                let num: u64 = name[pos + 14..].parse().unwrap_or(0);
+                subsections.entry(parent).or_default().insert(num, name.clone());
+            }
+        }
+
+        if subsections.is_empty() {
+            return;
+        }
+
+        // For each parent, append subsections in order
+        for (parent, subs) in &subsections {
+            for (_num, sub_name) in subs {
+                let sub_data;
+                let sub_relocs;
+                {
+                    let sub_sec = match self.sections.get(sub_name) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    sub_data = sub_sec.data.clone();
+                    sub_relocs = sub_sec.relocs.clone();
+                }
+
+                let parent_len = self.sections.get(parent)
+                    .map(|s| s.data.len() as u64)
+                    .unwrap_or(0);
+
+                // Append data
+                if let Some(parent_sec) = self.sections.get_mut(parent) {
+                    parent_sec.data.extend_from_slice(&sub_data);
+                    // Append relocations with adjusted offsets
+                    for mut reloc in sub_relocs {
+                        reloc.offset += parent_len;
+                        parent_sec.relocs.push(reloc);
+                    }
+                }
+
+                // Adjust labels that reference this subsection
+                let labels_to_update: Vec<(String, u64)> = self.labels.iter()
+                    .filter(|(_, (sec, _))| sec == sub_name)
+                    .map(|(name, (_, off))| (name.clone(), *off))
+                    .collect();
+
+                for (label_name, old_offset) in labels_to_update {
+                    self.labels.insert(label_name, (parent.clone(), old_offset + parent_len));
+                }
+
+                // Remove the subsection
+                self.sections.remove(sub_name);
+            }
+        }
+
+        // Remove subsection names from section_order
+        self.section_order.retain(|name| !name.contains(".__subsection."));
+
+        // Fix current_section if it pointed to a subsection
+        if self.current_section.contains(".__subsection.") {
+            if let Some(pos) = self.current_section.find(".__subsection.") {
+                self.current_section = self.current_section[..pos].to_string();
+            }
+        }
+        if self.previous_section.contains(".__subsection.") {
+            if let Some(pos) = self.previous_section.find(".__subsection.") {
+                self.previous_section = self.previous_section[..pos].to_string();
+            }
         }
     }
 

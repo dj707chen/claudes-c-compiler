@@ -553,9 +553,26 @@ fn find_isolated_cmp(cond: &str, ch: char) -> Option<usize> {
 }
 
 fn eval_if_condition_inner<F: Fn(&str) -> String>(cond: &str, resolve: F) -> bool {
+    eval_if_condition_dyn(cond, &resolve)
+}
+
+fn eval_if_condition_dyn(cond: &str, resolve: &dyn Fn(&str) -> String) -> bool {
     let cond = cond.trim();
     // Strip outer parentheses: (.Lfound != 1) -> .Lfound != 1
     let cond = strip_outer_parens(cond);
+
+    // Handle || (logical OR) at top level — lowest precedence
+    if let Some(pos) = find_top_level_op(cond, "||") {
+        let lhs = &cond[..pos];
+        let rhs = &cond[pos + 2..];
+        return eval_if_condition_dyn(lhs, resolve) || eval_if_condition_dyn(rhs, resolve);
+    }
+    // Handle && (logical AND) at top level
+    if let Some(pos) = find_top_level_op(cond, "&&") {
+        let lhs = &cond[..pos];
+        let rhs = &cond[pos + 2..];
+        return eval_if_condition_dyn(lhs, resolve) && eval_if_condition_dyn(rhs, resolve);
+    }
 
     // Find comparison operators at the top level (not inside parentheses).
     // Check "!=" before "==" and ">="/"<=" before ">"/"<".

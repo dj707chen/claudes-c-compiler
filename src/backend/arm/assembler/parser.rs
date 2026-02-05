@@ -146,6 +146,8 @@ pub enum AsmDirective {
     PopSection,
     /// `.previous` — swap current and previous sections
     Previous,
+    /// `.subsection N` — switch to numbered subsection within the current section
+    Subsection(u64),
     /// CFI directive (ignored for code generation)
     Cfi,
     /// `.incbin "file"[, skip[, count]]` — include binary file contents
@@ -291,79 +293,10 @@ fn expand_rept_blocks(lines: &[&str]) -> Result<Vec<String>, String> {
     Ok(result)
 }
 
-/// Find a standalone comparison operator (> or <) not part of >>, <<, >=, <=.
-fn find_comparison_op(s: &str, op: char) -> Option<usize> {
-    let bytes = s.as_bytes();
-    for i in 0..bytes.len() {
-        if bytes[i] == op as u8 {
-            // Skip if part of == != >= <= >> <<
-            if i + 1 < bytes.len() && (bytes[i + 1] == b'=' || bytes[i + 1] == op as u8) {
-                continue;
-            }
-            if i > 0 && (bytes[i - 1] == op as u8) {
-                continue;
-            }
-            return Some(i);
-        }
-    }
-    None
-}
-
-/// Evaluate a simple `.if` condition expression.
-/// Supports: integer literals, `==`, `!=`, `>`, `>=`, `<`, `<=` comparisons with simple arithmetic.
+/// Evaluate a `.if` condition expression using the shared implementation.
+/// Supports: `==`, `!=`, `>`, `>=`, `<`, `<=`, `||`, `&&`, parentheses.
 fn eval_if_condition(cond: &str) -> bool {
-    let cond = cond.trim();
-    // Try "A == B"
-    if let Some(pos) = cond.find("==") {
-        let lhs = cond[..pos].trim();
-        let rhs = cond[pos + 2..].trim();
-        let l = asm_expr::parse_integer_expr(lhs).unwrap_or(i64::MIN);
-        let r = asm_expr::parse_integer_expr(rhs).unwrap_or(i64::MAX);
-        return l == r;
-    }
-    // Try "A != B"
-    if let Some(pos) = cond.find("!=") {
-        let lhs = cond[..pos].trim();
-        let rhs = cond[pos + 2..].trim();
-        let l = asm_expr::parse_integer_expr(lhs).unwrap_or(i64::MIN);
-        let r = asm_expr::parse_integer_expr(rhs).unwrap_or(i64::MAX);
-        return l != r;
-    }
-    // Try "A >= B" (must check before ">" to avoid false match)
-    if let Some(pos) = cond.find(">=") {
-        let lhs = cond[..pos].trim();
-        let rhs = cond[pos + 2..].trim();
-        let l = asm_expr::parse_integer_expr(lhs).unwrap_or(i64::MIN);
-        let r = asm_expr::parse_integer_expr(rhs).unwrap_or(i64::MAX);
-        return l >= r;
-    }
-    // Try "A <= B" (must check before "<" to avoid false match)
-    if let Some(pos) = cond.find("<=") {
-        let lhs = cond[..pos].trim();
-        let rhs = cond[pos + 2..].trim();
-        let l = asm_expr::parse_integer_expr(lhs).unwrap_or(i64::MIN);
-        let r = asm_expr::parse_integer_expr(rhs).unwrap_or(i64::MAX);
-        return l <= r;
-    }
-    // Try "A > B" — but be careful with ">>"; use rfind to get the last ">"
-    // that's not part of ">>", or find a standalone ">"
-    if let Some(pos) = find_comparison_op(cond, '>') {
-        let lhs = cond[..pos].trim();
-        let rhs = cond[pos + 1..].trim();
-        let l = asm_expr::parse_integer_expr(lhs).unwrap_or(i64::MIN);
-        let r = asm_expr::parse_integer_expr(rhs).unwrap_or(i64::MAX);
-        return l > r;
-    }
-    // Try "A < B" — similar care with "<<"
-    if let Some(pos) = find_comparison_op(cond, '<') {
-        let lhs = cond[..pos].trim();
-        let rhs = cond[pos + 1..].trim();
-        let l = asm_expr::parse_integer_expr(lhs).unwrap_or(i64::MIN);
-        let r = asm_expr::parse_integer_expr(rhs).unwrap_or(i64::MAX);
-        return l < r;
-    }
-    // Simple integer expression: non-zero is true
-    asm_expr::parse_integer_expr(cond).unwrap_or(0) != 0
+    asm_preprocess::eval_if_condition(cond)
 }
 
 /// Split macro invocation arguments, separating on commas (preferred) or whitespace.
@@ -953,28 +886,31 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmStatement>, String> {
         // .elseif / .elsif — else-if branch (must be checked BEFORE .else)
         if lower.starts_with(".elseif ") || lower.starts_with(".elseif\t")
             || lower.starts_with(".elsif ") || lower.starts_with(".elsif\t") {
-            if let Some((active, any_taken)) = if_stack.last_mut() {
-                if *any_taken {
-                    // A previous branch was already taken, skip this one
-                    *active = false;
+            let len = if_stack.len();
+            if len > 0 {
+                let parent_active = if len >= 2 { if_stack[len - 2].0 } else { true };
+                if if_stack[len - 1].1 || !parent_active {
+                    if_stack[len - 1].0 = false;
                 } else {
                     let keyword_len = if lower.starts_with(".elseif") { 7 } else { 6 };
                     let cond_str = line[keyword_len..].trim();
                     let result = eval_if_condition(cond_str);
-                    *active = result;
-                    if result { *any_taken = true; }
+                    if_stack[len - 1].0 = result;
+                    if result { if_stack[len - 1].1 = true; }
                 }
             }
             continue;
         }
         if lower == ".else" || (lower.starts_with(".else") && !lower.starts_with(".elseif") && !lower.starts_with(".elsif")
             && lower.len() >= 5 && (lower.len() == 5 || lower.as_bytes()[5].is_ascii_whitespace())) {
-            if let Some((active, any_taken)) = if_stack.last_mut() {
-                if *any_taken {
-                    *active = false;
+            let len = if_stack.len();
+            if len > 0 {
+                let parent_active = if len >= 2 { if_stack[len - 2].0 } else { true };
+                if if_stack[len - 1].1 || !parent_active {
+                    if_stack[len - 1].0 = false;
                 } else {
-                    *active = true;
-                    *any_taken = true;
+                    if_stack[len - 1].0 = true;
+                    if_stack[len - 1].1 = true;
                 }
             }
             continue;
@@ -1300,7 +1236,10 @@ fn parse_line(line: &str) -> Result<Vec<AsmStatement>, String> {
 
 fn parse_directive(line: &str) -> Result<AsmStatement, String> {
     // Split directive name from arguments
-    let (name, args) = if let Some(space_pos) = line.find([' ', '\t']) {
+    let (name, args) = if line.starts_with(".inst") && line.len() > 5 && line.as_bytes()[5] == b'(' {
+        // Handle .inst(expr) without space: ".inst(0x...)" -> name=".inst", args="(0x...)"
+        (".inst", line[5..].trim())
+    } else if let Some(space_pos) = line.find([' ', '\t']) {
         let name = &line[..space_pos];
         let args = line[space_pos..].trim();
         (name, args)
@@ -1420,8 +1359,8 @@ fn parse_directive(line: &str) -> Result<AsmStatement, String> {
         ".popsection" => AsmDirective::PopSection,
         ".previous" => AsmDirective::Previous,
         ".subsection" => {
-            // .subsection N — switch to numbered subsection; ignore for now
-            AsmDirective::Ignored
+            let n: u64 = args.trim().parse().unwrap_or(0);
+            AsmDirective::Subsection(n)
         }
         ".purgem" => {
             // .purgem name — remove a macro definition; ignore for now
