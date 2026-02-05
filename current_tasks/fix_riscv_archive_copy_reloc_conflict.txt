@@ -1,0 +1,16 @@
+Fix RISC-V linker: archive group iteration extracts libc.a members
+(stdio.o) that define stderr/stdout/stdin, overriding the shared lib
+COPY relocation path. This causes segfaults at runtime because the
+linker resolves PCREL_HI20 to the libc.a data section instead of
+creating a proper COPY relocation in BSS.
+
+Root cause: During archive group iteration, newly-added undefined symbols
+from extracted archive members include stderr/stdout references. On the
+next iteration pass, stdio.o from libc.a satisfies these, getting extracted
+despite the symbols being available from libc.so. The fix is to exclude
+shared-lib-provided symbols from triggering archive member extraction.
+
+This fix affects all architectures that use the same archive resolution
+pattern (RISC-V confirmed broken; x86/ARM may have similar latent bugs).
+
+Started: 2026-02-05
