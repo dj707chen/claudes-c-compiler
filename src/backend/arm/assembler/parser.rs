@@ -226,15 +226,134 @@ fn collect_block_body<'a>(lines: &[&'a str], i: &mut usize) -> Result<Vec<&'a st
     Ok(body)
 }
 
+/// Estimate the byte size of a single assembly line for label position tracking.
+/// Used to resolve backward label references in .rept count expressions.
+/// AArch64 instructions are always 4 bytes; directives have known sizes.
+fn estimate_line_bytes(trimmed: &str) -> u64 {
+    if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') {
+        return 0;
+    }
+    // Label definitions don't add bytes
+    if trimmed.ends_with(':') && !trimmed.contains(' ') {
+        return 0;
+    }
+    // Strip leading labels like "661:" from lines like "661: bl foo"
+    let content = if let Some(pos) = trimmed.find(':') {
+        let before = &trimmed[..pos];
+        if before.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+            trimmed[pos + 1..].trim()
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    if content.is_empty() {
+        return 0;
+    }
+    // Directives
+    if content.starts_with('.') {
+        let lower = content.to_lowercase();
+        if lower.starts_with(".byte ") { return 1; }
+        if lower.starts_with(".hword ") || lower.starts_with(".short ") || lower.starts_with(".2byte ") { return 2; }
+        if lower.starts_with(".word ") || lower.starts_with(".long ") || lower.starts_with(".4byte ") || lower.starts_with(".inst ") { return 4; }
+        if lower.starts_with(".quad ") || lower.starts_with(".xword ") || lower.starts_with(".8byte ") { return 8; }
+        // .zero N, .space N, .skip N
+        if lower.starts_with(".zero ") || lower.starts_with(".space ") || lower.starts_with(".skip ") {
+            let arg = content.split_whitespace().nth(1).unwrap_or("0");
+            if let Ok(n) = arg.trim_end_matches(',').parse::<u64>() { return n; }
+        }
+        // .ascii "str" / .asciz "str" — approximate
+        if lower.starts_with(".ascii") || lower.starts_with(".asciz") || lower.starts_with(".string") {
+            // Don't try to be exact; these are rarely used in .rept context
+            return 0;
+        }
+        // Other directives (.align, .section, .globl, .type, etc.) — 0 bytes of code
+        return 0;
+    }
+    // Everything else is an instruction = 4 bytes for AArch64
+    4
+}
+
+/// Resolve backward numeric label references (like 662b, 661b) in a .rept count expression.
+/// Substitutes each backward reference with its byte position, then evaluates the expression.
+fn resolve_rept_label_expr(
+    count_str: &str,
+    label_positions: &std::collections::HashMap<String, Vec<u64>>,
+) -> Result<i64, String> {
+    // First try direct evaluation (handles simple integer expressions)
+    if let Ok(val) = asm_expr::parse_integer_expr(count_str) {
+        return Ok(val);
+    }
+
+    // Check if expression contains backward label references (e.g., 662b)
+    let mut resolved = count_str.to_string();
+    let mut found_label_ref = false;
+
+    // Find and replace backward label references: digits followed by 'b' or 'B'
+    // We need to scan for patterns like "662b" that are numeric label backward refs
+    loop {
+        let mut replaced = false;
+        // Use a simple scan to find numeric label backward references
+        let bytes = resolved.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        while i < len {
+            // Look for a digit sequence followed by 'b' or 'B'
+            if bytes[i].is_ascii_digit() {
+                let start = i;
+                while i < len && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i < len && (bytes[i] == b'b' || bytes[i] == b'B') {
+                    // Check that the next char (if any) is not alphanumeric
+                    // (to avoid matching things like "0b1010" binary literals)
+                    let after_ok = i + 1 >= len || !bytes[i + 1].is_ascii_alphanumeric();
+                    // Also ensure it's not a binary literal starting with 0b
+                    let is_binary = start + 1 == i && bytes[start] == b'0';
+                    if after_ok && !is_binary {
+                        let label_num = &resolved[start..i];
+                        let ref_end = i + 1;
+                        // Look up the most recent definition of this label
+                        if let Some(positions) = label_positions.get(label_num) {
+                            if let Some(&pos) = positions.last() {
+                                let before = &resolved[..start];
+                                let after = &resolved[ref_end..];
+                                resolved = format!("{}{}{}", before, pos, after);
+                                found_label_ref = true;
+                                replaced = true;
+                                break; // restart scan since string changed
+                            }
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        if !replaced {
+            break;
+        }
+    }
+
+    if found_label_ref {
+        asm_expr::parse_integer_expr(&resolved)
+    } else {
+        Err(format!("cannot evaluate .rept count: {}", count_str))
+    }
+}
+
 fn expand_rept_blocks(lines: &[&str]) -> Result<Vec<String>, String> {
     let mut result = Vec::new();
     let mut i = 0;
+    // Track numeric label positions (byte offsets) for resolving backward refs
+    let mut label_positions: std::collections::HashMap<String, Vec<u64>> = std::collections::HashMap::new();
+    let mut current_byte_pos: u64 = 0;
     while i < lines.len() {
         let trimmed = strip_comment(lines[i]).trim().to_string();
         if is_rept_start(&trimmed) {
             let prefix_len = if trimmed.starts_with(".rept") { 5 } else { 4 };
             let count_str = trimmed[prefix_len..].trim();
-            let count_val = asm_expr::parse_integer_expr(count_str)
+            let count_val = resolve_rept_label_expr(count_str, &label_positions)
                 .unwrap_or(0);
             // Treat negative counts as 0 (matches GNU as behavior)
             let count = if count_val < 0 { 0usize } else { count_val as usize };
@@ -288,6 +407,18 @@ fn expand_rept_blocks(lines: &[&str]) -> Result<Vec<String>, String> {
         } else if trimmed == ".endr" {
             // stray .endr without .rept - skip
         } else {
+            // Track numeric label definitions and byte positions
+            // Check if this line defines a numeric label (e.g., "661:" or "661: instruction")
+            if let Some(colon_pos) = trimmed.find(':') {
+                let before = &trimmed[..colon_pos];
+                if !before.is_empty() && before.chars().all(|c| c.is_ascii_digit()) {
+                    label_positions
+                        .entry(before.to_string())
+                        .or_default()
+                        .push(current_byte_pos);
+                }
+            }
+            current_byte_pos += estimate_line_bytes(&trimmed);
             result.push(lines[i].to_string());
         }
         i += 1;

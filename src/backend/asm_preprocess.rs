@@ -236,28 +236,160 @@ fn collect_block_body<'a>(
     Ok(body)
 }
 
+/// Estimate the byte size of a single assembly line for label position tracking.
+/// Used to resolve backward label references in .rept count expressions.
+/// `default_insn_size` is the typical instruction size for the target (4 for ARM/RISC-V).
+fn estimate_line_bytes_generic(trimmed: &str, comment_style: &CommentStyle, default_insn_size: u64) -> u64 {
+    if trimmed.is_empty() {
+        return 0;
+    }
+    // Check for comment-only lines
+    match comment_style {
+        CommentStyle::Hash => {
+            if trimmed.starts_with('#') { return 0; }
+        }
+        CommentStyle::HashAndSlashSlash => {
+            if trimmed.starts_with('#') || trimmed.starts_with("//") { return 0; }
+        }
+        CommentStyle::SlashSlashAndAt => {
+            if trimmed.starts_with("//") || trimmed.starts_with('@') { return 0; }
+        }
+    }
+    // Label definitions don't add bytes
+    if trimmed.ends_with(':') && !trimmed.contains(' ') {
+        return 0;
+    }
+    // Strip leading labels like "661:" from lines like "661: bl foo"
+    let content = if let Some(pos) = trimmed.find(':') {
+        let before = &trimmed[..pos];
+        if before.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+            trimmed[pos + 1..].trim()
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    if content.is_empty() {
+        return 0;
+    }
+    // Directives
+    if content.starts_with('.') {
+        let lower = content.to_lowercase();
+        if lower.starts_with(".byte ") { return 1; }
+        if lower.starts_with(".hword ") || lower.starts_with(".short ") || lower.starts_with(".2byte ") { return 2; }
+        if lower.starts_with(".word ") || lower.starts_with(".long ") || lower.starts_with(".4byte ") || lower.starts_with(".inst ") { return 4; }
+        if lower.starts_with(".quad ") || lower.starts_with(".xword ") || lower.starts_with(".8byte ") { return 8; }
+        // .zero N, .space N, .skip N
+        if lower.starts_with(".zero ") || lower.starts_with(".space ") || lower.starts_with(".skip ") {
+            let arg = content.split_whitespace().nth(1).unwrap_or("0");
+            if let Ok(n) = arg.trim_end_matches(',').parse::<u64>() { return n; }
+        }
+        // Other directives (.align, .section, .globl, .type, .ascii, etc.) — 0 bytes
+        return 0;
+    }
+    // Everything else is an instruction
+    default_insn_size
+}
+
+/// Resolve backward numeric label references (like 662b, 661b) in a .rept count expression.
+/// Substitutes each backward reference with its byte position, then evaluates the expression.
+fn resolve_rept_label_expr(
+    count_str: &str,
+    label_positions: &std::collections::HashMap<String, Vec<u64>>,
+    parse_int: fn(&str) -> Result<i64, String>,
+) -> Result<i64, String> {
+    // First try direct evaluation (handles simple integer expressions)
+    if let Ok(val) = parse_int(count_str) {
+        return Ok(val);
+    }
+
+    // Check if expression contains backward label references (e.g., 662b)
+    let mut resolved = count_str.to_string();
+    let mut found_label_ref = false;
+
+    // Find and replace backward label references: digits followed by 'b' or 'B'
+    loop {
+        let mut replaced = false;
+        let bytes = resolved.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        while i < len {
+            if bytes[i].is_ascii_digit() {
+                let start = i;
+                while i < len && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i < len && (bytes[i] == b'b' || bytes[i] == b'B') {
+                    let after_ok = i + 1 >= len || !bytes[i + 1].is_ascii_alphanumeric();
+                    // Avoid matching binary literals like 0b1010
+                    let is_binary = start + 1 == i && bytes[start] == b'0';
+                    if after_ok && !is_binary {
+                        let label_num = &resolved[start..i];
+                        let ref_end = i + 1;
+                        if let Some(positions) = label_positions.get(label_num) {
+                            if let Some(&pos) = positions.last() {
+                                let before = &resolved[..start];
+                                let after = &resolved[ref_end..];
+                                resolved = format!("{}{}{}", before, pos, after);
+                                found_label_ref = true;
+                                replaced = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        if !replaced {
+            break;
+        }
+    }
+
+    if found_label_ref {
+        parse_int(&resolved)
+    } else {
+        Err(format!("cannot evaluate .rept count: {}", count_str))
+    }
+}
+
 /// Expand `.rept`/`.endr` and `.irp`/`.endr` blocks by repeating or
 /// substituting contained lines.
 ///
 /// Handles nested blocks and recursive expansion. Uses `parse_int` to
 /// evaluate the `.rept` count expression.
+/// Tracks numeric label byte positions to resolve backward label references
+/// in `.rept` count expressions (e.g., `.rept (662b-661b)/4`).
 pub fn expand_rept_blocks(
     lines: &[&str],
     comment_style: &CommentStyle,
     parse_int: fn(&str) -> Result<i64, String>,
 ) -> Result<Vec<String>, String> {
+    expand_rept_blocks_with_insn_size(lines, comment_style, parse_int, 4)
+}
+
+/// Same as `expand_rept_blocks` but with configurable instruction size for byte estimation.
+pub(crate) fn expand_rept_blocks_with_insn_size(
+    lines: &[&str],
+    comment_style: &CommentStyle,
+    parse_int: fn(&str) -> Result<i64, String>,
+    default_insn_size: u64,
+) -> Result<Vec<String>, String> {
     let mut result = Vec::new();
     let mut i = 0;
+    let mut label_positions: std::collections::HashMap<String, Vec<u64>> = std::collections::HashMap::new();
+    let mut current_byte_pos: u64 = 0;
     while i < lines.len() {
         let trimmed = strip_comment(lines[i], comment_style).trim().to_string();
         if is_rept_start(&trimmed) {
             let count_str = trimmed[".rept".len()..].trim();
-            let count_val = parse_int(count_str)
+            let count_val = resolve_rept_label_expr(count_str, &label_positions, parse_int)
                 .map_err(|e| format!(".rept: bad count '{}': {}", count_str, e))?;
             // Treat negative counts as 0 (matches GNU as behavior)
             let count = if count_val < 0 { 0usize } else { count_val as usize };
             let body = collect_block_body(lines, &mut i, comment_style)?;
-            let expanded_body = expand_rept_blocks(&body, comment_style, parse_int)?;
+            let expanded_body = expand_rept_blocks_with_insn_size(&body, comment_style, parse_int, default_insn_size)?;
             for _ in 0..count {
                 result.extend(expanded_body.iter().cloned());
             }
@@ -276,12 +408,23 @@ pub fn expand_rept_blocks(
                     line.replace(&pattern, val)
                 }).collect();
                 let subst_refs: Vec<&str> = subst_body.iter().map(|s| s.as_str()).collect();
-                let expanded = expand_rept_blocks(&subst_refs, comment_style, parse_int)?;
+                let expanded = expand_rept_blocks_with_insn_size(&subst_refs, comment_style, parse_int, default_insn_size)?;
                 result.extend(expanded);
             }
         } else if trimmed == ".endr" {
             // stray .endr without .rept — skip
         } else {
+            // Track numeric label definitions and byte positions
+            if let Some(colon_pos) = trimmed.find(':') {
+                let before = &trimmed[..colon_pos];
+                if !before.is_empty() && before.chars().all(|c| c.is_ascii_digit()) {
+                    label_positions
+                        .entry(before.to_string())
+                        .or_default()
+                        .push(current_byte_pos);
+                }
+            }
+            current_byte_pos += estimate_line_bytes_generic(&trimmed, comment_style, default_insn_size);
             result.push(lines[i].to_string());
         }
         i += 1;
