@@ -1,0 +1,5 @@
+Fixing haproxy: linker doesn't auto-generate __start_<section> / __stop_<section> symbols
+for custom sections. GNU ld does this when it sees undefined references to those symbols,
+placing them at the boundaries of the corresponding section. haproxy relies on this for its
+INITCALL mechanism. Without these symbols, init callbacks (filter keywords, etc.) are never
+registered, causing NULL pointer dereference in strtok_r.
