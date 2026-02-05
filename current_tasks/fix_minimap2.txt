@@ -1,3 +1,0 @@
-Fixing minimap2 project for x86 target.
-- Diagnosing build/test failures with ccc-x86
-- Will fix compiler bugs if needed

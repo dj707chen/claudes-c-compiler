@@ -47,6 +47,239 @@ _mm_blendv_epi8(__m128i __a, __m128i __b, __m128i __mask)
     return __r;
 }
 
+/* === SSE4.1 min/max signed byte === */
+
+/* _mm_max_epi8: packed signed 8-bit max (PMAXSB) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_max_epi8(__m128i __a, __m128i __b)
+{
+    signed char *__pa = (signed char *)&__a;
+    signed char *__pb = (signed char *)&__b;
+    __m128i __r;
+    signed char *__pr = (signed char *)&__r;
+    for (int __i = 0; __i < 16; __i++)
+        __pr[__i] = __pa[__i] > __pb[__i] ? __pa[__i] : __pb[__i];
+    return __r;
+}
+
+/* _mm_min_epi8: packed signed 8-bit min (PMINSB) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_min_epi8(__m128i __a, __m128i __b)
+{
+    signed char *__pa = (signed char *)&__a;
+    signed char *__pb = (signed char *)&__b;
+    __m128i __r;
+    signed char *__pr = (signed char *)&__r;
+    for (int __i = 0; __i < 16; __i++)
+        __pr[__i] = __pa[__i] < __pb[__i] ? __pa[__i] : __pb[__i];
+    return __r;
+}
+
+/* === SSE4.1 min/max unsigned 32-bit and signed 32-bit === */
+
+/* _mm_max_epi32: packed signed 32-bit max (PMAXSD) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_max_epi32(__m128i __a, __m128i __b)
+{
+    int *__pa = (int *)&__a;
+    int *__pb = (int *)&__b;
+    __m128i __r;
+    int *__pr = (int *)&__r;
+    for (int __i = 0; __i < 4; __i++)
+        __pr[__i] = __pa[__i] > __pb[__i] ? __pa[__i] : __pb[__i];
+    return __r;
+}
+
+/* _mm_min_epi32: packed signed 32-bit min (PMINSD) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_min_epi32(__m128i __a, __m128i __b)
+{
+    int *__pa = (int *)&__a;
+    int *__pb = (int *)&__b;
+    __m128i __r;
+    int *__pr = (int *)&__r;
+    for (int __i = 0; __i < 4; __i++)
+        __pr[__i] = __pa[__i] < __pb[__i] ? __pa[__i] : __pb[__i];
+    return __r;
+}
+
+/* _mm_max_epu32: packed unsigned 32-bit max (PMAXUD) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_max_epu32(__m128i __a, __m128i __b)
+{
+    unsigned int *__pa = (unsigned int *)&__a;
+    unsigned int *__pb = (unsigned int *)&__b;
+    __m128i __r;
+    unsigned int *__pr = (unsigned int *)&__r;
+    for (int __i = 0; __i < 4; __i++)
+        __pr[__i] = __pa[__i] > __pb[__i] ? __pa[__i] : __pb[__i];
+    return __r;
+}
+
+/* _mm_min_epu32: packed unsigned 32-bit min (PMINUD) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_min_epu32(__m128i __a, __m128i __b)
+{
+    unsigned int *__pa = (unsigned int *)&__a;
+    unsigned int *__pb = (unsigned int *)&__b;
+    __m128i __r;
+    unsigned int *__pr = (unsigned int *)&__r;
+    for (int __i = 0; __i < 4; __i++)
+        __pr[__i] = __pa[__i] < __pb[__i] ? __pa[__i] : __pb[__i];
+    return __r;
+}
+
+/* _mm_max_epu16: packed unsigned 16-bit max (PMAXUW) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_max_epu16(__m128i __a, __m128i __b)
+{
+    unsigned short *__pa = (unsigned short *)&__a;
+    unsigned short *__pb = (unsigned short *)&__b;
+    __m128i __r;
+    unsigned short *__pr = (unsigned short *)&__r;
+    for (int __i = 0; __i < 8; __i++)
+        __pr[__i] = __pa[__i] > __pb[__i] ? __pa[__i] : __pb[__i];
+    return __r;
+}
+
+/* _mm_min_epu16: packed unsigned 16-bit min (PMINUW) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_min_epu16(__m128i __a, __m128i __b)
+{
+    unsigned short *__pa = (unsigned short *)&__a;
+    unsigned short *__pb = (unsigned short *)&__b;
+    __m128i __r;
+    unsigned short *__pr = (unsigned short *)&__r;
+    for (int __i = 0; __i < 8; __i++)
+        __pr[__i] = __pa[__i] < __pb[__i] ? __pa[__i] : __pb[__i];
+    return __r;
+}
+
+/* _mm_max_epi16: packed signed 16-bit max - already in SSE2 (PMAXSW)
+ * _mm_min_epi16: packed signed 16-bit min - already in SSE2 (PMINSW) */
+
+/* === SSE4.1 zero/sign extension === */
+
+/* _mm_cvtepi8_epi16: sign-extend 8 low bytes to 8 shorts (PMOVSXBW) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cvtepi8_epi16(__m128i __a)
+{
+    signed char *__pa = (signed char *)&__a;
+    __m128i __r;
+    short *__pr = (short *)&__r;
+    for (int __i = 0; __i < 8; __i++)
+        __pr[__i] = __pa[__i];
+    return __r;
+}
+
+/* _mm_cvtepi8_epi32: sign-extend 4 low bytes to 4 ints (PMOVSXBD) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cvtepi8_epi32(__m128i __a)
+{
+    signed char *__pa = (signed char *)&__a;
+    __m128i __r;
+    int *__pr = (int *)&__r;
+    for (int __i = 0; __i < 4; __i++)
+        __pr[__i] = __pa[__i];
+    return __r;
+}
+
+/* _mm_cvtepu8_epi16: zero-extend 8 low bytes to 8 shorts (PMOVZXBW) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cvtepu8_epi16(__m128i __a)
+{
+    unsigned char *__pa = (unsigned char *)&__a;
+    __m128i __r;
+    short *__pr = (short *)&__r;
+    for (int __i = 0; __i < 8; __i++)
+        __pr[__i] = __pa[__i];
+    return __r;
+}
+
+/* _mm_cvtepu8_epi32: zero-extend 4 low bytes to 4 ints (PMOVZXBD) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cvtepu8_epi32(__m128i __a)
+{
+    unsigned char *__pa = (unsigned char *)&__a;
+    __m128i __r;
+    int *__pr = (int *)&__r;
+    for (int __i = 0; __i < 4; __i++)
+        __pr[__i] = __pa[__i];
+    return __r;
+}
+
+/* _mm_cvtepi16_epi32: sign-extend 4 low shorts to 4 ints (PMOVSXWD) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cvtepi16_epi32(__m128i __a)
+{
+    short *__pa = (short *)&__a;
+    __m128i __r;
+    int *__pr = (int *)&__r;
+    for (int __i = 0; __i < 4; __i++)
+        __pr[__i] = __pa[__i];
+    return __r;
+}
+
+/* _mm_cvtepu16_epi32: zero-extend 4 low shorts to 4 ints (PMOVZXWD) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cvtepu16_epi32(__m128i __a)
+{
+    unsigned short *__pa = (unsigned short *)&__a;
+    __m128i __r;
+    int *__pr = (int *)&__r;
+    for (int __i = 0; __i < 4; __i++)
+        __pr[__i] = __pa[__i];
+    return __r;
+}
+
+/* _mm_cvtepi32_epi64: sign-extend 2 low ints to 2 longs (PMOVSXDQ) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cvtepi32_epi64(__m128i __a)
+{
+    int *__pa = (int *)&__a;
+    __m128i __r;
+    long long *__pr = (long long *)&__r;
+    for (int __i = 0; __i < 2; __i++)
+        __pr[__i] = __pa[__i];
+    return __r;
+}
+
+/* _mm_cvtepu32_epi64: zero-extend 2 low ints to 2 longs (PMOVZXDQ) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cvtepu32_epi64(__m128i __a)
+{
+    unsigned int *__pa = (unsigned int *)&__a;
+    __m128i __r;
+    long long *__pr = (long long *)&__r;
+    for (int __i = 0; __i < 2; __i++)
+        __pr[__i] = __pa[__i];
+    return __r;
+}
+
+/* === SSE4.1 test === */
+
+/* _mm_testz_si128: test all zeros (PTEST) - returns 1 if (a & b) == 0 */
+static __inline__ int __attribute__((__always_inline__))
+_mm_testz_si128(__m128i __a, __m128i __b)
+{
+    return (__a.__val[0] & __b.__val[0]) == 0 && (__a.__val[1] & __b.__val[1]) == 0;
+}
+
+/* === SSE4.1 multiply === */
+
+/* _mm_mullo_epi32: packed 32-bit multiply low (PMULLD) */
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_mullo_epi32(__m128i __a, __m128i __b)
+{
+    int *__pa = (int *)&__a;
+    int *__pb = (int *)&__b;
+    __m128i __r;
+    int *__pr = (int *)&__r;
+    for (int __i = 0; __i < 4; __i++)
+        __pr[__i] = __pa[__i] * __pb[__i];
+    return __r;
+}
+
 /* === CRC32 intrinsics (SSE4.2) === */
 
 static __inline__ unsigned int __attribute__((__always_inline__))

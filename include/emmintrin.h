@@ -473,6 +473,28 @@ _mm_cmpgt_epi32(__m128i __a, __m128i __b)
     return __r;
 }
 
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cmplt_epi8(__m128i __a, __m128i __b)
+{
+    /* Returns 0xFF for lanes where a < b (signed), 0 otherwise.
+     * Equivalent to _mm_cmpgt_epi8(b, a). */
+    return __CCC_M128I_FROM_BUILTIN(__builtin_ia32_pcmpgtb128(__b, __a));
+}
+
+static __inline__ __m128i __attribute__((__always_inline__))
+_mm_cmplt_epi32(__m128i __a, __m128i __b)
+{
+    /* Returns 0xFFFFFFFF for lanes where a < b (signed), 0 otherwise.
+     * Equivalent to _mm_cmpgt_epi32(b, a). */
+    int *__pa = (int *)&__a;
+    int *__pb = (int *)&__b;
+    __m128i __r;
+    int *__pr = (int *)&__r;
+    for (int __i = 0; __i < 4; __i++)
+        __pr[__i] = __pa[__i] < __pb[__i] ? -1 : 0;
+    return __r;
+}
+
 /* _mm_mul_epu32: unsigned 32x32->64 multiply (PMULUDQ)
  * Multiplies the low 32-bit unsigned integers from each 64-bit lane:
  * result[0] = (u32)a[0] * (u32)b[0], result[1] = (u32)a[2] * (u32)b[2] */
