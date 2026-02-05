@@ -2152,13 +2152,11 @@ impl InstructionEncoder {
 
         match &ops[0] {
             Operand::Label(label) => {
-                // Strip @PLT suffix and use PLT32 relocation (same as call)
                 self.bytes.push(0xE9);
-                let (sym, reloc_type) = if label.ends_with("@PLT") {
-                    (label.trim_end_matches("@PLT"), R_386_PLT32)
-                } else {
-                    (label.as_str(), R_386_PC32)
-                };
+                // Always use R_386_PLT32 for branch targets, matching modern GCC/binutils.
+                // R_386_PC32 is rejected by ld for PIE executables calling shared lib functions.
+                let sym = label.strip_suffix("@PLT").unwrap_or(label.as_str());
+                let reloc_type = R_386_PLT32;
                 self.add_relocation(sym, reloc_type, -4);
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 Ok(())
@@ -2254,13 +2252,10 @@ impl InstructionEncoder {
 
         match &ops[0] {
             Operand::Label(label) => {
-                // Strip @PLT suffix and use PLT32 relocation (same as call)
                 self.bytes.extend_from_slice(&[0x0F, 0x80 + cc]);
-                let (sym, reloc_type) = if label.ends_with("@PLT") {
-                    (label.trim_end_matches("@PLT"), R_386_PLT32)
-                } else {
-                    (label.as_str(), R_386_PC32)
-                };
+                // Always use R_386_PLT32 for branch targets, matching modern GCC/binutils.
+                let sym = label.strip_suffix("@PLT").unwrap_or(label.as_str());
+                let reloc_type = R_386_PLT32;
                 self.add_relocation(sym, reloc_type, -4);
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 Ok(())
@@ -2277,12 +2272,9 @@ impl InstructionEncoder {
         match &ops[0] {
             Operand::Label(label) => {
                 self.bytes.push(0xE8);
-                let reloc_type = if label.ends_with("@PLT") {
-                    R_386_PLT32
-                } else {
-                    R_386_PC32
-                };
-                let sym = label.trim_end_matches("@PLT");
+                // Always use R_386_PLT32 for branch targets, matching modern GCC/binutils.
+                let reloc_type = R_386_PLT32;
+                let sym = label.strip_suffix("@PLT").unwrap_or(label.as_str());
                 self.add_relocation(sym, reloc_type, -4);
                 self.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 Ok(())

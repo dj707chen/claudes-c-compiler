@@ -1,2 +1,0 @@
-Fix libtiff x86: encode_jmp uses R_X86_64_PC32 instead of R_X86_64_PLT32 for label targets.
-This causes PIE link failures when tail-calling shared library functions.
