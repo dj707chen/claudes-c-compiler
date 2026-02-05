@@ -100,7 +100,7 @@ The pipeline is driven from `Target::generate_assembly_with_opts_and_debug` in
 
 ## Directory Layout
 
-The backend is split into 18 shared modules at the top level and 4
+The backend is split into 19 shared modules at the top level and 4
 architecture-specific subdirectories:
 
 ```
