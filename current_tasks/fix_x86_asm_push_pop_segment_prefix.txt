@@ -1,0 +1,10 @@
+Fix x86 assembler: add segment override prefix (gs:/fs:) to push/pop memory operand encoding.
+
+The encode_push and encode_pop functions in src/backend/x86/assembler/encoder.rs
+do not call emit_segment_prefix() before encoding memory operands. This causes
+instructions like "push %gs:0x0(%rip)" to be missing the 0x65 segment prefix byte,
+generating incorrect machine code. This breaks the Linux kernel build because the
+shifted offsets cause relocation mismatches detected by GNU ld.
+
+The fix is to add emit_segment_prefix() calls in encode_push and encode_pop for
+their Memory operand arms, matching the pattern used in encode_mov and encode_alu.
