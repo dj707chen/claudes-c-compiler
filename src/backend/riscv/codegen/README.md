@@ -191,13 +191,15 @@ The allocator draws from two pools:
 
 | Pool | Registers | Count | Notes |
 |------|-----------|-------|-------|
-| Always available | `s1`, `s7`-`s11` | 6 | Never used by any codegen helper |
-| Conditionally available | `s2`-`s6` | 5 | Available because call staging uses only caller-saved `t3`/`t4`/`t5` |
+| Primary | `s1`, `s7`-`s11` | 6 | Never used by any codegen helper |
+| Secondary | `s2`-`s6` | 5 | Freed by three-phase call staging using caller-saved `t3`/`t4`/`t5` |
 
-In total, up to **11 callee-saved registers** can be allocated. The earlier
-design reserved `s2`-`s6` for call argument staging; the current three-phase
-staging strategy (see [Call Argument Staging](#three-phase-call-argument-staging)) freed
-them for the allocator, significantly reducing stack frame sizes.
+All **11 callee-saved registers** are unconditionally added to the allocation
+pool. The earlier design reserved `s2`-`s6` for call argument staging; the
+current three-phase staging strategy (see [Call Argument Staging](#three-phase-call-argument-staging))
+freed them for the allocator, significantly reducing stack frame sizes. The
+only reason a register may be excluded from the pool is if a function's inline
+assembly clobbers it (see [Inline Assembly Interaction](#inline-assembly-interaction)).
 
 ### Inline Assembly Interaction
 
@@ -725,7 +727,9 @@ The template engine handles:
 Input/output operands that need a register are assigned from a scratch pool:
 
 - **GP**: `t0`, `t1`, `t2`, `t3`, `t4`, `t5`, `t6`, `a2`, `a3`, `a4`, `a5`,
-  `a6`, `a7` (13 registers).
+  `a6`, `a7`, `a0`, `a1` (15 registers). The `a0`/`a1` entries are placed
+  last as a fallback for inline asm blocks with many operands (e.g., 8
+  outputs + 8 inputs) that would exhaust the first 13 entries.
 - **FP**: `ft0`-`ft7` (8 registers).
 
 Each operand gets a unique register. Excluded registers (from clobber lists

@@ -29,11 +29,11 @@ pub(super) const RISCV_CALLEE_SAVED: [PhysReg; 6] = [
     PhysReg(1), PhysReg(7), PhysReg(8), PhysReg(9), PhysReg(10), PhysReg(11),
 ];
 
-/// Callee-saved registers that are conditionally available for allocation.
-/// s2-s6 are used as staging temporaries in emit_call_reg_args when a call
-/// has >= 4 GP register arguments. Any that are NOT needed for call staging
-/// can be allocated by the register allocator, giving up to 11 callee-saved
-/// registers total (vs. 6 when all are reserved).
+/// Additional callee-saved registers available for allocation.
+/// s2-s6 were originally reserved for call argument staging, but the current
+/// three-phase staging strategy uses only caller-saved t3/t4/t5, so all five
+/// are now unconditionally available for the register allocator, giving up to
+/// 11 callee-saved registers total (vs. 6 without these).
 /// PhysReg(2)=s2, PhysReg(3)=s3, PhysReg(4)=s4, PhysReg(5)=s5, PhysReg(6)=s6.
 pub(super) const CALL_TEMP_CALLEE_SAVED: [PhysReg; 5] = [
     PhysReg(2), PhysReg(3), PhysReg(4), PhysReg(5), PhysReg(6),
