@@ -705,30 +705,27 @@ impl Lowerer {
                     //   inline (alone) = inline definition only (no external def)
                     let is_gnu_inline_no_extern_def = self.is_gnu_inline_no_extern_def(&func.attrs);
                     // C99 6.7.4p7: A plain `inline` definition (without `extern`)
-                    // does not provide an external definition. The TU must not emit
-                    // a standalone function body; call sites reference the external
-                    // symbol provided by the TU that uses `extern inline`.
+                    // does not provide an external definition. We lower these as
+                    // static functions so their bodies are available for inlining.
+                    // If unreferenced, they are skipped. If referenced but all calls
+                    // are inlined, dead code elimination removes them.
                     // Note: this only applies in C99 mode; in GNU89 mode, `inline`
                     // without `extern` provides the external definition.
                     let is_c99_inline_only = !self.gnu89_inline
                         && func.attrs.is_inline() && !func.attrs.is_extern()
                         && !func.attrs.is_static() && !func.attrs.is_gnu_inline()
                         && !self.has_non_inline_decl.contains(&func.name);
-                    if is_c99_inline_only && !func.attrs.is_always_inline() {
-                        // C99 inline-only functions don't provide an external definition
-                        // and can be skipped entirely. However, always_inline functions
-                        // must be lowered (as static) so their body is available for inlining.
-                        continue;
-                    }
-                    let can_skip = if func.attrs.is_static() {
+                    let can_skip = if is_c99_inline_only {
+                        // C99 inline-only functions don't provide an external definition.
+                        // Lower them as static so their bodies are available for inlining.
+                        // If all call sites are inlined, dead code elimination removes them.
+                        // If not inlined, they're emitted as local symbols (safe fallback).
+                        true
+                    } else if func.attrs.is_static() {
                         // static or static inline: internal linkage, safe to skip if unreferenced
                         true
                     } else if is_gnu_inline_no_extern_def {
                         // extern inline (gnu89 or gnu_inline attr): no external def, skip if unreferenced
-                        true
-                    } else if is_c99_inline_only && func.attrs.is_always_inline() {
-                        // C99 inline-only + always_inline: lowered as static for inlining,
-                        // skip if unreferenced
                         true
                     } else {
                         false

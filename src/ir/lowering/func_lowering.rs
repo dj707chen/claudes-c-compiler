@@ -518,7 +518,7 @@ impl Lowerer {
         //
         // C99 mode (default for -std=c99 and later):
         //   extern inline = provides external definition → global
-        //   plain inline (no extern) = inline definition only → weak global
+        //   plain inline (no extern) = inline definition only → static (local)
         //
         // C99 6.7.4p7 additional rule: if ANY file-scope declaration of the function
         // does NOT include `inline`, then the definition provides an external definition.
@@ -534,15 +534,13 @@ impl Lowerer {
             && func.attrs.is_inline() && !func.attrs.is_extern()
             && !func.attrs.is_static() && !func.attrs.is_gnu_inline()
             && !self.has_non_inline_decl.contains(&func.name);
-        // C99 inline definitions should be emitted as weak global symbols, not
-        // static. This ensures all TUs that take the address of an inline function
-        // resolve to the same symbol, and the strong `extern inline` definition
-        // from the TU that provides it overrides the weak copies at link time.
-        // Exception: C99 inline + always_inline functions are lowered as static
-        // since they must be inlined and don't need an external definition.
-        let is_c99_inline_always_inline = is_c99_inline_def && func.attrs.is_always_inline();
+        // C99 inline-only definitions (inline without extern/static, all declarations
+        // have inline) don't provide an external definition per C99 6.7.4p7.
+        // We lower them as static so their bodies are available for inlining.
+        // If all call sites are inlined, dead code elimination removes them.
+        // If not inlined, they're emitted as local symbols (safe fallback).
         let is_static = func.attrs.is_static() || self.static_functions.contains(&func.name)
-            || is_gnu_inline_no_extern_def || is_c99_inline_always_inline;
+            || is_gnu_inline_no_extern_def || is_c99_inline_def;
         let next_val = self.func_mut().next_value;
         let param_alloca_vals = std::mem::take(&mut self.func_mut().param_alloca_values);
         let global_init_labels = std::mem::take(&mut self.func_mut().global_init_label_blocks);
@@ -560,7 +558,7 @@ impl Lowerer {
             next_value_id: next_val,
             section: func.attrs.section.clone(),
             visibility: func.attrs.visibility.clone(),
-            is_weak: func.attrs.is_weak() || (is_c99_inline_def && !is_c99_inline_always_inline),
+            is_weak: func.attrs.is_weak(),
             is_used: func.attrs.is_used(),
             has_inlined_calls: false,
             param_alloca_values: param_alloca_vals,

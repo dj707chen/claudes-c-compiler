@@ -30,8 +30,8 @@ impl Lowerer {
     fn is_skippable_function(&self, func: &FunctionDef) -> bool {
         let is_gnu_inline_no_extern_def = self.is_gnu_inline_no_extern_def(&func.attrs);
         // C99 plain `inline` (without `extern` or `static`) does not provide
-        // an external definition, so it is always skippable (and in fact
-        // always skipped in lower() regardless of references).
+        // an external definition. These are lowered as static when referenced,
+        // so they can be skipped when unreferenced.
         // Per C99 6.7.4p7: unless there's a non-inline declaration of this function.
         // Note: in GNU89 mode, `inline` without `extern` provides an external def,
         // so this rule does not apply.
