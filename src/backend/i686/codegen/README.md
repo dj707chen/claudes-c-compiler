@@ -88,7 +88,7 @@ All code generation logic lives under `src/backend/i686/codegen/`:
 | `calls.rs` | Call ABI: stack argument layout, `regparm` register argument emission (reverse-order to avoid clobbering `%eax`), call instruction emission (direct/indirect/PLT), result retrieval (`%eax`, `%eax:%edx`, `st(0)` for float/double/F128). |
 | `memory.rs` | Load/store for all type widths, 64-bit and F128 split load/store via `%eax:%edx` and x87, constant-offset load/store with offset folding, GEP address computation (direct, indirect, over-aligned), dynamic alloca support, memcpy emission via `rep movsb`, and over-aligned alloca handling via runtime `leal`+`andl` alignment. |
 | `alu.rs` | Integer ALU: `add`/`sub`/`mul`/`and`/`or`/`xor`/`shl`/`shr`/`sar`, signed and unsigned division (`idivl`/`divl`), LEA strength reduction for multiply by 3/5/9, immediate-operand fast paths, integer negation (`negl`), bitwise NOT (`notl`), CLZ (`lzcntl`), CTZ (`tzcntl`), bswap, popcount, and F32 negation (SSE `xorps` with sign-bit mask).  (F64 negation uses x87 `fchs` in `emit.rs`; F128 negation is in `float_ops.rs`.) |
-| `i128_ops.rs` | 64-bit register-pair operations (called "i128" in the shared trait): `add`/`adc`, `sub`/`sbb`, `mul` (schoolbook cross-product), `shld`/`shrd` shifts with 32-bit boundary handling, constant shift specializations, comparisons (XOR+OR reduction for equality, high-first branching for ordered), `__divdi3`/`__udivdi3` calls for division, float conversions via x87 `fildq`/`fisttpq` with unsigned 2^63 correction. |
+| `i128_ops.rs` | 64-bit register-pair operations (called "i128" in the shared trait): `add`/`adc`, `sub`/`sbb`, `mul` (schoolbook cross-product), `shld`/`shrd` shifts with 32-bit boundary handling, constant shift specializations, comparisons (`cmpl`+`sete`+`andb` for equality, high-first branching for ordered), `__divdi3`/`__udivdi3` calls for division, float conversions via x87 `fildq`/`fisttpq` with unsigned 2^63 correction. |
 | `comparison.rs` | Float comparisons (SSE `ucomiss` for F32, x87 `fucomip` for F64/F128), integer comparisons (`cmpl` + `setCC` for all 10 comparison operators), fused compare-and-branch (`cmpl` + `jCC`), and `select` via conditional branching (test condition, branch to true/false label, copy appropriate value). |
 | `casts.rs` | Type conversions: integer widening (`movsbl`/`movzbl`/`movswl`/`movzwl`) and narrowing, float-to-int and int-to-float via x87 (`fildl`/`fildq`/`fisttpl`/`fisttpq`), F128 conversions via `fldt`/`fstpt`, unsigned-to-float fixup for values with the sign bit set (2^64 / 2^63 correction paths), SSE scalar F32 casts (`cvtsi2ssl`/`cvttss2si`), and I64 widening/narrowing (sign-extension via `cltd` and half-word extraction). |
 | `returns.rs` | Return value placement: 64-bit in `%eax:%edx` (loaded via `emit_load_acc_pair`), F32 returned in `st(0)` (pushed from `%eax` bit pattern via `flds`), F64 returned in `st(0)` (loaded from `%eax:%edx` 8-byte pair via `fldl`), F128 returned in `st(0)` (loaded via `fldt`), 32-bit scalars in `%eax` (no-op). Second return value accessors for F32/F64/F128 multi-register returns. |
@@ -97,10 +97,10 @@ All code generation logic lives under `src/backend/i686/codegen/`:
 | `variadic.rs` | `va_start` (compute stack pointer to first unnamed argument via `leal`), `va_arg` (load from `va_list` pointer, advance by argument size with 4-byte minimum; special handling for I64/U64/F64 8-byte types, F128 12-byte types via `fldt`, and I128 16-byte quad-word copy), `va_copy` (copy 4-byte pointer). On i686, `va_list` is a simple pointer into the stack frame. |
 | `atomics.rs` | 32-bit atomic operations: `lock xadd` for add, `xchg` for exchange, `lock cmpxchg` loops for sub/and/or/xor/nand, `xchgb` for test-and-set, `lock cmpxchg` for CAS, atomic load/store via plain `mov` (with `mfence` for SeqCst), and `mfence` for fences. 64-bit atomics are in `emit.rs` via `lock cmpxchg8b`. |
 | `intrinsics.rs` | SSE packed 128-bit operations (arithmetic, compare, logical, shuffle, shift, insert/extract), AES-NI (`aesenc`/`aesenclast`/`aesdec`/`aesdeclast`/`aesimc`/`aeskeygenassist`), CLMUL (`pclmulqdq`), CRC32 (`crc32b`/`crc32l`; 64-bit CRC32 emulated via two 32-bit ops), memory fences (`lfence`/`mfence`/`sfence`/`pause`/`clflush`), non-temporal stores (`movnti`/`movntdq`/`movntpd`), x87 FPU math (`fsqrt`/`fabs` for F32/F64), frame/return address intrinsics, and thread pointer (`%gs:0`). |
-| `inline_asm.rs` | Inline assembly template substitution (delegates to shared x86 parser), GCC constraint classification (`r`/`q` for GP, `a`/`b`/`c`/`d`/`S`/`D` for specific registers, `m` for memory, `i` for immediate, `t`/`u` for x87 `st(0)`/`st(1)`, `{regname}` for explicit registers, `=@cc` for condition codes, digit-tied operands), and operand formatting with size modifiers (`%b` for 8-bit low, `%h` for 8-bit high, `%w` for 16-bit, `%k` for 32-bit). |
-| `asm_emitter.rs` | `InlineAsmEmitter` trait impl: scratch register allocation from 6 GP registers (`ecx`/`edx`/`esi`/`edi`/`eax`/`ebx`) and 8 XMM registers (`xmm0`-`xmm7`), operand loading/storing for GP, XMM, x87 FPU stack, 64-bit register pairs, and condition code outputs (`=@cc` via `setCC`/`movzbl`), memory operand resolution (ebp-relative, over-aligned, indirect), and memory fallback when GP registers are exhausted. |
+| `inline_asm.rs` | Inline assembly template substitution (delegates to shared x86 parser) and operand formatting with size modifiers (`%b` for 8-bit low, `%h` for 8-bit high, `%w` for 16-bit, `%k` for 32-bit). |
+| `asm_emitter.rs` | `InlineAsmEmitter` trait impl: GCC constraint classification (`r`/`q` for GP, `a`/`b`/`c`/`d`/`S`/`D` for specific registers, `m` for memory, `i` for immediate, `t`/`u` for x87 `st(0)`/`st(1)`, `{regname}` for explicit registers, `=@cc` for condition codes, digit-tied operands), scratch register allocation from 6 GP registers (`ecx`/`edx`/`esi`/`edi`/`eax`/`ebx`) and 8 XMM registers (`xmm0`-`xmm7`), operand loading/storing for GP, XMM, x87 FPU stack, 64-bit register pairs, and condition code outputs (`=@cc` via `setCC`/`movzbl`), memory operand resolution (ebp-relative, over-aligned, indirect), and memory fallback when GP registers are exhausted. |
 | `peephole.rs` | Post-emission assembly optimizer (see dedicated section below). |
-| `mod.rs` | Module re-exports. |
+| `mod.rs` | Module declarations and visibility. |
 
 ---
 
@@ -335,7 +335,7 @@ arithmetic:
 | Bitwise ops | Pair of `andl`/`orl`/`xorl` on both halves |
 | Negate | `notl` both halves, `addl $1` low, `adcl $0` high |
 | Bitwise NOT | `notl` both halves |
-| Compare (eq/ne) | `cmpl` + `sete` on each half, `andb` the results (for ne: XOR the AND) |
+| Compare (eq/ne) | `cmpl` + `sete` on each half, `andb` the results (for ne: `xorb $1`) |
 | Compare (ordered) | Compare high halves first; if equal, compare low halves (unsigned for low half, signed/unsigned for high depending on the comparison) |
 
 The right-hand operand is pushed onto the stack before the operation and
@@ -486,13 +486,16 @@ intrinsics, avoiding function call overhead.
 - **Arithmetic**: `paddw`, `psubw`, `paddd`, `psubd`, `pmulhw`, `pmaddwd`
 - **Compare**: `pcmpeqb`, `pcmpeqd`, `pcmpgtw`, `pcmpgtb`
 - **Logical**: `pand`, `por`, `pxor`, `psubusb`, `psubsb`
-- **Shuffle / Pack**: `pshufd`, `packssdw`, `packuswb`, `punpcklbw`,
-  `punpckhbw`, `punpcklwd`, `punpckhwd`
+- **Shuffle / Pack**: `pshufd`, `pshuflw`, `pshufhw`, `packssdw`,
+  `packsswb`, `packuswb`, `punpcklbw`, `punpckhbw`, `punpcklwd`,
+  `punpckhwd`
 - **Shift**: `pslldq`, `psrldq`, `psllq`, `psrlq`, `psllw`, `psrlw`,
   `psraw`, `psrad`, `pslld`, `psrld` (with immediate)
 - **Move mask**: `pmovmskb`
-- **Broadcast**: `set_epi8` (byte splat), `set_epi32` (dword splat)
-- **Load / Store**: `loaddqu`, `storedqu`, `loadldi128` (low 64-bit load)
+- **Broadcast**: `set_epi8` (byte splat), `set_epi16` (word splat),
+  `set_epi32` (dword splat)
+- **Load / Store**: `loaddqu`, `storedqu`, `loadldi128` (low 64-bit load),
+  `storeldi128` (low 64-bit store)
 - **Insert / Extract**: `pinsrw`, `pextrw`, `pinsrb`, `pextrb`, `pinsrd`,
   `pextrd` (SSE4.1 byte/dword variants)
 
