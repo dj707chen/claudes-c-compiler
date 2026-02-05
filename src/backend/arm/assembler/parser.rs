@@ -795,14 +795,19 @@ fn expand_macros_impl(
 
 /// Resolve .set/.equ constants with simple integer values in instruction lines.
 ///
-/// First pass: collect all `.set name, value` where value is a numeric constant.
-/// Second pass: replace occurrences of those names (as whole words) in all lines.
+/// Sequential single-pass: as each `.set name, value` is encountered, update the
+/// constant map. For non-.set lines, substitute whole-word occurrences of known
+/// constant names with their current values. This correctly handles constants that
+/// are reassigned (e.g., `.Lasm_alt_mode` in kernel ALTERNATIVE macros).
 /// The `.set` directives themselves are preserved for the encoder to process.
 fn resolve_set_constants(lines: &[String]) -> Vec<String> {
     use std::collections::HashMap;
     let mut constants: HashMap<String, String> = HashMap::new();
+    let mut result = Vec::with_capacity(lines.len());
 
-    // First pass: collect constant definitions
+    // Single sequential pass: update constants as .set directives are encountered,
+    // and substitute using the current map state at each line. This correctly handles
+    // constants that are reassigned (e.g., .Lasm_alt_mode in kernel ALTERNATIVE macros).
     for line in lines {
         let trimmed = strip_comment(line).trim().to_lowercase();
         if trimmed.starts_with(".set ") || trimmed.starts_with(".set\t")
@@ -818,44 +823,43 @@ fn resolve_set_constants(lines: &[String]) -> Vec<String> {
                     constants.insert(name, value_str);
                 }
             }
-        }
-    }
-
-    if constants.is_empty() {
-        return lines.to_vec();
-    }
-
-    // Second pass: substitute constants in all lines
-    lines.iter().map(|line| {
-        let mut result = line.clone();
-        for (name, value) in &constants {
-            // Replace whole-word occurrences of the constant name
-            let mut new_result = String::with_capacity(result.len());
-            let bytes = result.as_bytes();
-            let name_bytes = name.as_bytes();
-            let mut i = 0;
-            while i < bytes.len() {
-                if i + name_bytes.len() <= bytes.len()
-                    && &bytes[i..i + name_bytes.len()] == name_bytes
-                {
-                    // Check word boundary before
-                    let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-                    // Check word boundary after
-                    let after_pos = i + name_bytes.len();
-                    let after_ok = after_pos >= bytes.len() || !is_ident_char(bytes[after_pos]);
-                    if before_ok && after_ok {
-                        new_result.push_str(value);
-                        i += name_bytes.len();
-                        continue;
+            result.push(line.clone());
+        } else if constants.is_empty() {
+            result.push(line.clone());
+        } else {
+            // Substitute current constant values in this line
+            let mut substituted = line.clone();
+            for (name, value) in &constants {
+                // Replace whole-word occurrences of the constant name
+                let mut new_result = String::with_capacity(substituted.len());
+                let bytes = substituted.as_bytes();
+                let name_bytes = name.as_bytes();
+                let mut i = 0;
+                while i < bytes.len() {
+                    if i + name_bytes.len() <= bytes.len()
+                        && &bytes[i..i + name_bytes.len()] == name_bytes
+                    {
+                        // Check word boundary before
+                        let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                        // Check word boundary after
+                        let after_pos = i + name_bytes.len();
+                        let after_ok = after_pos >= bytes.len() || !is_ident_char(bytes[after_pos]);
+                        if before_ok && after_ok {
+                            new_result.push_str(value);
+                            i += name_bytes.len();
+                            continue;
+                        }
                     }
+                    new_result.push(bytes[i] as char);
+                    i += 1;
                 }
-                new_result.push(bytes[i] as char);
-                i += 1;
+                substituted = new_result;
             }
-            result = new_result;
+            result.push(substituted);
         }
-        result
-    }).collect()
+    }
+
+    result
 }
 
 /// Check if a byte is a valid identifier character (alphanumeric, underscore, dot).
