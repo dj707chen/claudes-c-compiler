@@ -423,10 +423,12 @@ The `BuiltinIntrinsic` enum covers a wide range of operations:
 - **Prefetch**: `__builtin_prefetch` (lowered as a no-op)
 - **x86 SSE/SSE2/SSE4.1/AES-NI/CLMUL**: complete 128-bit SIMD instruction coverage
 
-The `is_builtin()` function extends the static map with pattern-matched recognition
-of `__atomic_*` and `__sync_*` families (handled by the lowerer's
-`expr_atomics.rs`), preventing sema from emitting spurious "implicit declaration"
-warnings for these.
+The `is_builtin()` function extends the static map with direct recognition of
+`__builtin_choose_expr`, `__builtin_unreachable`, and `__builtin_trap` (handled
+by name in the lowerer's `try_lower_builtin_call` before the map lookup), plus
+pattern-matched recognition of `__atomic_*` and `__sync_*` families (handled by
+the lowerer's `expr_atomics.rs`). This prevents sema from emitting spurious
+"implicit declaration" warnings for these builtins.
 
 ---
 
