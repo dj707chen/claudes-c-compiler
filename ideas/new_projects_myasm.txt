@@ -255,3 +255,4 @@ Tracking project build/test results with MY_ASM=builtin MY_LD=builtin
 | sed_GNU | PASS | TODO | TODO | TODO | Fixed: (1) __builtin_mul_overflow same-size signed-to-unsigned overflow detection, (2) _Static_assert now rejects non-constant variable references, (3) added missing __SCHAR_WIDTH__ and other GCC WIDTH macros |
 | minimap2 | PASS | TODO | TODO | TODO | Fixed: added missing SSE intrinsics: _mm_cmplt_epi8/_mm_cmplt_epi32 (emmintrin.h), _mm_max_epi8/_mm_min_epi8 + many SSE4.1 intrinsics (smmintrin.h) |
 | ECL     | PASS | TODO | TODO | TODO | Fixed x86/i686 asm: jmp/jcc @PLT labels now strip suffix and use PLT32 relocation instead of PC32 with @PLT in symbol name |
+| nelua   | PASS | TODO | TODO | TODO | Fixed: added bundled x86intrin.h (rdtsc/rdtscp/bsf/bsr/bswap/rotate intrinsics) to prevent fallthrough to GCC's vector-type-heavy header |
