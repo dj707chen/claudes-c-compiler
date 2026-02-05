@@ -16,11 +16,14 @@
 //! This is critical for threaded interpreters (like wasm3) that use indirect
 //! tail calls to dispatch between opcode handlers without overflowing the stack.
 //!
-//! SAFETY: We must NOT apply this optimization when the called function might
-//! receive a pointer to a local variable (on the current stack frame). After
-//! frame teardown, such pointers become dangling. We detect this conservatively
-//! by checking whether the function contains any `leaq offset(%rbp), %reg`
-//! instructions, which take the address of a stack slot.
+//! SAFETY: We must NOT apply this optimization when:
+//! 1. The function passes a pointer to a local variable to the callee.
+//!    After frame teardown, such pointers become dangling. Detected by checking
+//!    for `leaq offset(%rbp), %reg` instructions (address-of-local).
+//! 2. The function uses dynamic stack allocation (__builtin_alloca / DynAlloca).
+//!    Alloca'd memory lives below %rsp. After frame teardown (movq %rbp, %rsp),
+//!    that memory is in unowned space and may be clobbered by the tail-called
+//!    function's stack frame. Detected by checking for `subq %reg, %rsp`.
 
 use super::super::types::*;
 
@@ -30,9 +33,9 @@ pub(super) fn optimize_tail_calls(store: &mut LineStore, infos: &mut [LineInfo])
     let len = infos.len();
     let mut changed = false;
 
-    // Track whether the current function has any lea-of-local instructions.
-    // Reset at each function boundary.
-    let mut func_has_lea_local = false;
+    // Track whether the function has unsafe stack usage that prevents tail calls:
+    // address-of-local (lea from rbp/rsp) or dynamic alloca (subq %reg, %rsp).
+    let mut func_suppress_tailcall = false;
     // Track whether we're inside a function (seen pushq %rbp or label)
     let mut in_function = false;
 
@@ -43,14 +46,14 @@ pub(super) fn optimize_tail_calls(store: &mut LineStore, infos: &mut [LineInfo])
             continue;
         }
 
-        // Detect function boundaries to reset the lea-local flag
+        // Detect function boundaries to reset the suppression flag
         match infos[i].kind {
             LineKind::Label => {
                 let line = store.get(i);
                 let trimmed = &line[infos[i].trim_start as usize..];
                 // A global label (not starting with .L) indicates a new function
                 if !trimmed.starts_with(".L") {
-                    func_has_lea_local = false;
+                    func_suppress_tailcall = false;
                     in_function = true;
                 }
                 i += 1;
@@ -60,7 +63,7 @@ pub(super) fn optimize_tail_calls(store: &mut LineStore, infos: &mut [LineInfo])
                 let line = store.get(i);
                 let trimmed = &line[infos[i].trim_start as usize..];
                 if trimmed == ".cfi_startproc" {
-                    func_has_lea_local = false;
+                    func_suppress_tailcall = false;
                     in_function = true;
                 }
                 i += 1;
@@ -70,15 +73,22 @@ pub(super) fn optimize_tail_calls(store: &mut LineStore, infos: &mut [LineInfo])
         }
 
         // Check for lea-of-local instructions: leaq offset(%rbp), %reg
-        // or leaq offset(%rsp), %reg
-        if in_function && !func_has_lea_local {
+        // or leaq offset(%rsp), %reg.
+        // Also check for dynamic stack allocation (subq %reg, %rsp) which is
+        // emitted by __builtin_alloca/DynAlloca. After frame teardown, alloca'd
+        // memory lives below %rsp and may be clobbered by the tail-called function.
+        if in_function && !func_suppress_tailcall {
             if let LineKind::Other { .. } = infos[i].kind {
                 let line = store.get(i);
                 let trimmed = &line[infos[i].trim_start as usize..];
                 if (trimmed.starts_with("leaq ") || trimmed.starts_with("leal ") || trimmed.starts_with("lea "))
                     && (trimmed.contains("(%rbp)") || trimmed.contains("(%rsp)"))
                 {
-                    func_has_lea_local = true;
+                    func_suppress_tailcall = true;
+                }
+                // Detect dynamic alloca: subq %rax, %rsp (or any register subtracted from rsp)
+                if trimmed.starts_with("subq %") && trimmed.ends_with(", %rsp") {
+                    func_suppress_tailcall = true;
                 }
             }
         }
@@ -89,8 +99,8 @@ pub(super) fn optimize_tail_calls(store: &mut LineStore, infos: &mut [LineInfo])
         }
 
         // We found a call instruction. Check if it can be tail-call-optimized.
-        // Skip if the function takes addresses of locals (unsafe with frame teardown).
-        if func_has_lea_local {
+        // Skip if the function has unsafe stack usage (lea-of-local or alloca).
+        if func_suppress_tailcall {
             i += 1;
             continue;
         }
@@ -349,6 +359,39 @@ mod tests {
         ].join("\n") + "\n";
         let result = peephole_optimize(asm);
         assert!(result.contains("jmp foo@PLT"), "should convert PLT call to jmp: {}", result);
+    }
+
+    #[test]
+    fn test_no_tail_call_with_dyn_alloca() {
+        // If the function uses dynamic stack allocation (alloca), the tail call
+        // could clobber the alloca'd memory after frame teardown.
+        let asm = [
+            "test_alloca:",
+            "    pushq %rbp",
+            "    .cfi_def_cfa_offset 16",
+            "    .cfi_offset %rbp, -16",
+            "    movq %rsp, %rbp",
+            "    .cfi_def_cfa_register %rbp",
+            "    subq $32, %rsp",
+            "    movq %rbx, -32(%rbp)",
+            "    movq %r12, -24(%rbp)",
+            "    addq $15, %rax",
+            "    andq $-16, %rax",
+            "    subq %rax, %rsp",        // dynamic alloca!
+            "    movq %rsp, %rax",
+            "    movq %rax, -16(%rbp)",
+            "    call memset",
+            "    call printf",
+            "    movq -32(%rbp), %rbx",
+            "    movq -24(%rbp), %r12",
+            "    movq %rbp, %rsp",
+            "    popq %rbp",
+            "    ret",
+            ".size test_alloca, .-test_alloca",
+        ].join("\n") + "\n";
+        let result = peephole_optimize(asm);
+        assert!(result.contains("call printf"), "should NOT convert when alloca exists: {}", result);
+        assert!(result.contains("ret"), "should keep ret when alloca exists: {}", result);
     }
 
     #[test]

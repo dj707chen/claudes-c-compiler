@@ -539,20 +539,25 @@ functions whose last action is calling another function and returning its result
 
 **Algorithm:**
 1. Track function boundaries via global labels and `.cfi_startproc` directives.
-2. For each function, scan for `leaq offset(%rbp), %reg` or `leaq offset(%rsp), %reg`
-   instructions, which take the address of a stack-allocated local variable.
+2. For each function, scan for patterns that make tail calls unsafe:
+   - `leaq offset(%rbp), %reg` or `leaq offset(%rsp), %reg` (address-of-local)
+   - `subq %reg, %rsp` (dynamic stack allocation from `__builtin_alloca`)
 3. For each `call` instruction, check if the subsequent instructions form a pure
    epilogue sequence: callee-save restores (`LoadRbp`), frame teardown
    (`movq %rbp, %rsp`), `popq %rbp`, and `ret`. No instruction between the call
    and ret may write to `%rax` (which carries the return value).
-4. If the pattern matches and the function has no lea-of-local instructions:
+4. If the pattern matches and the function has no unsafe stack usage:
    NOP the `call` and replace the `ret` with `jmp TARGET`.
 
-**Safety:** The pass must NOT apply when the called function might receive a pointer
-to a local variable on the current stack frame. After frame teardown, such pointers
-become dangling. This is detected conservatively by checking for any `leaq` with
-`(%rbp)` or `(%rsp)` memory operands in the current function. If found, all tail
-call optimization is suppressed for that function.
+**Safety:** The pass must NOT apply when:
+- The called function might receive a pointer to a local variable. After frame
+  teardown, such pointers become dangling. Detected by checking for `leaq` with
+  `(%rbp)` or `(%rsp)` memory operands.
+- The function uses dynamic stack allocation (`__builtin_alloca`). Alloca'd memory
+  lives below `%rsp`; after frame teardown (`movq %rbp, %rsp`), the tail-called
+  function's stack frame may overlap and clobber it. Detected by checking for
+  `subq %reg, %rsp`.
+If either pattern is found, all tail call optimization is suppressed for that function.
 
 This optimization is critical for threaded interpreters (like wasm3) that use
 indirect tail calls (`call *%r10` -> `jmp *%r10`) to dispatch between opcode
