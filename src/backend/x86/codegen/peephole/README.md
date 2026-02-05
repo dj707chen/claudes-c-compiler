@@ -712,13 +712,13 @@ hot path.
 | `passes/mod.rs` | ~1200 | Pass pipeline orchestrator (`peephole_optimize` entry point) + unit tests |
 | `passes/helpers.rs` | ~290 | Shared utilities: register rewriting, label parsing, epilogue detection, instruction analysis |
 | `passes/local_patterns.rs` | ~490 | Phase 1: combined local pass (7 merged patterns) + movq/extension fusion |
-| `passes/push_pop.rs` | ~130 | Phase 1: push/pop pair elimination + binop/push/pop pattern |
+| `passes/push_pop.rs` | ~175 | Phase 1: push/pop pair elimination + binop/push/pop pattern |
 | `passes/store_forwarding.rs` | ~390 | Phase 2: global store-to-load forwarding across fallthrough labels |
 | `passes/copy_propagation.rs` | ~230 | Phase 2: register copy propagation across basic blocks |
 | `passes/dead_code.rs` | ~400 | Phase 2+5b: dead register moves, dead stores (windowed), never-read stores (whole-function) |
 | `passes/compare_branch.rs` | ~170 | Phase 2: compare-and-branch fusion |
 | `passes/memory_fold.rs` | ~150 | Phase 2: fold stack loads into ALU memory operands |
 | `passes/loop_trampoline.rs` | ~520 | Phase 4: SSA loop backedge trampoline coalescing |
-| `passes/tail_call.rs` | ~380 | Phase 5: tail call optimization (call+epilogue+ret -> epilogue+jmp) |
+| `passes/tail_call.rs` | ~420 | Phase 5: tail call optimization (call+epilogue+ret -> epilogue+jmp) |
 | `passes/callee_saves.rs` | ~160 | Phase 6: unused callee-saved register save/restore elimination |
 | `passes/frame_compact.rs` | ~320 | Phase 7: stack frame compaction after dead store/callee-save elimination |
