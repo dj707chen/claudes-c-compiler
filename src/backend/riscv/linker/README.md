@@ -142,7 +142,7 @@ A separate 5-phase pipeline (with sub-phases) produces `ET_DYN` shared objects:
 |-------------------|-------|---------------------------------------------------------------|
 | `mod.rs`          | ~22   | Module declaration; re-exports `link_builtin` and `link_shared` as public API |
 | `link.rs`         | ~3900 | Core linker: `link_builtin` (executable) and `link_shared` (shared library). Imports all shared types and helpers from `relocations.rs`. |
-| `relocations.rs`  | ~670  | Shared building blocks: relocation constants, instruction patching (`patch_*`), symbol resolution (`resolve_symbol_value`, `find_hi20_value`), shared types (`GlobalSym`, `MergedSection`, `InputSecRef`), ELF writing helpers (`write_shdr`, `write_phdr`, `align_up`, `pad_to`), and utility functions (`build_gnu_hash`, `resolve_archive_members`, `output_section_name`, `section_order`) |
+| `relocations.rs`  | ~620  | Shared building blocks: relocation constants, instruction patching (`patch_*`), symbol resolution (`resolve_symbol_value`, `find_hi20_value`), shared types (`GlobalSym`, `MergedSection`, `InputSecRef`), and utility functions (`build_gnu_hash`, `resolve_archive_members`, `output_section_name`, `section_order`). ELF writing helpers (`write_shdr`, `write_phdr`, `write_phdr_at`, `align_up`, `pad_to`) are re-exported from `linker_common`. |
 | `elf_read.rs`     | ~90   | Re-exports shared linker_common types; delegates ELF parsing to shared infrastructure |
 
 ## Key Data Structures

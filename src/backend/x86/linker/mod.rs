@@ -125,74 +125,16 @@ pub fn link_builtin(
         load_file(path, &mut objects, &mut globals, &mut needed_sonames, &lib_path_strings)?;
     }
 
-    // Parse user args: extract -L paths, -l libs, bare .o/.a file paths,
-    // and linker flags like --export-dynamic
-    let mut extra_lib_paths: Vec<String> = Vec::new();
-    let mut libs_to_load: Vec<String> = Vec::new();
-    let mut extra_object_files: Vec<String> = Vec::new();
-    let mut export_dynamic = false;
-    let mut rpath_entries: Vec<String> = Vec::new();
-    let mut use_runpath = false;
-    let mut defsym_defs: Vec<(String, String)> = Vec::new();
-    let mut gc_sections = false;
-    let mut i = 0;
-    let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
-    while i < args.len() {
-        let arg = args[i];
-        if arg == "-rdynamic" {
-            export_dynamic = true;
-        } else if let Some(path) = arg.strip_prefix("-L") {
-            let p = if path.is_empty() && i + 1 < args.len() { i += 1; args[i] } else { path };
-            extra_lib_paths.push(p.to_string());
-        } else if let Some(lib) = arg.strip_prefix("-l") {
-            let l = if lib.is_empty() && i + 1 < args.len() { i += 1; args[i] } else { lib };
-            libs_to_load.push(l.to_string());
-        } else if let Some(wl_arg) = arg.strip_prefix("-Wl,") {
-            let parts: Vec<&str> = wl_arg.split(',').collect();
-            let mut j = 0;
-            while j < parts.len() {
-                let part = parts[j];
-                if part == "--export-dynamic" || part == "-export-dynamic" || part == "-E" {
-                    export_dynamic = true;
-                } else if let Some(rp) = part.strip_prefix("-rpath=") {
-                    rpath_entries.push(rp.to_string());
-                } else if part == "-rpath" && j + 1 < parts.len() {
-                    j += 1;
-                    rpath_entries.push(parts[j].to_string());
-                } else if part == "--enable-new-dtags" {
-                    use_runpath = true;
-                } else if part == "--disable-new-dtags" {
-                    use_runpath = false;
-                } else if let Some(lpath) = part.strip_prefix("-L") {
-                    extra_lib_paths.push(lpath.to_string());
-                } else if let Some(lib) = part.strip_prefix("-l") {
-                    libs_to_load.push(lib.to_string());
-                } else if let Some(defsym_arg) = part.strip_prefix("--defsym=") {
-                    // --defsym=SYMBOL=EXPR: define a symbol alias
-                    // TODO: only supports symbol-to-symbol aliasing, not arbitrary expressions
-                    if let Some(eq_pos) = defsym_arg.find('=') {
-                        defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
-                    }
-                } else if part == "--defsym" && j + 1 < parts.len() {
-                    // Two-argument form: --defsym SYM=VAL
-                    j += 1;
-                    let defsym_arg = parts[j];
-                    if let Some(eq_pos) = defsym_arg.find('=') {
-                        defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
-                    }
-                } else if part == "--gc-sections" {
-                    gc_sections = true;
-                } else if part == "--no-gc-sections" {
-                    gc_sections = false;
-                }
-                j += 1;
-            }
-        } else if !arg.starts_with('-') && Path::new(arg).exists() {
-            // Bare file path: .o object file, .a static archive, or other input file
-            extra_object_files.push(arg.to_string());
-        }
-        i += 1;
-    }
+    // Parse user args using shared infrastructure
+    let parsed_args = linker_common::parse_linker_args(user_args);
+    let extra_lib_paths = parsed_args.extra_lib_paths;
+    let libs_to_load = parsed_args.libs_to_load;
+    let extra_object_files = parsed_args.extra_object_files;
+    let export_dynamic = parsed_args.export_dynamic;
+    let rpath_entries = parsed_args.rpath_entries;
+    let use_runpath = parsed_args.use_runpath;
+    let defsym_defs = parsed_args.defsym_defs;
+    let gc_sections = parsed_args.gc_sections;
 
     // Load extra object/archive files from user args (these come from
     // linker_ordered_items when the driver passes pre-existing .o/.a files)
@@ -290,22 +232,7 @@ pub fn link_builtin(
     }
 
     // Check for truly undefined (non-weak, non-dynamic, non-linker-defined) symbols
-    {
-        let mut truly_undefined: Vec<&String> = globals.iter()
-            .filter(|(name, sym)| {
-                sym.defined_in.is_none() && !sym.is_dynamic
-                    && (sym.info >> 4) != STB_WEAK
-                    && !linker_common::is_linker_defined_symbol(name)
-            })
-            .map(|(name, _)| name)
-            .collect();
-        if !truly_undefined.is_empty() {
-            truly_undefined.sort();
-            truly_undefined.truncate(20);
-            return Err(format!("undefined symbols: {}",
-                truly_undefined.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
-        }
-    }
+    linker_common::check_undefined_symbols_elf64(&globals, 20)?;
 
     // Merge sections (skip dead sections when gc-sections is active)
     let mut output_sections: Vec<OutputSection> = Vec::new();
@@ -1444,20 +1371,8 @@ fn emit_shared_library(
     let get_shname = |n: &str| -> u32 { shstr_offsets.get(n).copied().unwrap_or(0) };
 
     // Helper: write a 64-byte ELF64 section header
-    fn write_shdr_so(elf: &mut Vec<u8>, name: u32, sh_type: u32, flags: u64,
-                  addr: u64, file_offset: u64, size: u64, link: u32, info: u32,
-                  align: u64, entsize: u64) {
-        elf.extend_from_slice(&name.to_le_bytes());
-        elf.extend_from_slice(&sh_type.to_le_bytes());
-        elf.extend_from_slice(&flags.to_le_bytes());
-        elf.extend_from_slice(&addr.to_le_bytes());
-        elf.extend_from_slice(&file_offset.to_le_bytes());
-        elf.extend_from_slice(&size.to_le_bytes());
-        elf.extend_from_slice(&link.to_le_bytes());
-        elf.extend_from_slice(&info.to_le_bytes());
-        elf.extend_from_slice(&align.to_le_bytes());
-        elf.extend_from_slice(&entsize.to_le_bytes());
-    }
+    // Use shared write_elf64_shdr from linker_common (aliased locally for brevity)
+    let write_shdr_so = linker_common::write_elf64_shdr;
 
     // Pre-count section indices for cross-references
     let dynsym_shidx: u32 = 2; // NULL=0, .gnu.hash=1, .dynsym=2
@@ -2800,21 +2715,8 @@ fn emit_executable(
 
     let get_shname = |n: &str| -> u32 { shstr_offsets.get(n).copied().unwrap_or(0) };
 
-    // Helper: write a 64-byte ELF64 section header
-    fn write_shdr(elf: &mut Vec<u8>, name: u32, sh_type: u32, flags: u64,
-                  addr: u64, file_offset: u64, size: u64, link: u32, info: u32,
-                  align: u64, entsize: u64) {
-        elf.extend_from_slice(&name.to_le_bytes());
-        elf.extend_from_slice(&sh_type.to_le_bytes());
-        elf.extend_from_slice(&flags.to_le_bytes());
-        elf.extend_from_slice(&addr.to_le_bytes());
-        elf.extend_from_slice(&file_offset.to_le_bytes());
-        elf.extend_from_slice(&size.to_le_bytes());
-        elf.extend_from_slice(&link.to_le_bytes());
-        elf.extend_from_slice(&info.to_le_bytes());
-        elf.extend_from_slice(&align.to_le_bytes());
-        elf.extend_from_slice(&entsize.to_le_bytes());
-    }
+    // Use shared write_elf64_shdr from linker_common (aliased locally for brevity)
+    let write_shdr = linker_common::write_elf64_shdr;
 
     // Pre-count section indices for cross-references (dynsym_shidx, dynstr_shidx)
     let dynsym_shidx: u32 = 3; // NULL=0, .interp=1, .gnu.hash=2, .dynsym=3

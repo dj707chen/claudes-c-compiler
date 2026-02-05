@@ -9,8 +9,8 @@
 //! - **Symbol resolution**: `resolve_symbol_value`, `got_sym_key`,
 //!   `find_hi20_value` for AUIPC/LO12 relocation pairing.
 //! - **Shared types**: `GlobalSym`, `MergedSection`, `InputSecRef`.
-//! - **ELF writing helpers**: `write_shdr`, `write_phdr`, `write_phdr_at`,
-//!   `align_up`, `pad_to`.
+//! - **ELF writing helpers** (re-exported from `linker_common`): `write_shdr`,
+//!   `write_phdr`, `write_phdr_at`, `align_up`, `pad_to`.
 //! - **Utility functions**: `build_gnu_hash`, `find_versioned_soname`,
 //!   `resolve_archive_members`, `output_section_name`, `section_order`.
 
@@ -455,66 +455,13 @@ pub fn output_section_name(name: &str, sh_type: u32, sh_flags: u64) -> Option<St
 }
 
 // ── ELF writing helpers ──────────────────────────────────────────────────
+// Re-exported from linker_common for backward compatibility with link.rs imports.
 
-/// Write a 64-byte section header to the ELF buffer.
-pub fn write_shdr(elf: &mut Vec<u8>, name: u32, sh_type: u32, flags: u64,
-              addr: u64, offset: u64, size: u64, link: u32, info: u32,
-              align: u64, entsize: u64) {
-    elf.extend_from_slice(&name.to_le_bytes());
-    elf.extend_from_slice(&sh_type.to_le_bytes());
-    elf.extend_from_slice(&flags.to_le_bytes());
-    elf.extend_from_slice(&addr.to_le_bytes());
-    elf.extend_from_slice(&offset.to_le_bytes());
-    elf.extend_from_slice(&size.to_le_bytes());
-    elf.extend_from_slice(&link.to_le_bytes());
-    elf.extend_from_slice(&info.to_le_bytes());
-    elf.extend_from_slice(&align.to_le_bytes());
-    elf.extend_from_slice(&entsize.to_le_bytes());
-}
-
-// ── Utility functions ────────────────────────────────────────────────────
-
-pub fn align_up(val: u64, align: u64) -> u64 {
-    if align <= 1 {
-        val
-    } else {
-        (val + align - 1) & !(align - 1)
-    }
-}
-
-pub fn pad_to(buf: &mut Vec<u8>, target: usize) {
-    if buf.len() < target {
-        buf.resize(target, 0);
-    }
-}
-
-/// Write a program header by appending to the ELF buffer.
-pub fn write_phdr(elf: &mut Vec<u8>, p_type: u32, p_flags: u32,
-              offset: u64, vaddr: u64, paddr: u64,
-              filesz: u64, memsz: u64, align: u64) {
-    elf.extend_from_slice(&p_type.to_le_bytes());
-    elf.extend_from_slice(&p_flags.to_le_bytes());
-    elf.extend_from_slice(&offset.to_le_bytes());
-    elf.extend_from_slice(&vaddr.to_le_bytes());
-    elf.extend_from_slice(&paddr.to_le_bytes());
-    elf.extend_from_slice(&filesz.to_le_bytes());
-    elf.extend_from_slice(&memsz.to_le_bytes());
-    elf.extend_from_slice(&align.to_le_bytes());
-}
-
-/// Write a program header at a specific offset in the buffer (for backpatching).
-pub fn write_phdr_at(elf: &mut [u8], off: usize, p_type: u32, p_flags: u32,
-                 offset: u64, vaddr: u64, paddr: u64,
-                 filesz: u64, memsz: u64, align: u64) {
-    elf[off..off+4].copy_from_slice(&p_type.to_le_bytes());
-    elf[off+4..off+8].copy_from_slice(&p_flags.to_le_bytes());
-    elf[off+8..off+16].copy_from_slice(&offset.to_le_bytes());
-    elf[off+16..off+24].copy_from_slice(&vaddr.to_le_bytes());
-    elf[off+24..off+32].copy_from_slice(&paddr.to_le_bytes());
-    elf[off+32..off+40].copy_from_slice(&filesz.to_le_bytes());
-    elf[off+40..off+48].copy_from_slice(&memsz.to_le_bytes());
-    elf[off+48..off+56].copy_from_slice(&align.to_le_bytes());
-}
+pub use crate::backend::linker_common::write_elf64_shdr as write_shdr;
+pub use crate::backend::linker_common::write_elf64_phdr as write_phdr;
+pub use crate::backend::linker_common::write_elf64_phdr_at as write_phdr_at;
+pub use crate::backend::linker_common::align_up_64 as align_up;
+pub use crate::backend::linker_common::pad_to;
 
 /// Build a minimal .gnu.hash section for the given number of dynamic symbols.
 ///

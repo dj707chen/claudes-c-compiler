@@ -78,7 +78,10 @@ pub fn link_builtin(
     crt_objects_before: &[&str],
     crt_objects_after: &[&str],
 ) -> Result<(), String> {
-    let is_static = user_args.iter().any(|a| a == "-static");
+    // Parse user arguments using shared infrastructure
+    let parsed_args = linker_common::parse_linker_args(user_args);
+    let is_static = parsed_args.is_static;
+    let defsym_defs = parsed_args.defsym_defs;
 
     // Collect all input files: CRT before + user objects + bare files from args + CRT after
     let mut all_inputs: Vec<String> = Vec::new();
@@ -88,61 +91,20 @@ pub fn link_builtin(
     for obj in object_files {
         all_inputs.push(obj.to_string());
     }
-    // Include bare file paths from user_args (e.g., .o or .a files passed via linker flags)
-    for arg in user_args {
-        if !arg.starts_with('-') && std::path::Path::new(arg.as_str()).exists() {
-            all_inputs.push(arg.to_string());
-        }
-    }
+    all_inputs.extend(parsed_args.extra_object_files);
     for crt in crt_objects_after {
         all_inputs.push(crt.to_string());
     }
 
-    // Use pre-resolved library search paths and needed libraries.
-    // Also parse user_args for any additional -l flags or -Wl,-l flags.
-    let lib_search_paths: Vec<String> = lib_paths.iter().map(|s| s.to_string()).collect();
-    let mut needed_libs: Vec<String> = needed_libs.iter().map(|s| s.to_string()).collect();
-    let mut defsym_defs: Vec<(String, String)> = Vec::new();
-    {
-        let mut i = 0;
-        let args: Vec<&str> = user_args.iter().map(|s| s.as_str()).collect();
-        while i < args.len() {
-            let arg = args[i];
-            if let Some(rest) = arg.strip_prefix("-l") {
-                let libname = if rest.is_empty() && i + 1 < args.len() {
-                    i += 1;
-                    args[i]
-                } else {
-                    rest
-                };
-                needed_libs.push(libname.to_string());
-            } else if let Some(wl) = arg.strip_prefix("-Wl,") {
-                let parts: Vec<&str> = wl.split(',').collect();
-                let mut j = 0;
-                while j < parts.len() {
-                    let part = parts[j];
-                    if let Some(lib) = part.strip_prefix("-l") {
-                        needed_libs.push(lib.to_string());
-                    } else if let Some(defsym_arg) = part.strip_prefix("--defsym=") {
-                        // --defsym=SYMBOL=EXPR: define a symbol alias
-                        // TODO: only supports symbol-to-symbol aliasing, not arbitrary expressions
-                        if let Some(eq_pos) = defsym_arg.find('=') {
-                            defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
-                        }
-                    } else if part == "--defsym" && j + 1 < parts.len() {
-                        // Two-argument form: --defsym SYM=VAL
-                        j += 1;
-                        let defsym_arg = parts[j];
-                        if let Some(eq_pos) = defsym_arg.find('=') {
-                            defsym_defs.push((defsym_arg[..eq_pos].to_string(), defsym_arg[eq_pos + 1..].to_string()));
-                        }
-                    }
-                    j += 1;
-                }
-            }
-            i += 1;
+    // Merge pre-resolved library search paths with any extra -L paths from args
+    let mut lib_search_paths: Vec<String> = lib_paths.iter().map(|s| s.to_string()).collect();
+    for p in parsed_args.extra_lib_paths {
+        if !lib_search_paths.contains(&p) {
+            lib_search_paths.push(p);
         }
     }
+    let mut needed_libs: Vec<String> = needed_libs.iter().map(|s| s.to_string()).collect();
+    needed_libs.extend(parsed_args.libs_to_load);
 
     // ── Phase 1: Read all input object files ────────────────────────────
     // Archives (.a) passed directly as inputs use demand-driven extraction
