@@ -7,7 +7,7 @@
 //! - Line comment stripping (`#`, `//`, `@`)
 //! - Semicolon splitting (GAS statement separator)
 //! - `.rept`/`.irp`/`.endr` block expansion
-//! - `.macro`/`.endm` definition and expansion
+//! - `.macro`/`.endm`/`.purgem` definition, expansion, and removal
 //! - `.if`/`.elseif`/`.else`/`.endif` conditional assembly evaluation
 
 use crate::backend::asm_expr;
@@ -468,6 +468,10 @@ pub fn expand_macros(
             macros.insert(name.to_string(), MacroDef { params, defaults, body });
         } else if trimmed == ".endm" || trimmed.starts_with(".endm ") || trimmed.starts_with(".endm\t") {
             // stray .endm — skip
+        } else if trimmed.starts_with(".purgem ") || trimmed.starts_with(".purgem\t") {
+            // Remove a macro definition (GAS .purgem directive)
+            let name = trimmed[".purgem".len()..].trim();
+            macros.remove(name);
         } else if !trimmed.is_empty() && !trimmed.starts_with('.') && !trimmed.starts_with('#') {
             let first_word = trimmed.split([' ', '\t']).next().unwrap_or("");
             let potential_name = first_word.trim_end_matches(':');
@@ -951,5 +955,42 @@ mod tests {
         let (params, defaults) = parse_macro_params("");
         assert!(params.is_empty());
         assert!(defaults.is_empty());
+    }
+
+    #[test]
+    fn test_purgem_removes_macro() {
+        // Simulates the kernel's insn-def.h pattern: define macro, use it, .purgem it
+        let lines = vec![
+            ".macro insn_r, opcode, func3",
+            ".4byte (\\opcode | \\func3)",
+            ".endm",
+            "insn_r 0x33, 0x0",
+            ".purgem insn_r",
+        ];
+        let result = expand_macros(&lines, &CommentStyle::HashAndSlashSlash).unwrap();
+        // The macro invocation should have been expanded
+        assert!(result.iter().any(|l| l.contains(".4byte")));
+        // The .purgem line should have been consumed (not passed through)
+        assert!(!result.iter().any(|l| l.contains(".purgem")));
+    }
+
+    #[test]
+    fn test_purgem_prevents_further_expansion() {
+        // After .purgem, the macro name should no longer be recognized
+        let lines = vec![
+            ".macro mymacro",
+            "nop",
+            ".endm",
+            "mymacro",
+            ".purgem mymacro",
+            "mymacro",
+        ];
+        let result = expand_macros(&lines, &CommentStyle::HashAndSlashSlash).unwrap();
+        // First invocation expands to "nop"
+        // After .purgem, second "mymacro" is passed through as-is (not a known macro)
+        let nop_count = result.iter().filter(|l| l.trim() == "nop").count();
+        assert_eq!(nop_count, 1, "macro should only expand once before .purgem");
+        let mymacro_count = result.iter().filter(|l| l.trim() == "mymacro").count();
+        assert_eq!(mymacro_count, 1, "after .purgem, 'mymacro' should be passed through literally");
     }
 }
