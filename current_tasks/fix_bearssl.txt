@@ -1,0 +1,1 @@
+Fix bearssl x86: add x86intrin.h bundled header so bearssl doesn't fall through to system GCC's xopintrin.h which uses vector builtins we can't parse.
