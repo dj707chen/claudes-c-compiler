@@ -110,8 +110,8 @@ Iterates over all `ExternalDecl` entries to register function metadata:
   and declarations into `module.constructors`, `module.destructors`, `module.aliases`.
 - **Error/noreturn/fastcall attributes**: Collected into `error_functions`,
   `noreturn_functions`, `fastcall_functions` sets.
-- **Symbol attributes**: Weak/visibility attributes on extern declarations are collected
-  into `module.symbol_attrs`.
+- **Symbol attributes**: Weak/visibility/symver attributes on extern declarations are
+  collected into `module.symbol_attrs` and `module.symver_directives`.
 
 #### Pass 2.5: collect referenced static functions
 
@@ -214,8 +214,9 @@ Iterates over all `ExternalDecl` entries and lowers them:
   `func_t add;` as function declarations rather than variable declarations.
 
 - **`TypeScopeFrame`** (`sema::type_context`) -- Undo-log for type scopes in
-  `TypeContext`. Records additions and shadows for typedefs, struct layouts, enum
-  constants, and function typedefs. Popped on scope exit to restore previous state.
+  `TypeContext`. Records additions and shadows for typedefs, struct layouts,
+  enum constants, typedef alignments, and the CType cache. Popped on scope exit
+  to restore previous state.
 
 ### Key Helpers
 
