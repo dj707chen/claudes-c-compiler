@@ -1,0 +1,16 @@
+Fix IrConst::narrowed_to() for U32 type producing wrong constant value
+
+Bug: narrowed_to() converts I64(4294967295) to U32 as IrConst::I32(-1),
+but the convention (used by from_i64) is IrConst::I64(val as u32 as i64).
+
+This causes compound assignments like `unsigned int ui = UINT_MAX; ui /= 5000.0;`
+to produce wrong results (1972248982 instead of 858993) because:
+1. mem2reg calls narrowed_to() which stores UINT_MAX as I32(-1)
+2. constant_fold casts I32(-1) to U64 (getting UINT64_MAX instead of UINT32_MAX)
+3. Float division computes wrong result
+4. Value is constant-folded to 0x758e2196
+
+Fix: In constants.rs narrowed_to(), U32 case should use I64((*v as u32) as i64)
+to match from_i64() convention.
+
+Started: 2026-02-05
