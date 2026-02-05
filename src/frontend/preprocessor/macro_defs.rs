@@ -774,10 +774,25 @@ impl MacroTable {
         //   CONCATENATE(FOO_, COUNT_ARGS(x))(args)
         // After prescan + paste + rescan, result = "FOO_5" which is function-like.
         // We must detect this so expand_trailing_func_macros connects it with "(args)".
+        //
+        // However, if the trailing identifier was already present in the pre-rescan
+        // body as a standalone token (e.g., `FOO EMPTY()` from DEFER patterns), then
+        // the tokens after it acted as a barrier per C11 §6.10.3.4 left-to-right
+        // scanning. Even if those barrier tokens expanded to nothing during rescan
+        // (like EMPTY() -> ""), the identifier should NOT connect with subsequent
+        // source `(`. Only identifiers that are NEW after rescan (produced by ##
+        // concatenation or other macro expansion) should allow trailing resolution.
         let result_ends_with_func_ident = if !body_ends_with_func_ident {
             if let Some(trailing) = extract_trailing_ident(&result) {
                 if let Some(tmac) = self.macros.get(trailing.as_str()) {
-                    tmac.is_function_like
+                    if tmac.is_function_like {
+                        // Only allow if this identifier was NOT already present as a
+                        // standalone token in the pre-rescan body. If it was, the
+                        // barrier tokens after it were intentional (DEFER pattern).
+                        !contains_standalone_ident(&body, trailing.as_str())
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 }
@@ -1167,6 +1182,35 @@ fn extract_trailing_ident(s: &str) -> Option<String> {
         return None;
     }
     Some(bytes_to_str(bytes, start, end).to_string())
+}
+
+/// Check if a string contains a given identifier as a standalone token
+/// (not part of a larger identifier). Used to detect whether a function-like
+/// macro name was already present in the pre-rescan body, indicating that
+/// barrier tokens after it (like EMPTY()) were intentional and the identifier
+/// should not be connected to trailing `(` from subsequent source tokens.
+fn contains_standalone_ident(s: &str, ident: &str) -> bool {
+    let s_bytes = s.as_bytes();
+    let ident_bytes = ident.as_bytes();
+    let ident_len = ident_bytes.len();
+    if ident_len == 0 || s_bytes.len() < ident_len {
+        return false;
+    }
+    let mut i = 0;
+    while i + ident_len <= s_bytes.len() {
+        if &s_bytes[i..i + ident_len] == ident_bytes {
+            // Check that the character before is not an ident character
+            let before_ok = i == 0 || !is_ident_cont_byte(s_bytes[i - 1]);
+            // Check that the character after is not an ident character
+            let after_ok = i + ident_len >= s_bytes.len()
+                || !is_ident_cont_byte(s_bytes[i + ident_len]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Stringify a macro argument per C11 6.10.3.2.
