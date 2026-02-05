@@ -662,17 +662,17 @@ Nop-marked lines before returning the optimized text.
 
 ### Iterative Convergence
 
-Local passes run iteratively (up to 8 rounds on x86-64 and ARM, up to 4
-rounds for cleanup) until no further changes are made. Each round makes a
+Local passes run iteratively (up to 8 rounds on all four architectures,
+up to 4 rounds for cleanup) until no further changes are made. Each round makes a
 single pass over all lines applying multiple pattern matchers
 simultaneously. This handles cascading opportunities where one optimization
 (e.g., removing a redundant load) exposes another (e.g., making a store
 dead).
 
-### x86-64 Pass Structure (Seven Phases)
+### x86-64 Pass Structure (Eight Phases)
 
 The x86-64 peephole (in `x86/codegen/peephole/`) is the most
-comprehensive, organized into seven phases:
+comprehensive, organized into eight phases:
 
 **Phase 1 -- Local passes** (iterative, up to 8 rounds):
 `combined_local_pass` merges several single-scan patterns into one:
@@ -712,13 +712,16 @@ trampolines created during code generation, followed by additional local
 cleanup if changes were made.
 
 **Phase 5 -- Tail call optimization**: Converts `call` + `ret` sequences
-into `jmp` (tail calls), plus a final never-read store elimination pass.
+into `jmp` (tail calls).
 
-**Phase 6 -- Unused callee-save elimination**: Removes prologue
+**Phase 6 -- Never-read store elimination**: Whole-function analysis
+removing stores to stack slots that are never subsequently loaded.
+
+**Phase 7 -- Unused callee-save elimination**: Removes prologue
 push/epilogue pop pairs for callee-saved registers that are never actually
 referenced in the function body.
 
-**Phase 7 -- Frame compaction**: Reassigns stack slot offsets to eliminate
+**Phase 8 -- Frame compaction**: Reassigns stack slot offsets to eliminate
 gaps left by eliminated stores, reducing total frame size.
 
 ### Other Architectures
@@ -732,9 +735,10 @@ gaps left by eliminated stores, reducing total frame size.
   .Lskip:` becomes `b.!cc .target`), and move-immediate chain optimization.
   Global passes include register copy propagation and dead store
   elimination.
-- **i686** and **RISC-V**: Follow the same three-phase structure (8/1/4
-  rounds) adapted to their respective instruction sets. The i686 peephole
-  additionally includes never-read store elimination as a final phase.
+- **RISC-V**: Follows the same three-phase structure (8/1/4 rounds)
+  adapted to its instruction set.
+- **i686**: Four-phase structure (8/1/4 rounds plus never-read store
+  elimination as a final phase) adapted to the 32-bit x86 instruction set.
 
 ---
 

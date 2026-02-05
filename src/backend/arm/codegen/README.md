@@ -4,9 +4,10 @@ Code generation targeting the AArch64 architecture with the AAPCS64 (Arm Archite
 Procedure Call Standard for 64-bit) calling convention. The backend translates the
 compiler's intermediate representation into AArch64 assembly text. A post-codegen
 peephole optimizer cleans up redundant patterns inherent to the stack-based code
-generation strategy. The backend includes a builtin assembler and static linker
-(enabled by default) with IFUNC/IPLT and TLS support, producing
-ELF executables directly without requiring an external toolchain.
+generation strategy. The backend includes a builtin assembler and linker
+(enabled by default) supporting both static and dynamic linking with
+IFUNC/IPLT and TLS support, producing ELF executables and shared
+libraries directly without requiring an external toolchain.
 
 ---
 
