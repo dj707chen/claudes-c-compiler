@@ -448,12 +448,11 @@ pub fn link_shared(
         }
     }
 
-    // For shared libraries, undefined symbols are allowed (they'll be resolved
-    // at load time). Don't check for truly undefined symbols.
-    // TODO: Add PLT/GOT dynamic relocations for imported symbols from other .so
-    // files. Currently, external dynamic symbol references in shared libraries are
-    // resolved at static link time which works for simple libraries but won't
-    // support cross-library function calls at runtime.
+    // Resolve remaining undefined symbols against system libraries (libc, libm,
+    // libgcc_s) and add DT_NEEDED entries for any that provide matched symbols.
+    resolve_dynamic_symbols(&mut globals, &mut needed_sonames)?;
+    // TODO: Handle cross-library .so dependencies (one user .so calling into
+    // another .so) beyond the hardcoded system library set.
 
     // Merge sections (no gc-sections for shared libraries)
     let mut output_sections: Vec<OutputSection> = Vec::new();
@@ -585,6 +584,25 @@ fn emit_shared_library(
         }
     }
 
+    // Pre-scan: collect named global symbols referenced by R_X86_64_64 relocations.
+    // These must appear in the dynamic symbol table so the dynamic linker can
+    // resolve them (supporting symbol interposition at runtime).
+    let mut abs64_sym_names: BTreeSet<String> = BTreeSet::new();
+    for obj in objects.iter() {
+        for sec_relas in &obj.relocations {
+            for rela in sec_relas {
+                if rela.rela_type == R_X86_64_64 {
+                    let si = rela.sym_idx as usize;
+                    if si >= obj.symbols.len() { continue; }
+                    let sym = &obj.symbols[si];
+                    if !sym.name.is_empty() && !sym.is_local() && sym.sym_type() != STT_SECTION {
+                        abs64_sym_names.insert(sym.name.clone());
+                    }
+                }
+            }
+        }
+    }
+
     // Collect all defined global symbols for export
     let mut dyn_sym_names: Vec<String> = Vec::new();
     let mut exported: Vec<String> = globals.iter()
@@ -607,6 +625,13 @@ fn emit_shared_library(
         if (gsym.is_dynamic || (gsym.defined_in.is_none() && gsym.section_idx == SHN_UNDEF))
             && !dyn_sym_names.contains(name)
         {
+            dyn_sym_names.push(name.clone());
+        }
+    }
+
+    // Ensure all symbols referenced by R_X86_64_64 data relocations are in dynsym
+    for name in &abs64_sym_names {
+        if !dyn_sym_names.contains(name) {
             dyn_sym_names.push(name.clone());
         }
     }
@@ -642,17 +667,22 @@ fn emit_shared_library(
     let gnu_hash_symoffset: usize = 1 + undef_syms.len(); // 1 for null entry + undefs
     let num_hashed = defined_syms.len();
     let gnu_hash_nbuckets = if num_hashed == 0 { 1 } else { num_hashed.next_power_of_two().max(1) } as u32;
-    let gnu_hash_bloom_size: u32 = 1;
+    // Scale bloom filter size with number of symbols for efficient lookup.
+    // Each 64-bit bloom word can effectively track ~32 symbols (2 bits each).
+    // Use next power of two for the number of words needed, minimum 1.
+    let gnu_hash_bloom_size: u32 = if num_hashed <= 32 { 1 }
+        else { ((num_hashed + 31) / 32).next_power_of_two() as u32 };
     let gnu_hash_bloom_shift: u32 = 6;
 
     let hashed_sym_hashes: Vec<u32> = defined_syms.iter()
         .map(|name| linker_common::gnu_hash(name.as_bytes()))
         .collect();
 
-    let mut bloom_word: u64 = 0;
+    let mut bloom_words: Vec<u64> = vec![0u64; gnu_hash_bloom_size as usize];
     for &h in &hashed_sym_hashes {
-        bloom_word |= 1u64 << (h as u64 % 64);
-        bloom_word |= 1u64 << ((h >> gnu_hash_bloom_shift) as u64 % 64);
+        let word_idx = ((h / 64) % gnu_hash_bloom_size) as usize;
+        bloom_words[word_idx] |= 1u64 << (h as u64 % 64);
+        bloom_words[word_idx] |= 1u64 << ((h >> gnu_hash_bloom_shift) as u64 % 64);
     }
 
     // Sort hashed (defined) symbols by bucket
@@ -1064,7 +1094,9 @@ fn emit_shared_library(
     w32(&mut out, gh+8, gnu_hash_bloom_size);
     w32(&mut out, gh+12, gnu_hash_bloom_shift);
     let bloom_off = gh + 16;
-    w64(&mut out, bloom_off, bloom_word);
+    for (i, &bw) in bloom_words.iter().enumerate() {
+        w64(&mut out, bloom_off + i * 8, bw);
+    }
     let buckets_off = bloom_off + (gnu_hash_bloom_size as usize * 8);
     for (i, &b) in gnu_hash_buckets.iter().enumerate() {
         w32(&mut out, buckets_off + i * 4, b);
@@ -1176,11 +1208,11 @@ fn emit_shared_library(
         }
     }
 
-    // Apply relocations and collect R_X86_64_RELATIVE entries
+    // Apply relocations and collect dynamic relocation entries
     let globals_snap: HashMap<String, GlobalSymbol> = globals.clone();
     let mut rela_dyn_entries: Vec<(u64, u64)> = Vec::new(); // (offset, value) for RELATIVE relocs
     let mut glob_dat_entries: Vec<(u64, String)> = Vec::new(); // (offset, sym_name) for GLOB_DAT relocs
-    let mut r64_entries: Vec<(u64, String, i64)> = Vec::new(); // (offset, sym_name, addend) for R_X86_64_64 relocs (external data refs)
+    let mut abs64_entries: Vec<(u64, String, i64)> = Vec::new(); // (offset, sym_name, addend) for R_X86_64_64 relocs
 
     // Add RELATIVE entries for GOT entries that point to local symbols,
     // and GLOB_DAT entries for GOT entries that point to external symbols
@@ -1220,29 +1252,19 @@ fn emit_shared_library(
 
                 match rela.rela_type {
                     R_X86_64_64 => {
-                        // Check if this is an external/undefined symbol that needs
-                        // a runtime R_X86_64_64 relocation (so the dynamic linker
-                        // can resolve it, e.g. function pointers in static data
-                        // referencing symbols from the host executable).
-                        let is_external = !sym.name.is_empty() && !sym.is_local() && {
-                            if let Some(g) = globals_snap.get(&sym.name) {
-                                g.section_idx == SHN_UNDEF || g.is_dynamic
-                            } else {
-                                true // unknown symbol = external
-                            }
-                        };
-                        if is_external && !sym.name.is_empty() {
-                            // External symbol: write 0 (or addend) and emit R_X86_64_64
-                            // dynamic relocation for the dynamic linker to resolve.
-                            w64(&mut out, fp, a as u64);
-                            r64_entries.push((p, sym.name.clone(), a));
-                        } else {
-                            let val = (s as i64 + a) as u64;
-                            w64(&mut out, fp, val);
-                            // Need R_X86_64_RELATIVE for this at load time
-                            if s != 0 {
-                                rela_dyn_entries.push((p, val));
-                            }
+                        let val = (s as i64 + a) as u64;
+                        w64(&mut out, fp, val);
+                        // Determine what kind of dynamic relocation to emit.
+                        // Named global/weak symbols need R_X86_64_64 dynamic relocs
+                        // (with symbol index) to support symbol interposition.
+                        // Section symbols and local symbols use R_X86_64_RELATIVE.
+                        let is_named_global = !sym.name.is_empty()
+                            && !sym.is_local()
+                            && sym.sym_type() != STT_SECTION;
+                        if is_named_global {
+                            abs64_entries.push((p, sym.name.clone(), a));
+                        } else if s != 0 {
+                            rela_dyn_entries.push((p, val));
                         }
                     }
                     R_X86_64_PC32 | R_X86_64_PLT32 => {
@@ -1315,7 +1337,7 @@ fn emit_shared_library(
 
     // Write .rela.dyn entries
     let relative_count = rela_dyn_entries.len();
-    let total_rela_count = relative_count + glob_dat_entries.len() + r64_entries.len();
+    let total_rela_count = relative_count + glob_dat_entries.len() + abs64_entries.len();
     let rela_dyn_size = total_rela_count as u64 * 24;
     let mut rd = rela_dyn_offset as usize;
     // First: R_X86_64_RELATIVE entries (type 8, no symbol)
@@ -1337,14 +1359,13 @@ fn emit_shared_library(
             rd += 24;
         }
     }
-    // Then: R_X86_64_64 entries (type 1, with symbol index + addend)
-    // These are for function/data pointers in static data that reference
-    // external symbols (resolved by the dynamic linker at load time).
-    for (rel_offset, sym_name, addend) in &r64_entries {
+    // Then: R_X86_64_64 entries (type 1, with symbol index) for named symbol
+    // references in data sections (function pointer tables, vtables, etc.)
+    for (rel_offset, sym_name, addend) in &abs64_entries {
         let si = dyn_sym_names.iter().position(|n| n == sym_name).map(|j| j + 1).unwrap_or(0) as u64;
         if rd + 24 <= out.len() {
-            w64(&mut out, rd, *rel_offset);         // r_offset = data location
-            w64(&mut out, rd+8, (si << 32) | R_X86_64_64 as u64); // r_info = sym_idx << 32 | type
+            w64(&mut out, rd, *rel_offset);         // r_offset
+            w64(&mut out, rd+8, (si << 32) | R_X86_64_64 as u64);
             w64(&mut out, rd+16, *addend as u64);   // r_addend
             rd += 24;
         }
