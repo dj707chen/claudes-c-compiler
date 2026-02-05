@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use elf::*;
-use crate::backend::linker_common;
+use crate::backend::linker_common::{self, Elf64Symbol, GlobalSymbolOps, OutputSection};
 use linker_common::DynStrTab;
 
 /// Dynamic linker path for AArch64
@@ -27,27 +27,6 @@ const BASE_ADDR: u64 = 0x400000;
 /// Page size for alignment
 const PAGE_SIZE: u64 = 0x10000; // AArch64 uses 64KB pages for linker alignment
 
-
-/// An output section in the final executable
-pub struct OutputSection {
-    pub name: String,
-    pub sh_type: u32,
-    pub flags: u64,
-    pub alignment: u64,
-    pub inputs: Vec<InputSection>,
-    pub data: Vec<u8>,
-    pub addr: u64,
-    pub file_offset: u64,
-    pub mem_size: u64,
-}
-
-/// Represents a merged input section
-pub struct InputSection {
-    pub object_idx: usize,
-    pub section_idx: usize,
-    pub output_offset: u64,
-    pub size: u64,
-}
 
 /// A resolved global symbol
 #[derive(Clone)]
@@ -69,6 +48,51 @@ pub struct GlobalSymbol {
     pub copy_reloc: bool,
     /// Symbol's value in the source shared library (for alias detection)
     pub lib_sym_value: u64,
+}
+
+impl GlobalSymbolOps for GlobalSymbol {
+    fn is_defined(&self) -> bool { self.defined_in.is_some() }
+    fn is_dynamic(&self) -> bool { self.is_dynamic }
+    fn info(&self) -> u8 { self.info }
+    fn section_idx(&self) -> u16 { self.section_idx }
+    fn value(&self) -> u64 { self.value }
+    fn size(&self) -> u64 { self.size }
+    fn new_defined(obj_idx: usize, sym: &Elf64Symbol) -> Self {
+        GlobalSymbol {
+            value: sym.value, size: sym.size, info: sym.info,
+            defined_in: Some(obj_idx), from_lib: None,
+            plt_idx: None, got_idx: None,
+            section_idx: sym.shndx, is_dynamic: false, copy_reloc: false,
+            lib_sym_value: 0,
+        }
+    }
+    fn new_common(obj_idx: usize, sym: &Elf64Symbol) -> Self {
+        GlobalSymbol {
+            value: sym.value, size: sym.size, info: sym.info,
+            defined_in: Some(obj_idx), from_lib: None,
+            plt_idx: None, got_idx: None,
+            section_idx: SHN_COMMON, is_dynamic: false, copy_reloc: false,
+            lib_sym_value: 0,
+        }
+    }
+    fn new_undefined(sym: &Elf64Symbol) -> Self {
+        GlobalSymbol {
+            value: 0, size: 0, info: sym.info,
+            defined_in: None, from_lib: None,
+            plt_idx: None, got_idx: None,
+            section_idx: SHN_UNDEF, is_dynamic: false, copy_reloc: false,
+            lib_sym_value: 0,
+        }
+    }
+    fn set_common_bss(&mut self, bss_offset: u64) {
+        self.value = bss_offset;
+        self.section_idx = 0xffff;
+    }
+}
+
+/// For ARM, a dynamic definition should be replaced by a static definition.
+fn arm_should_replace_extra(existing: &GlobalSymbol) -> bool {
+    existing.is_dynamic
 }
 
 // ── Public entry point ─────────────────────────────────────────────────
@@ -133,10 +157,9 @@ pub fn link_builtin(
             extra_lib_paths.push(p.to_string());
         } else if let Some(lib) = arg.strip_prefix("-l") {
             let l = if lib.is_empty() && arg_i + 1 < args.len() { arg_i += 1; args[arg_i] } else { lib };
-            let resolver = if is_static { resolve_lib } else { resolve_lib_prefer_shared };
             let mut combined = extra_lib_paths.clone();
             combined.extend(all_lib_paths.iter().cloned());
-            if let Some(lib_path) = resolver(l, &combined) {
+            if let Some(lib_path) = linker_common::resolve_lib(l, &combined, is_static) {
                 load_file(&lib_path, &mut objects, &mut globals, &mut needed_sonames, &combined, is_static)?;
             }
         } else if let Some(wl_arg) = arg.strip_prefix("-Wl,") {
@@ -147,10 +170,9 @@ pub fn link_builtin(
                 if let Some(lpath) = part.strip_prefix("-L") {
                     extra_lib_paths.push(lpath.to_string());
                 } else if let Some(lib) = part.strip_prefix("-l") {
-                    let resolver = if is_static { resolve_lib } else { resolve_lib_prefer_shared };
                     let mut combined = extra_lib_paths.clone();
                     combined.extend(all_lib_paths.iter().cloned());
-                    if let Some(lib_path) = resolver(lib, &combined) {
+                    if let Some(lib_path) = linker_common::resolve_lib(lib, &combined, is_static) {
                         load_file(&lib_path, &mut objects, &mut globals, &mut needed_sonames, &combined, is_static)?;
                     }
                 } else if let Some(defsym_arg) = part.strip_prefix("--defsym=") {
@@ -188,10 +210,9 @@ pub fn link_builtin(
 
     // Load default libraries in a group (like ld's --start-group)
     if !needed_libs.is_empty() {
-        let resolver = if is_static { resolve_lib } else { resolve_lib_prefer_shared };
         let mut lib_paths_resolved: Vec<String> = Vec::new();
         for lib_name in needed_libs {
-            if let Some(lib_path) = resolver(lib_name, &combined_lib_paths) {
+            if let Some(lib_path) = linker_common::resolve_lib(lib_name, &combined_lib_paths, is_static) {
                 if !lib_paths_resolved.contains(&lib_path) {
                     lib_paths_resolved.push(lib_path);
                 }
@@ -252,10 +273,10 @@ pub fn link_builtin(
     // Merge sections
     let mut output_sections: Vec<OutputSection> = Vec::new();
     let mut section_map: HashMap<(usize, usize), (usize, u64)> = HashMap::new();
-    merge_sections(&objects, &mut output_sections, &mut section_map);
+    linker_common::merge_sections_elf64(&objects, &mut output_sections, &mut section_map);
 
     // Allocate COMMON symbols
-    allocate_common_symbols(&mut globals, &mut output_sections);
+    linker_common::allocate_common_symbols_elf64(&mut globals, &mut output_sections);
 
     // Check if we have any dynamic symbols
     let has_dynamic_syms = globals.values().any(|g| g.is_dynamic);
@@ -278,6 +299,10 @@ pub fn link_builtin(
 
 // ── File loading ───────────────────────────────────────────────────────
 
+/// ARM-specific load_file wrapper. Delegates archive and object loading to
+/// linker_common, but handles shared library loading locally because it needs
+/// mutable access to both `globals` and `needed_sonames` (borrow checker
+/// prevents passing both through the shared `on_shared_lib` callback).
 fn load_file(
     path: &str,
     objects: &mut Vec<ElfObject>,
@@ -291,17 +316,17 @@ fn load_file(
     }
     let data = std::fs::read(path).map_err(|e| format!("failed to read '{}': {}", path, e))?;
 
-    // Archive?
+    // Regular archive
     if data.len() >= 8 && &data[0..8] == b"!<arch>\n" {
-        return load_archive(&data, path, objects, globals, needed_sonames, lib_paths, is_static);
+        return linker_common::load_archive_elf64(&data, path, objects, globals, EM_AARCH64, arm_should_replace_extra);
     }
 
-    // Thin archive?
+    // Thin archive
     if is_thin_archive(&data) {
-        return load_thin_archive(&data, path, objects, globals, lib_paths);
+        return linker_common::load_thin_archive_elf64(&data, path, objects, globals, EM_AARCH64, arm_should_replace_extra);
     }
 
-    // Not ELF? Try linker script (handles both GROUP and INPUT directives)
+    // Not ELF? Try linker script (handles GROUP and INPUT directives)
     if data.len() >= 4 && data[0..4] != ELF_MAGIC {
         if let Ok(text) = std::str::from_utf8(&data) {
             if let Some(entries) = parse_linker_script_entries(text) {
@@ -319,7 +344,7 @@ fn load_file(
                             }
                         }
                         LinkerScriptEntry::Lib(lib_name) => {
-                            if let Some(resolved) = resolve_lib(lib_name, lib_paths) {
+                            if let Some(resolved) = linker_common::resolve_lib(lib_name, lib_paths, is_static) {
                                 load_file(&resolved, objects, globals, needed_sonames, lib_paths, is_static)?;
                             }
                         }
@@ -331,7 +356,7 @@ fn load_file(
         return Err(format!("{}: not a valid ELF object or archive", path));
     }
 
-    // Shared library?
+    // Shared library
     if data.len() >= 18 {
         let e_type = read_u16(&data, 16);
         if e_type == ET_DYN {
@@ -342,168 +367,12 @@ fn load_file(
         }
     }
 
+    // Regular ELF object
     let obj = parse_object(&data, path)?;
     let obj_idx = objects.len();
-    register_symbols(obj_idx, &obj, globals);
+    linker_common::register_symbols_elf64(obj_idx, &obj, globals, arm_should_replace_extra);
     objects.push(obj);
     Ok(())
-}
-
-fn load_archive(
-    data: &[u8],
-    archive_path: &str,
-    objects: &mut Vec<ElfObject>,
-    globals: &mut HashMap<String, GlobalSymbol>,
-    _needed_sonames: &mut Vec<String>,
-    _lib_paths: &[String],
-    _is_static: bool,
-) -> Result<(), String> {
-    let members = parse_archive_members(data)?;
-    let mut member_objects: Vec<ElfObject> = Vec::new();
-    for (name, offset, size) in &members {
-        let member_data = &data[*offset..*offset + *size];
-        if member_data.len() < 4 || member_data[0..4] != ELF_MAGIC { continue; }
-        // Check it's AArch64
-        if member_data.len() >= 20 {
-            let e_machine = read_u16(member_data, 18);
-            if e_machine != EM_AARCH64 { continue; }
-        }
-        let full_name = format!("{}({})", archive_path, name);
-        if let Ok(obj) = parse_object(member_data, &full_name) {
-            member_objects.push(obj);
-        }
-    }
-
-    // Pull in members that resolve undefined symbols, iterating until stable
-    let mut changed = true;
-    while changed {
-        changed = false;
-        let mut i = 0;
-        while i < member_objects.len() {
-            if member_resolves_undefined(&member_objects[i], globals) {
-                let obj = member_objects.remove(i);
-                let obj_idx = objects.len();
-                register_symbols(obj_idx, &obj, globals);
-                objects.push(obj);
-                changed = true;
-            } else {
-                i += 1;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Load a GNU thin archive. Member data lives in external files.
-fn load_thin_archive(
-    data: &[u8], archive_path: &str, objects: &mut Vec<ElfObject>,
-    globals: &mut HashMap<String, GlobalSymbol>, _lib_paths: &[String],
-) -> Result<(), String> {
-    let member_names = parse_thin_archive_members(data)?;
-    let archive_dir = Path::new(archive_path)
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-
-    let mut member_objects: Vec<ElfObject> = Vec::new();
-    for name in &member_names {
-        let member_path = archive_dir.join(name);
-        let member_data = std::fs::read(&member_path).map_err(|e| {
-            format!("thin archive {}: failed to read member '{}': {}",
-                    archive_path, member_path.display(), e)
-        })?;
-        if member_data.len() < 4 || member_data[0..4] != ELF_MAGIC { continue; }
-        if member_data.len() >= 20 {
-            let e_machine = read_u16(&member_data, 18);
-            if e_machine != EM_AARCH64 { continue; }
-        }
-        let full_name = format!("{}({})", archive_path, name);
-        if let Ok(obj) = parse_object(&member_data, &full_name) {
-            member_objects.push(obj);
-        }
-    }
-
-    let mut changed = true;
-    while changed {
-        changed = false;
-        let mut i = 0;
-        while i < member_objects.len() {
-            if member_resolves_undefined(&member_objects[i], globals) {
-                let obj = member_objects.remove(i);
-                let obj_idx = objects.len();
-                register_symbols(obj_idx, &obj, globals);
-                objects.push(obj);
-                changed = true;
-            } else {
-                i += 1;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn member_resolves_undefined(obj: &ElfObject, globals: &HashMap<String, GlobalSymbol>) -> bool {
-    for sym in &obj.symbols {
-        if sym.is_undefined() || sym.is_local() { continue; }
-        if sym.sym_type() == STT_SECTION || sym.sym_type() == STT_FILE { continue; }
-        if sym.name.is_empty() { continue; }
-        if let Some(existing) = globals.get(&sym.name) {
-            if existing.defined_in.is_none() && !existing.is_dynamic { return true; }
-        }
-    }
-    false
-}
-
-fn register_symbols(obj_idx: usize, obj: &ElfObject, globals: &mut HashMap<String, GlobalSymbol>) {
-    for sym in &obj.symbols {
-        if sym.sym_type() == STT_SECTION || sym.sym_type() == STT_FILE { continue; }
-        if sym.name.is_empty() || sym.is_local() { continue; }
-
-        let is_defined = !sym.is_undefined() && sym.shndx != SHN_COMMON;
-
-        if is_defined {
-            let should_replace = match globals.get(&sym.name) {
-                None => true,
-                Some(e) => e.defined_in.is_none() || e.is_dynamic || (e.info >> 4 == STB_WEAK && sym.is_global()),
-            };
-            if should_replace {
-                globals.insert(sym.name.clone(), GlobalSymbol {
-                    value: sym.value, size: sym.size, info: sym.info,
-                    defined_in: Some(obj_idx), section_idx: sym.shndx,
-                    from_lib: None, plt_idx: None, got_idx: None,
-                    is_dynamic: false, copy_reloc: false, lib_sym_value: 0,
-                });
-            }
-        } else if sym.shndx == SHN_COMMON {
-            let should_insert = match globals.get(&sym.name) {
-                None => true,
-                Some(e) => e.defined_in.is_none(),
-            };
-            if should_insert {
-                globals.insert(sym.name.clone(), GlobalSymbol {
-                    value: sym.value, size: sym.size, info: sym.info,
-                    defined_in: Some(obj_idx), section_idx: SHN_COMMON,
-                    from_lib: None, plt_idx: None, got_idx: None,
-                    is_dynamic: false, copy_reloc: false, lib_sym_value: 0,
-                });
-            }
-        } else if !globals.contains_key(&sym.name) {
-            globals.insert(sym.name.clone(), GlobalSymbol {
-                value: 0, size: 0, info: sym.info,
-                defined_in: None, section_idx: SHN_UNDEF,
-                from_lib: None, plt_idx: None, got_idx: None,
-                is_dynamic: false, copy_reloc: false, lib_sym_value: 0,
-            });
-        }
-    }
-}
-
-fn resolve_lib(name: &str, paths: &[String]) -> Option<String> {
-    crate::backend::linker_common::resolve_lib(name, paths, true)
-}
-
-fn resolve_lib_prefer_shared(name: &str, paths: &[String]) -> Option<String> {
-    // For dynamic linking, prefer .so over .a
-    crate::backend::linker_common::resolve_lib(name, paths, false)
 }
 
 fn load_shared_library(
@@ -664,137 +533,6 @@ fn resolve_dynamic_symbols(
         if lib_needed && !needed_sonames.contains(&soname) { needed_sonames.push(soname); }
     }
     Ok(())
-}
-
-// ── Section merging ────────────────────────────────────────────────────
-
-fn map_section_name(name: &str) -> String {
-    crate::backend::linker_common::map_section_name(name).to_string()
-}
-
-fn merge_sections(
-    objects: &[ElfObject],
-    output_sections: &mut Vec<OutputSection>,
-    section_map: &mut HashMap<(usize, usize), (usize, u64)>,
-) {
-    let mut output_map: HashMap<String, usize> = HashMap::new();
-
-    for obj_idx in 0..objects.len() {
-        for sec_idx in 0..objects[obj_idx].sections.len() {
-            let sec = &objects[obj_idx].sections[sec_idx];
-            if sec.flags & SHF_ALLOC == 0 { continue; }
-            if matches!(sec.sh_type, SHT_NULL | SHT_STRTAB | SHT_SYMTAB | SHT_RELA | SHT_REL | SHT_GROUP) { continue; }
-            if sec.flags & SHF_EXCLUDE != 0 { continue; }
-
-            let output_name = map_section_name(&sec.name);
-            let alignment = sec.addralign.max(1);
-
-            let out_idx = if let Some(&idx) = output_map.get(&output_name) {
-                if alignment > output_sections[idx].alignment {
-                    output_sections[idx].alignment = alignment;
-                }
-                idx
-            } else {
-                let idx = output_sections.len();
-                output_map.insert(output_name.clone(), idx);
-                output_sections.push(OutputSection {
-                    name: output_name, sh_type: sec.sh_type, flags: sec.flags,
-                    alignment, inputs: Vec::new(), data: Vec::new(),
-                    addr: 0, file_offset: 0, mem_size: 0,
-                });
-                idx
-            };
-
-            if sec.sh_type == SHT_PROGBITS { output_sections[out_idx].sh_type = SHT_PROGBITS; }
-            output_sections[out_idx].flags |= sec.flags & (SHF_WRITE | SHF_EXECINSTR | SHF_ALLOC | SHF_TLS);
-            output_sections[out_idx].inputs.push(InputSection {
-                object_idx: obj_idx, section_idx: sec_idx, output_offset: 0, size: sec.size,
-            });
-        }
-    }
-
-    // Calculate offsets within each output section
-    for out_sec in output_sections.iter_mut() {
-        let mut off: u64 = 0;
-        for input in &mut out_sec.inputs {
-            let a = objects[input.object_idx].sections[input.section_idx].addralign.max(1);
-            off = (off + a - 1) & !(a - 1);
-            input.output_offset = off;
-            off += input.size;
-        }
-        out_sec.mem_size = off;
-    }
-
-    // Build section_map
-    for (out_idx, out_sec) in output_sections.iter().enumerate() {
-        for input in &out_sec.inputs {
-            section_map.insert((input.object_idx, input.section_idx), (out_idx, input.output_offset));
-        }
-    }
-
-    // Sort sections: RO -> Exec -> RW(progbits) -> RW(nobits)
-    let len = output_sections.len();
-    let mut opts: Vec<Option<OutputSection>> = output_sections.drain(..).map(Some).collect();
-    let mut sort_indices: Vec<usize> = (0..len).collect();
-    sort_indices.sort_by_key(|&i| {
-        let sec = opts[i].as_ref().unwrap();
-        let is_exec = sec.flags & SHF_EXECINSTR != 0;
-        let is_write = sec.flags & SHF_WRITE != 0;
-        let is_nobits = sec.sh_type == SHT_NOBITS;
-        if is_exec { (1u32, is_nobits as u32) }
-        else if !is_write { (0, is_nobits as u32) }
-        else { (2, is_nobits as u32) }
-    });
-
-    let mut index_remap: HashMap<usize, usize> = HashMap::new();
-    for (new_idx, &old_idx) in sort_indices.iter().enumerate() {
-        index_remap.insert(old_idx, new_idx);
-    }
-    for &old_idx in &sort_indices {
-        output_sections.push(opts[old_idx].take().unwrap());
-    }
-
-    // Update section_map with new indices
-    let old_map: Vec<_> = section_map.drain().collect();
-    for ((obj_idx, sec_idx), (old_out_idx, off)) in old_map {
-        if let Some(&new_out_idx) = index_remap.get(&old_out_idx) {
-            section_map.insert((obj_idx, sec_idx), (new_out_idx, off));
-        }
-    }
-}
-
-fn allocate_common_symbols(globals: &mut HashMap<String, GlobalSymbol>, output_sections: &mut Vec<OutputSection>) {
-    let common_syms: Vec<(String, u64, u64)> = globals.iter()
-        .filter(|(_, sym)| sym.section_idx == SHN_COMMON && sym.defined_in.is_some())
-        .map(|(name, sym)| (name.clone(), sym.value.max(1), sym.size))
-        .collect();
-    if common_syms.is_empty() { return; }
-
-    let bss_idx = output_sections.iter().position(|s| s.name == ".bss").unwrap_or_else(|| {
-        let idx = output_sections.len();
-        output_sections.push(OutputSection {
-            name: ".bss".to_string(), sh_type: SHT_NOBITS,
-            flags: SHF_ALLOC | SHF_WRITE, alignment: 1,
-            inputs: Vec::new(), data: Vec::new(),
-            addr: 0, file_offset: 0, mem_size: 0,
-        });
-        idx
-    });
-
-    let mut bss_off = output_sections[bss_idx].mem_size;
-    for (name, alignment, size) in &common_syms {
-        let a = (*alignment).max(1);
-        bss_off = (bss_off + a - 1) & !(a - 1);
-        if let Some(sym) = globals.get_mut(name) {
-            sym.value = bss_off;
-            sym.section_idx = 0xffff; // sentinel for COMMON-in-BSS
-        }
-        if *alignment > output_sections[bss_idx].alignment {
-            output_sections[bss_idx].alignment = *alignment;
-        }
-        bss_off += size;
-    }
-    output_sections[bss_idx].mem_size = bss_off;
 }
 
 // ── PLT/GOT creation ───────────────────────────────────────────────────
@@ -1827,7 +1565,7 @@ pub fn link_shared(
     if !libs_to_load.is_empty() {
         let mut lib_paths_resolved: Vec<String> = Vec::new();
         for lib_name in &libs_to_load {
-            if let Some(lib_path) = resolve_lib_prefer_shared(lib_name, &all_lib_paths) {
+            if let Some(lib_path) = linker_common::resolve_lib(lib_name, &all_lib_paths, false) {
                 if !lib_paths_resolved.contains(&lib_path) {
                     lib_paths_resolved.push(lib_path);
                 }
@@ -1847,8 +1585,8 @@ pub fn link_shared(
     // Merge sections
     let mut output_sections: Vec<OutputSection> = Vec::new();
     let mut section_map: HashMap<(usize, usize), (usize, u64)> = HashMap::new();
-    merge_sections(&objects, &mut output_sections, &mut section_map);
-    allocate_common_symbols(&mut globals, &mut output_sections);
+    linker_common::merge_sections_elf64(&objects, &mut output_sections, &mut section_map);
+    linker_common::allocate_common_symbols_elf64(&mut globals, &mut output_sections);
 
     // Resolve undefined symbols against system shared libraries to discover
     // NEEDED dependencies. Without this, the shared library would be missing

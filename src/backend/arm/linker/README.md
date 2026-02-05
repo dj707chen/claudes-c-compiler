@@ -14,7 +14,10 @@ archive member extraction, symbol resolution, section merging, virtual address
 layout, GOT/PLT construction, TLS handling, IFUNC support, relocation
 application, dynamic section emission, and final ELF output.
 
-The implementation spans roughly 4,000 lines of Rust across three files.
+The implementation spans roughly 3,500 lines of Rust across three files, plus shared
+infrastructure in `linker_common` (the `GlobalSymbolOps` trait, `OutputSection`,
+`InputSection`, and shared functions for archive loading, symbol registration,
+section merging, and COMMON allocation).
 
 ```
              AArch64 Built-in Linker
@@ -32,10 +35,11 @@ The implementation spans roughly 4,000 lines of Rust across three files.
                |  Vec<ElfObject>, HashMap<String, GlobalSymbol>
                v
   +------------------------------------------+
-  |           mod.rs  (~3,460 lines)         |
-  |   Orchestrator: file loading, archive    |
-  |   resolution, section merging, layout,   |
+  |           mod.rs  (~3,370 lines)         |
+  |   Orchestrator: file loading, layout,    |
   |   GOT/PLT/IPLT, dynamic/shared emission |
+  |   (delegates archive/symbol/section ops  |
+  |    to linker_common via GlobalSymbolOps) |
   +------------------------------------------+
                |
                |  output buffer + section map
@@ -111,9 +115,9 @@ ELF executable emission.
 
 | Type | Role |
 |------|------|
-| `OutputSection` | A merged output section: name, type, flags, alignment, list of `InputSection` references, merged data, assigned virtual address and file offset. |
-| `InputSection` | Reference to one input section: object index, section index, output offset within the merged section, size. |
-| `GlobalSymbol` | A resolved global symbol: final value (address), size, info byte, defining object index, section index. |
+| `OutputSection` | Shared type from `linker_common`: merged output section with name, type, flags, alignment, list of `InputSection` references, merged data, assigned virtual address and file offset. |
+| `InputSection` | Shared type from `linker_common`: reference to one input section with object index, section index, output offset within the merged section, size. |
+| `GlobalSymbol` | ARM-specific resolved global symbol: implements `linker_common::GlobalSymbolOps` trait. Contains final value (address), size, info byte, defining object index, section index, plus dynamic linking fields (from_lib, plt_idx, got_idx, is_dynamic, copy_reloc, lib_sym_value). |
 
 ### Constants
 
@@ -156,10 +160,11 @@ link(object_files, output_path, user_args):
         (iterate until no new symbols resolved -- handles circular deps)
 
   3. SYMBOL RESOLUTION
-     register_symbols() for each loaded object:
+     linker_common::register_symbols_elf64() for each loaded object
+     (via GlobalSymbolOps trait):
        - Skip FILE and SECTION symbols
        - Defined symbols: insert or replace if existing is
-         undefined or weak-vs-global
+         undefined, dynamic, or weak-vs-global
        - COMMON symbols: insert if not already present
        - Undefined symbols: insert placeholder if not present
 
@@ -167,7 +172,7 @@ link(object_files, output_path, user_args):
      Error on undefined non-weak symbols, excluding well-known
      linker-defined names (__bss_start, _GLOBAL_OFFSET_TABLE_, etc.)
 
-  5. SECTION MERGING (merge_sections)
+  5. SECTION MERGING (linker_common::merge_sections_elf64)
      a. Map input section names to output names:
         .text.*, .text       -> .text
         .data.rel.ro*        -> .data.rel.ro
@@ -185,7 +190,7 @@ link(object_files, output_path, user_args):
      d. Sort output sections: RO -> Exec -> RW(progbits) -> RW(nobits)
      e. Build section_map: (obj_idx, sec_idx) -> (out_idx, offset)
 
-  6. COMMON SYMBOL ALLOCATION (allocate_common_symbols)
+  6. COMMON SYMBOL ALLOCATION (linker_common::allocate_common_symbols_elf64)
      Allocate SHN_COMMON symbols into .bss with proper alignment.
 
   7. ADDRESS LAYOUT AND EMISSION (emit_executable)
@@ -468,17 +473,18 @@ fields without disturbing other bits:
 
 ### Archive Loading Strategy
 
-Archives are loaded using **selective extraction with iterative resolution**,
-matching the behavior of traditional `ld --start-group`:
+Archives are loaded via `linker_common::load_archive_elf64()` using
+**selective extraction with iterative resolution**, matching the behavior
+of traditional `ld --start-group`:
 
 ```
-load_archive(data, archive_path):
+load_archive_elf64(data, archive_path, objects, globals, EM_AARCH64, should_replace_extra):
   1. Parse all archive members into temporary ElfObject list
-  2. Filter to AArch64 ELF objects only
+  2. Filter to AArch64 ELF objects only (by e_machine check)
   3. Iterate until stable:
      for each unloaded member:
        if member defines any currently-undefined global symbol:
-         load the member (register its symbols, add to objects list)
+         load the member (register_symbols_elf64 via GlobalSymbolOps)
          set changed = true
   4. Discard any remaining unextracted members
 ```
@@ -585,7 +591,7 @@ invaluable for debugging linking failures.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `mod.rs` | ~3,460 | Public API, file loading, archive handling, CRT discovery, section merging, address layout, GOT/PLT/IPLT construction, static/dynamic executable emission, shared library emission |
+| `mod.rs` | ~3,370 | Public API, file loading (delegates archives/symbols to `linker_common`), CRT discovery, address layout, GOT/PLT/IPLT construction, static/dynamic executable emission, shared library emission |
 | `elf.rs` | ~75 | AArch64 relocation constants; type aliases and thin wrappers delegating to `linker_common` for ELF64 parsing |
 | `reloc.rs` | ~540 | Relocation application (30+ types), TLS relaxation, GOT/TLS-IE references, instruction field patching helpers |
-| **Total** | **~4,075** | |
+| **Total** | **~3,985** | (plus shared infrastructure in `linker_common`) |
