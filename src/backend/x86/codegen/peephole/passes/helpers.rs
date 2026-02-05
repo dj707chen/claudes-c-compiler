@@ -109,7 +109,14 @@ pub(super) fn has_implicit_reg_usage(trimmed: &str) -> bool {
     trimmed.starts_with("rdtsc") || trimmed.starts_with("rdmsr") ||
     trimmed.starts_with("wrmsr") ||
     trimmed.starts_with("xchg") || trimmed.starts_with("cmpxchg") ||
-    trimmed.starts_with("lock ")
+    trimmed.starts_with("lock ") ||
+    // x87 FPU status/control instructions that write to %ax or memory.
+    // fnstsw writes to %ax (implicit destination), and the peephole's
+    // copy propagation must not rewrite %ax to another register since
+    // the x86 ISA only allows %ax or memory for fnstsw.
+    trimmed.starts_with("fnstsw") || trimmed.starts_with("fnstcw") ||
+    trimmed.starts_with("fstcw") || trimmed.starts_with("fnstenv") ||
+    trimmed.starts_with("fldenv") || trimmed.starts_with("fldcw")
 }
 
 /// Check if an instruction is a shift/rotate that implicitly uses %cl.

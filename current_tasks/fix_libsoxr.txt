@@ -1,2 +1,0 @@
-Investigating libsoxr x86 failure. It passes i686/arm/riscv but fails x86.
-Will diagnose and fix the compiler if needed.
