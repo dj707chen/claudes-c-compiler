@@ -591,8 +591,8 @@ pub fn link_builtin(
                 got_offset: None, section_idx: None,
             });
 
-            // Don't override a strong definition with a weak one
-            if entry.defined && entry.binding == STB_GLOBAL && sym.binding() == STB_WEAK {
+            // Only overwrite if: (a) not yet defined, or (b) replacing weak with strong
+            if entry.defined && !(entry.binding == STB_WEAK && sym.binding() == STB_GLOBAL) {
                 continue;
             }
 

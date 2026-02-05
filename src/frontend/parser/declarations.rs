@@ -1145,6 +1145,49 @@ impl Parser {
         }
     }
 
+    /// Check whether an expression contains identifiers that are NOT enum constants.
+    /// Such identifiers are variables/parameters, which make the expression not a
+    /// valid integer constant expression (C11 6.6).
+    fn expr_has_non_const_identifier(
+        expr: &Expr,
+        enum_consts: Option<&FxHashMap<String, i64>>,
+    ) -> bool {
+        match expr {
+            Expr::Identifier(name, _) => {
+                // It's a variable/parameter reference if not in enum constants
+                !enum_consts.map_or(false, |m| m.contains_key(name.as_str()))
+            }
+            Expr::BinaryOp(_, lhs, rhs, _) => {
+                Self::expr_has_non_const_identifier(lhs, enum_consts)
+                    || Self::expr_has_non_const_identifier(rhs, enum_consts)
+            }
+            Expr::UnaryOp(_, inner, _) => {
+                Self::expr_has_non_const_identifier(inner, enum_consts)
+            }
+            Expr::Conditional(cond, then_expr, else_expr, _) => {
+                Self::expr_has_non_const_identifier(cond, enum_consts)
+                    || Self::expr_has_non_const_identifier(then_expr, enum_consts)
+                    || Self::expr_has_non_const_identifier(else_expr, enum_consts)
+            }
+            Expr::GnuConditional(cond, fallback, _) => {
+                Self::expr_has_non_const_identifier(cond, enum_consts)
+                    || Self::expr_has_non_const_identifier(fallback, enum_consts)
+            }
+            Expr::Cast(_, inner, _) => {
+                Self::expr_has_non_const_identifier(inner, enum_consts)
+            }
+            Expr::Comma(lhs, rhs, _) => {
+                Self::expr_has_non_const_identifier(lhs, enum_consts)
+                    || Self::expr_has_non_const_identifier(rhs, enum_consts)
+            }
+            // Sizeof, literals, builtin calls, function calls, etc. that aren't
+            // evaluable still don't make the expression "definitely non-constant"
+            // from a variable-reference perspective. The eval_const_int_expr_with_enums
+            // function returning None for these cases will cause silent acceptance.
+            _ => false,
+        }
+    }
+
     /// Parse and evaluate `_Static_assert(constant-expr, "message")` or
     /// the C23 single-argument form `_Static_assert(constant-expr)`.
     ///
@@ -1201,11 +1244,15 @@ impl Parser {
                 };
                 self.emit_error(msg, assert_span);
             }
+        } else if Self::expr_has_non_const_identifier(&expr, enums) {
+            // The expression references variables or non-enum identifiers, which
+            // means it's definitely not a valid integer constant expression (C11 6.6).
+            self.emit_error("expression in static assertion is not an integer constant expression", assert_span);
         }
-        // If we can't evaluate the expression (returns None), silently accept.
-        // This matches real-world behavior where complex expressions involving
-        // sizeof, offsetof, or compiler-specific builtins may not be evaluable
-        // at parse time but are valid constant expressions.
+        // If we can't evaluate the expression but it doesn't contain variable
+        // references (e.g. sizeof, offsetof, compiler builtins), silently accept.
+        // This matches real-world behavior where complex expressions may not be
+        // evaluable at parse time but are valid constant expressions.
     }
 
 }

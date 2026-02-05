@@ -951,10 +951,18 @@ impl InstructionEncoder {
 
     /// Add a relocation relative to current position.
     fn add_relocation(&mut self, symbol: &str, reloc_type: u32, addend: i64) {
+        // Strip @PLT suffix from symbol names - the suffix only affects relocation type,
+        // not the symbol name in the ELF symbol table.
+        let (sym, rtype) = if let Some(base) = symbol.strip_suffix("@PLT") {
+            let plt_type = if reloc_type == R_386_PC32 { R_386_PLT32 } else { reloc_type };
+            (base, plt_type)
+        } else {
+            (symbol, reloc_type)
+        };
         self.relocations.push(Relocation {
             offset: self.bytes.len() as u64,
-            symbol: symbol.to_string(),
-            reloc_type,
+            symbol: sym.to_string(),
+            reloc_type: rtype,
             addend,
             diff_symbol: None,
         });

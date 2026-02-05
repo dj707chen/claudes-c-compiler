@@ -367,6 +367,7 @@ fn define_type_traits_macros(macros: &mut MacroTable) {
 
     // Type width macros (GCC/Clang extension)
     def(macros, "__CHAR_WIDTH__", "8");
+    def(macros, "__SCHAR_WIDTH__", "8");
     def(macros, "__SHRT_WIDTH__", "16");
     def(macros, "__INT_WIDTH__", "32");
     def(macros, "__LONG_WIDTH__", "64");
@@ -375,6 +376,18 @@ fn define_type_traits_macros(macros: &mut MacroTable) {
     def(macros, "__SIZE_WIDTH__", "64");
     def(macros, "__WCHAR_WIDTH__", "32");
     def(macros, "__WINT_WIDTH__", "32");
+    def(macros, "__INTMAX_WIDTH__", "64");
+    def(macros, "__INTPTR_WIDTH__", "64");
+    def(macros, "__SIG_ATOMIC_WIDTH__", "32");
+    // Fixed-width integer type widths (C23 / GCC extension)
+    def(macros, "__INT_LEAST8_WIDTH__", "8");
+    def(macros, "__INT_LEAST16_WIDTH__", "16");
+    def(macros, "__INT_LEAST32_WIDTH__", "32");
+    def(macros, "__INT_LEAST64_WIDTH__", "64");
+    def(macros, "__INT_FAST8_WIDTH__", "8");
+    def(macros, "__INT_FAST16_WIDTH__", "64");
+    def(macros, "__INT_FAST32_WIDTH__", "64");
+    def(macros, "__INT_FAST64_WIDTH__", "64");
     def(macros, "__SIZEOF_WCHAR_T__", "4");
 
     // Byte order

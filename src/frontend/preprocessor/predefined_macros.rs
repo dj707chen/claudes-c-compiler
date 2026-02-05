@@ -622,6 +622,13 @@ impl Preprocessor {
                     "/usr/include/i386-linux-gnu",
                 ];
                 self.insert_arch_paths_after_bundled(&i686_paths);
+                // Override width macros for ILP32 (pointer/long/size_t/ptrdiff are 32-bit)
+                self.define_simple_macro("__LONG_WIDTH__", "32");
+                self.define_simple_macro("__PTRDIFF_WIDTH__", "32");
+                self.define_simple_macro("__SIZE_WIDTH__", "32");
+                self.define_simple_macro("__INTPTR_WIDTH__", "32");
+                self.define_simple_macro("__INT_FAST16_WIDTH__", "32");
+                self.define_simple_macro("__INT_FAST32_WIDTH__", "32");
                 // i686 uses the same x87 80-bit long double format as x86-64
                 // (LDBL macros are already set correctly), but sizeof differs (12 vs 16)
             }
