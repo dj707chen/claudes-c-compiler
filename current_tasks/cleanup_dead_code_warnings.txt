@@ -1,0 +1,7 @@
+Clean up dead code warnings from cargo build --release:
+- Remove duplicate uaddlv pattern in ARM encoder (unreachable)
+- Remove unused encode_uaddlv function (superseded by encode_neon_across_long)
+- Prefix unused variables with _ in ARM assembler parser and encoder
+- Add #[allow(dead_code)] for LinkerConfig fields (used only with gcc_linker feature)
+- Add #[allow(dead_code)] for SlashSlashAndAt (used in ARM but ARM has own strip_comment)
+- Remove unused load_file_elf64 from linker_common (each arch has own load_file)
