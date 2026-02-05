@@ -789,21 +789,9 @@ fn mark_plt_got_needs(
 }
 
 fn check_undefined_symbols(global_symbols: &HashMap<String, LinkerSymbol>) -> Result<(), String> {
-    let linker_defined = [
-        "_GLOBAL_OFFSET_TABLE_", "__ehdr_start", "__executable_start",
-        "_end", "_edata", "_etext", "__bss_start", "__bss_start__",
-        "end", "edata", "etext", "__end__", "__dso_handle", "_DYNAMIC",
-        "__data_start", "data_start",
-        "__init_array_start", "__init_array_end",
-        "__fini_array_start", "__fini_array_end",
-        "__preinit_array_start", "__preinit_array_end",
-        "__rel_iplt_start", "__rel_iplt_end",
-        "___tls_get_addr",
-    ];
-
     let truly_undefined: Vec<&String> = global_symbols.iter()
         .filter(|(n, s)| !s.is_defined && !s.is_dynamic && s.binding != STB_WEAK
-            && !linker_defined.contains(&n.as_str()))
+            && !linker_common::is_linker_defined_symbol(n))
         .map(|(n, _)| n)
         .collect();
 

@@ -80,6 +80,15 @@ impl GlobalSymbolOps for GlobalSymbol {
         self.value = bss_offset;
         self.section_idx = 0xffff;
     }
+    fn new_dynamic(dsym: &linker_common::DynSymbol, soname: &str) -> Self {
+        GlobalSymbol {
+            value: 0, size: dsym.size, info: dsym.info,
+            defined_in: None, from_lib: Some(soname.to_string()),
+            plt_idx: None, got_idx: None,
+            section_idx: SHN_UNDEF, is_dynamic: true, copy_reloc: false,
+            lib_sym_value: dsym.value, version: dsym.version.clone(),
+        }
+    }
 }
 
 /// For x86, a dynamic definition should be replaced by a static definition.
@@ -231,8 +240,11 @@ pub fn link_builtin(
         }
     }
 
-    // Resolve remaining undefined symbols
-    resolve_dynamic_symbols(&mut globals, &mut needed_sonames)?;
+    // Resolve remaining undefined symbols from default system libraries
+    let default_libs = ["libc.so.6", "libm.so.6", "libgcc_s.so.1"];
+    linker_common::resolve_dynamic_symbols_elf64(
+        &mut globals, &mut needed_sonames, &all_lib_paths, &default_libs,
+    )?;
 
     // Apply --defsym definitions: alias one symbol to another
     for (alias, target) in &defsym_defs {
@@ -279,21 +291,11 @@ pub fn link_builtin(
 
     // Check for truly undefined (non-weak, non-dynamic, non-linker-defined) symbols
     {
-        let linker_defined = [
-            "_GLOBAL_OFFSET_TABLE_", "__bss_start", "_edata", "_end", "__end",
-            "__ehdr_start", "__executable_start", "_start", "_etext", "etext",
-            "__dso_handle", "_DYNAMIC", "__data_start", "data_start",
-            "__init_array_start", "__init_array_end",
-            "__fini_array_start", "__fini_array_end",
-            "__preinit_array_start", "__preinit_array_end",
-            "__rela_iplt_start", "__rela_iplt_end",
-            "_init", "_fini",
-        ];
         let mut truly_undefined: Vec<&String> = globals.iter()
             .filter(|(name, sym)| {
                 sym.defined_in.is_none() && !sym.is_dynamic
                     && (sym.info >> 4) != STB_WEAK
-                    && !linker_defined.contains(&name.as_str())
+                    && !linker_common::is_linker_defined_symbol(name)
             })
             .map(|(name, _)| name)
             .collect();
@@ -450,9 +452,10 @@ pub fn link_shared(
 
     // Resolve remaining undefined symbols against system libraries (libc, libm,
     // libgcc_s) and add DT_NEEDED entries for any that provide matched symbols.
-    resolve_dynamic_symbols(&mut globals, &mut needed_sonames)?;
-    // TODO: Handle cross-library .so dependencies (one user .so calling into
-    // another .so) beyond the hardcoded system library set.
+    let default_libs = ["libc.so.6", "libm.so.6", "libgcc_s.so.1"];
+    linker_common::resolve_dynamic_symbols_elf64(
+        &mut globals, &mut needed_sonames, &all_lib_paths, &default_libs,
+    )?;
 
     // Merge sections (no gc-sections for shared libraries)
     let mut output_sections: Vec<OutputSection> = Vec::new();
@@ -1602,16 +1605,9 @@ fn emit_shared_library(
     Ok(())
 }
 
-/// Resolve a `-l` library name using library search paths (for use in linker script resolution).
-/// Prefers .so over .a since linker scripts typically reference shared libraries.
-fn resolve_lib_from_paths(name: &str, paths: &[String]) -> Option<String> {
-    crate::backend::linker_common::resolve_lib(name, paths, false)
-}
-
 /// x86-specific load_file wrapper. Delegates archive and object loading to
-/// linker_common, but handles shared library loading locally because it needs
-/// mutable access to both `globals` and `needed_sonames` (borrow checker
-/// prevents passing both through the shared `on_shared_lib` callback).
+/// linker_common, handles shared library loading via the shared
+/// `load_shared_library_elf64` implementation.
 fn load_file(
     path: &str, objects: &mut Vec<ElfObject>, globals: &mut HashMap<String, GlobalSymbol>,
     needed_sonames: &mut Vec<String>, lib_paths: &[String],
@@ -1666,7 +1662,7 @@ fn load_file(
     if data.len() >= 18 {
         let e_type = u16::from_le_bytes([data[16], data[17]]);
         if e_type == ET_DYN {
-            return load_shared_library(path, globals, needed_sonames, lib_paths);
+            return linker_common::load_shared_library_elf64(path, globals, needed_sonames, lib_paths);
         }
     }
 
@@ -1675,194 +1671,6 @@ fn load_file(
     let obj_idx = objects.len();
     linker_common::register_symbols_elf64(obj_idx, &obj, globals, x86_should_replace_extra);
     objects.push(obj);
-    Ok(())
-}
-
-fn load_shared_library(
-    path: &str, globals: &mut HashMap<String, GlobalSymbol>, needed_sonames: &mut Vec<String>,
-    lib_paths: &[String],
-) -> Result<(), String> {
-    let data = std::fs::read(path).map_err(|e| format!("failed to read '{}': {}", path, e))?;
-    if data.len() >= 4 && data[0..4] != ELF_MAGIC {
-        if let Ok(text) = std::str::from_utf8(&data) {
-            if let Some(entries) = parse_linker_script_entries(text) {
-                let script_dir = Path::new(path).parent().map(|p| p.to_string_lossy().to_string());
-                for entry in &entries {
-                    let resolved_path = match entry {
-                        LinkerScriptEntry::Path(lib_path) => {
-                            if Path::new(lib_path).exists() {
-                                Some(lib_path.clone())
-                            } else if let Some(ref dir) = script_dir {
-                                let p = format!("{}/{}", dir, lib_path);
-                                if Path::new(&p).exists() { Some(p) } else { None }
-                            } else {
-                                None
-                            }
-                        }
-                        LinkerScriptEntry::Lib(lib_name) => {
-                            resolve_lib_from_paths(lib_name, lib_paths)
-                        }
-                    };
-                    if let Some(resolved) = resolved_path {
-                        let lib_data = std::fs::read(&resolved).map_err(|e| format!("failed to read '{}': {}", resolved, e))?;
-                        if lib_data.len() >= 8 && &lib_data[0..8] == b"!<arch>\n" {
-                            load_archive_for_dynamic(&lib_data, &resolved, globals)?;
-                        } else {
-                            load_shared_library(&resolved, globals, needed_sonames, lib_paths)?;
-                        }
-                    }
-                }
-                return Ok(());
-            }
-        }
-        return Err(format!("{}: not a valid ELF shared library", path));
-    }
-
-    let soname = parse_soname(&data).unwrap_or_else(|| {
-        Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string())
-    });
-
-    let dyn_syms = parse_shared_library_symbols(&data, path)?;
-    // First pass: match undefined symbols against shared library exports.
-    // Only add DT_NEEDED entry if at least one symbol is actually used
-    // (as-needed behavior, matching modern ld default).
-    let mut lib_needed = false;
-    let mut matched_weak_objects: Vec<(u64, u64)> = Vec::new(); // (value, size) of matched WEAK STT_OBJECT syms
-    for dsym in &dyn_syms {
-        if let Some(existing) = globals.get(&dsym.name) {
-            if existing.defined_in.is_none() && !existing.is_dynamic {
-                lib_needed = true;
-                globals.insert(dsym.name.clone(), GlobalSymbol {
-                    value: 0, size: dsym.size, info: dsym.info,
-                    defined_in: None, from_lib: Some(soname.clone()),
-                    plt_idx: None, got_idx: None,
-                    section_idx: SHN_UNDEF, is_dynamic: true, copy_reloc: false, lib_sym_value: dsym.value, version: dsym.version.clone(),
-                });
-                // If this is a WEAK STT_OBJECT, we need to also register any GLOBAL
-                // aliases at the same address. This ensures COPY relocations work
-                // correctly (e.g., `environ` is WEAK, `__environ` is GLOBAL in libc;
-                // both must be in our dynsym so the dynamic linker redirects all refs).
-                let bind = dsym.info >> 4;
-                let stype = dsym.info & 0xf;
-                if bind == STB_WEAK && stype == STT_OBJECT
-                    && !matched_weak_objects.contains(&(dsym.value, dsym.size))
-                {
-                    matched_weak_objects.push((dsym.value, dsym.size));
-                }
-            }
-        }
-    }
-    // Second pass: register all aliases for any matched WEAK STT_OBJECT symbols
-    if !matched_weak_objects.is_empty() {
-        for dsym in &dyn_syms {
-            let stype = dsym.info & 0xf;
-            if stype == STT_OBJECT && matched_weak_objects.contains(&(dsym.value, dsym.size))
-                && !globals.contains_key(&dsym.name)
-            {
-                // Register the alias (e.g. __environ for environ)
-                globals.insert(dsym.name.clone(), GlobalSymbol {
-                    value: 0, size: dsym.size, info: dsym.info,
-                    defined_in: None, from_lib: Some(soname.clone()),
-                    plt_idx: None, got_idx: None,
-                    section_idx: SHN_UNDEF, is_dynamic: true, copy_reloc: false, lib_sym_value: dsym.value, version: dsym.version.clone(),
-                });
-            }
-        }
-    }
-    // Only add DT_NEEDED for this library if it resolved at least one symbol
-    if lib_needed && !needed_sonames.contains(&soname) {
-        needed_sonames.push(soname);
-    }
-    Ok(())
-}
-
-fn load_archive_for_dynamic(
-    data: &[u8], _archive_path: &str, globals: &mut HashMap<String, GlobalSymbol>,
-) -> Result<(), String> {
-    // Archives in linker scripts (like libc_nonshared.a) are silently ignored
-    // when loaded from the shared library path. They provide static overrides
-    // that are only relevant when we have objects needing them. Since we handle
-    // archives properly when load_file encounters them, this is a no-op.
-    let _ = data;
-    let _ = globals;
-    Ok(())
-}
-
-fn resolve_dynamic_symbols(
-    globals: &mut HashMap<String, GlobalSymbol>, needed_sonames: &mut Vec<String>,
-) -> Result<(), String> {
-    // Linker-defined symbols that will be resolved during layout
-    let linker_defined = [
-        "_GLOBAL_OFFSET_TABLE_", "__bss_start", "_edata", "_end", "__end",
-        "__ehdr_start", "__executable_start", "_etext", "etext",
-        "__dso_handle", "_DYNAMIC", "__data_start", "data_start",
-        "__init_array_start", "__init_array_end",
-        "__fini_array_start", "__fini_array_end",
-        "__preinit_array_start", "__preinit_array_end",
-        "__rela_iplt_start", "__rela_iplt_end",
-    ];
-    let undefined: Vec<String> = globals.iter()
-        .filter(|(name, sym)| sym.defined_in.is_none() && !sym.is_dynamic &&
-            !linker_defined.contains(&name.as_str()))
-        .map(|(name, _)| name.clone()).collect();
-    if undefined.is_empty() { return Ok(()); }
-
-    let libs = [
-        "/lib/x86_64-linux-gnu/libc.so.6",
-        "/lib/x86_64-linux-gnu/libm.so.6",
-        "/lib/x86_64-linux-gnu/libgcc_s.so.1",
-    ];
-
-    for lib_path in &libs {
-        if !Path::new(lib_path).exists() { continue; }
-        let data = match std::fs::read(lib_path) { Ok(d) => d, Err(_) => continue };
-        let soname = parse_soname(&data).unwrap_or_else(|| {
-            Path::new(lib_path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
-        });
-        let dyn_syms = match parse_shared_library_symbols(&data, lib_path) { Ok(s) => s, Err(_) => continue };
-
-        let mut lib_needed = false;
-        let mut matched_weak_objects: Vec<(u64, u64)> = Vec::new();
-        for dsym in &dyn_syms {
-            if let Some(existing) = globals.get(&dsym.name) {
-                if existing.defined_in.is_none() && !existing.is_dynamic {
-                    lib_needed = true;
-                    globals.insert(dsym.name.clone(), GlobalSymbol {
-                        value: 0, size: dsym.size, info: dsym.info,
-                        defined_in: None, from_lib: Some(soname.clone()),
-                        plt_idx: None, got_idx: None,
-                        section_idx: SHN_UNDEF, is_dynamic: true, copy_reloc: false, lib_sym_value: dsym.value, version: dsym.version.clone(),
-                    });
-                    // Track WEAK STT_OBJECT matches for alias registration
-                    let bind = dsym.info >> 4;
-                    let stype = dsym.info & 0xf;
-                    if bind == STB_WEAK && stype == STT_OBJECT
-                        && !matched_weak_objects.contains(&(dsym.value, dsym.size))
-                    {
-                        matched_weak_objects.push((dsym.value, dsym.size));
-                    }
-                }
-            }
-        }
-        // Register all aliases for matched WEAK STT_OBJECT symbols
-        if !matched_weak_objects.is_empty() {
-            for dsym in &dyn_syms {
-                let stype = dsym.info & 0xf;
-                if stype == STT_OBJECT && matched_weak_objects.contains(&(dsym.value, dsym.size))
-                    && !globals.contains_key(&dsym.name)
-                {
-                    lib_needed = true;
-                    globals.insert(dsym.name.clone(), GlobalSymbol {
-                        value: 0, size: dsym.size, info: dsym.info,
-                        defined_in: None, from_lib: Some(soname.clone()),
-                        plt_idx: None, got_idx: None,
-                        section_idx: SHN_UNDEF, is_dynamic: true, copy_reloc: false, lib_sym_value: dsym.value, version: dsym.version.clone(),
-                    });
-                }
-            }
-        }
-        if lib_needed && !needed_sonames.contains(&soname) { needed_sonames.push(soname); }
-    }
     Ok(())
 }
 

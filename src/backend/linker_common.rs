@@ -7,12 +7,18 @@
 //!   `parse_object()` functions in x86, ARM, and RISC-V linkers.
 //! - **Shared library parser**: `parse_shared_library_symbols()` and `parse_soname()`
 //!   for extracting dynamic symbols from .so files.
+//! - **Dynamic symbol matching**: `match_shared_library_dynsyms()`,
+//!   `load_shared_library_elf64()`, and `resolve_dynamic_symbols_elf64()` for
+//!   matching undefined globals against shared library exports with WEAK alias
+//!   detection and as-needed semantics.
+//! - **Linker-defined symbols**: `LINKER_DEFINED_SYMBOLS` constant and
+//!   `is_linker_defined_symbol()` for the superset of symbols the linker
+//!   provides during layout (used by all 4 backends).
 //! - **Archive loading**: `load_archive_members()` and `member_resolves_undefined()`
 //!   for iterative archive resolution (the --start-group algorithm).
 //! - **Section mapping**: `map_section_name()` for input-to-output section mapping.
 //! - **DynStrTab**: Dynamic string table builder for dynamic linking.
 //! - **GNU hash**: `build_gnu_hash()` for .gnu.hash section generation.
-//! - **Program header writer**: `write_phdr64()` is already in elf.rs.
 //!
 //! Each backend linker still handles its own:
 //! - Architecture-specific relocation application
@@ -31,7 +37,7 @@ use crate::backend::elf::{
     SHT_GNU_VERSYM, SHT_GNU_VERDEF,
     SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS, SHF_EXCLUDE,
     STB_LOCAL, STB_GLOBAL, STB_WEAK,
-    STT_SECTION, STT_FILE,
+    STT_OBJECT, STT_SECTION, STT_FILE,
     SHN_UNDEF, SHN_COMMON,
     PT_DYNAMIC,
     DT_NULL, DT_SONAME, DT_SYMTAB, DT_STRTAB, DT_STRSZ,
@@ -871,11 +877,9 @@ pub struct OutputSection {
 
 /// Trait abstracting over backend-specific GlobalSymbol types.
 ///
-/// The x86 linker's GlobalSymbol has dynamic linking fields (is_dynamic, plt_idx,
-/// got_idx, copy_reloc, from_lib, version, lib_sym_value) that the ARM linker's
-/// version also has (since it now supports dynamic linking too). This trait
-/// extracts the common operations needed by shared functions like register_symbols
-/// and merge_sections, allowing the same code to work with both backends.
+/// Provides the interface needed by shared linker functions: symbol registration,
+/// section merging, dynamic symbol matching, and common symbol allocation.
+/// Each backend implements this for its own GlobalSymbol struct.
 pub trait GlobalSymbolOps: Clone {
     fn is_defined(&self) -> bool;
     fn is_dynamic(&self) -> bool;
@@ -887,6 +891,54 @@ pub trait GlobalSymbolOps: Clone {
     fn new_common(obj_idx: usize, sym: &Elf64Symbol) -> Self;
     fn new_undefined(sym: &Elf64Symbol) -> Self;
     fn set_common_bss(&mut self, bss_offset: u64);
+
+    /// Create a GlobalSymbol representing a dynamic symbol resolved from a shared library.
+    fn new_dynamic(dsym: &DynSymbol, soname: &str) -> Self;
+}
+
+// ── Linker-defined symbols ──────────────────────────────────────────────
+//
+// These symbols are provided by the linker during layout and should not be
+// reported as undefined. The superset covers all architectures (x86, ARM,
+// RISC-V, i686). Architecture-specific symbols (e.g., __global_pointer$ for
+// RISC-V) are included; having extra entries is harmless.
+
+/// Symbols that the linker defines during layout.
+///
+/// Used by `is_linker_defined_symbol()` and `resolve_dynamic_symbols_elf64()`
+/// to avoid false "undefined symbol" errors and unnecessary shared library lookups.
+pub const LINKER_DEFINED_SYMBOLS: &[&str] = &[
+    "_GLOBAL_OFFSET_TABLE_",
+    "__bss_start", "__bss_start__", "__BSS_END__",
+    "_edata", "edata", "_end", "end", "__end", "__end__",
+    "_etext", "etext",
+    "__ehdr_start", "__executable_start",
+    // Note: _start is intentionally excluded — it comes from crt1.o, not the linker.
+    // Suppressing it here would mask missing-CRT errors.
+    "__dso_handle", "_DYNAMIC",
+    "__data_start", "data_start", "__DATA_BEGIN__",
+    "__SDATA_BEGIN__",
+    "__init_array_start", "__init_array_end",
+    "__fini_array_start", "__fini_array_end",
+    "__preinit_array_start", "__preinit_array_end",
+    "__rela_iplt_start", "__rela_iplt_end",
+    "__rel_iplt_start", "__rel_iplt_end",
+    "__global_pointer$",  // RISC-V
+    "_IO_stdin_used",
+    "_init", "_fini",
+    "___tls_get_addr",    // i686 TLS
+    "__tls_get_addr",     // x86-64 TLS
+    // Exception handling / unwinding (often weak, but may appear undefined)
+    "_ITM_registerTMCloneTable", "_ITM_deregisterTMCloneTable",
+    "__gcc_personality_v0", "_Unwind_Resume", "_Unwind_ForcedUnwind", "_Unwind_GetCFA",
+    "__pthread_initialize_minimal", "_dl_rtld_map",
+    "__GNU_EH_FRAME_HDR",
+    "__getauxval",
+];
+
+/// Check whether a symbol name is one that the linker provides during layout.
+pub fn is_linker_defined_symbol(name: &str) -> bool {
+    LINKER_DEFINED_SYMBOLS.contains(&name)
 }
 
 // ── Shared linker functions ─────────────────────────────────────────────
@@ -1030,6 +1082,179 @@ pub fn allocate_common_symbols_elf64<G: GlobalSymbolOps>(
         bss_off += size;
     }
     output_sections[bss_idx].mem_size = bss_off;
+}
+
+// ── Shared dynamic linking ──────────────────────────────────────────────
+//
+// These functions extract the duplicated shared-library symbol matching logic
+// from x86 and ARM linkers into a single generic implementation.
+
+/// Match dynamic symbols from a shared library against undefined globals.
+///
+/// For each undefined, non-dynamic global that matches a library export:
+/// 1. Replace it with a dynamic symbol entry (via `GlobalSymbolOps::new_dynamic`)
+/// 2. Track WEAK STT_OBJECT matches for alias registration
+///
+/// After the first pass, a second pass registers any STT_OBJECT aliases at the
+/// same (value, size) as matched WEAK symbols. This ensures COPY relocations
+/// work correctly (e.g., `environ` is WEAK, `__environ` is GLOBAL in libc).
+///
+/// Returns `true` if at least one symbol was matched (i.e., this library is needed).
+pub fn match_shared_library_dynsyms<G: GlobalSymbolOps>(
+    dyn_syms: &[DynSymbol],
+    soname: &str,
+    globals: &mut HashMap<String, G>,
+) -> bool {
+    let mut lib_needed = false;
+    let mut matched_weak_objects: Vec<(u64, u64)> = Vec::new();
+
+    // First pass: match undefined symbols against library exports
+    for dsym in dyn_syms {
+        if let Some(existing) = globals.get(&dsym.name) {
+            if !existing.is_defined() && !existing.is_dynamic() {
+                lib_needed = true;
+                globals.insert(dsym.name.clone(), G::new_dynamic(dsym, soname));
+                // Track WEAK STT_OBJECT for alias detection
+                let bind = dsym.info >> 4;
+                let stype = dsym.info & 0xf;
+                if bind == STB_WEAK && stype == STT_OBJECT
+                    && !matched_weak_objects.contains(&(dsym.value, dsym.size))
+                {
+                    matched_weak_objects.push((dsym.value, dsym.size));
+                }
+            }
+        }
+    }
+
+    // Second pass: register aliases for matched WEAK STT_OBJECT symbols
+    if !matched_weak_objects.is_empty() {
+        for dsym in dyn_syms {
+            let stype = dsym.info & 0xf;
+            if stype == STT_OBJECT
+                && matched_weak_objects.contains(&(dsym.value, dsym.size))
+                && !globals.contains_key(&dsym.name)
+            {
+                lib_needed = true;
+                globals.insert(dsym.name.clone(), G::new_dynamic(dsym, soname));
+            }
+        }
+    }
+
+    lib_needed
+}
+
+/// Load a shared library file and match its exports against undefined globals.
+///
+/// Handles linker script indirection (e.g., libc.so may be a text file pointing
+/// to the real .so). Uses as-needed semantics: only adds DT_NEEDED if at least
+/// one symbol was actually resolved.
+pub fn load_shared_library_elf64<G: GlobalSymbolOps>(
+    path: &str,
+    globals: &mut HashMap<String, G>,
+    needed_sonames: &mut Vec<String>,
+    lib_paths: &[String],
+) -> Result<(), String> {
+    let data = std::fs::read(path).map_err(|e| format!("failed to read '{}': {}", path, e))?;
+
+    // Handle linker scripts (e.g., libc.so is often a text file with GROUP/INPUT)
+    if data.len() >= 4 && data[0..4] != ELF_MAGIC {
+        if let Ok(text) = std::str::from_utf8(&data) {
+            if let Some(entries) = parse_linker_script_entries(text) {
+                let script_dir = Path::new(path).parent()
+                    .map(|p| p.to_string_lossy().to_string());
+                for entry in &entries {
+                    let resolved_path = match entry {
+                        LinkerScriptEntry::Path(lib_path) => {
+                            if Path::new(lib_path).exists() {
+                                Some(lib_path.clone())
+                            } else if let Some(ref dir) = script_dir {
+                                let p = format!("{}/{}", dir, lib_path);
+                                if Path::new(&p).exists() { Some(p) } else { None }
+                            } else {
+                                None
+                            }
+                        }
+                        LinkerScriptEntry::Lib(lib_name) => {
+                            resolve_lib(lib_name, lib_paths, false)
+                        }
+                    };
+                    if let Some(resolved) = resolved_path {
+                        let lib_data = std::fs::read(&resolved)
+                            .map_err(|e| format!("failed to read '{}': {}", resolved, e))?;
+                        if lib_data.len() >= 8 && &lib_data[0..8] == b"!<arch>\n" {
+                            // Archives in linker scripts (like libc_nonshared.a)
+                            // are silently skipped during shared lib loading
+                            continue;
+                        }
+                        load_shared_library_elf64(&resolved, globals, needed_sonames, lib_paths)?;
+                    }
+                }
+                return Ok(());
+            }
+        }
+        return Err(format!("{}: not a valid ELF shared library", path));
+    }
+
+    let soname = parse_soname(&data).unwrap_or_else(|| {
+        Path::new(path).file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string())
+    });
+
+    let dyn_syms = parse_shared_library_symbols(&data, path)?;
+    let lib_needed = match_shared_library_dynsyms(&dyn_syms, &soname, globals);
+
+    if lib_needed && !needed_sonames.contains(&soname) {
+        needed_sonames.push(soname);
+    }
+    Ok(())
+}
+
+/// Resolve remaining undefined symbols by searching default system libraries.
+///
+/// After all explicit -l libraries have been loaded, this function searches
+/// the standard system libraries (libc, libm, libgcc_s) for any remaining
+/// undefined, non-weak, non-linker-defined symbols.
+///
+/// `lib_search_paths` provides directories to search for the default libs.
+/// `default_lib_names` lists the .so filenames to try (e.g., ["libc.so.6"]).
+pub fn resolve_dynamic_symbols_elf64<G: GlobalSymbolOps>(
+    globals: &mut HashMap<String, G>,
+    needed_sonames: &mut Vec<String>,
+    lib_search_paths: &[String],
+    default_lib_names: &[&str],
+) -> Result<(), String> {
+    // Check if there are any truly undefined symbols worth resolving
+    let has_undefined = globals.iter().any(|(name, sym)| {
+        !sym.is_defined() && !sym.is_dynamic()
+            && !is_linker_defined_symbol(name)
+    });
+    if !has_undefined { return Ok(()); }
+
+    // Find default libraries in the search paths
+    for lib_name in default_lib_names {
+        let lib_path = lib_search_paths.iter()
+            .map(|dir| format!("{}/{}", dir, lib_name))
+            .find(|candidate| Path::new(candidate).exists());
+
+        if let Some(lib_path) = lib_path {
+            let data = match std::fs::read(&lib_path) { Ok(d) => d, Err(_) => continue };
+            let soname = parse_soname(&data).unwrap_or_else(|| {
+                Path::new(&lib_path).file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            });
+            let dyn_syms = match parse_shared_library_symbols(&data, &lib_path) {
+                Ok(s) => s, Err(_) => continue,
+            };
+
+            let lib_needed = match_shared_library_dynsyms(&dyn_syms, &soname, globals);
+            if lib_needed && !needed_sonames.contains(&soname) {
+                needed_sonames.push(soname);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Register symbols from an object file into the global symbol table.

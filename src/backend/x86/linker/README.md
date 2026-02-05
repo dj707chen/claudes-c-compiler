@@ -817,10 +817,11 @@ the memory load.
 
 ### 9. System Library Fallback
 
-The `resolve_dynamic_symbols` function has hardcoded paths to common system
-libraries (`/lib/x86_64-linux-gnu/libc.so.6`, etc.).  This is pragmatic but
-not portable.  A production linker would use `ldconfig` cache or search paths
-from `/etc/ld.so.conf`.
+The `resolve_dynamic_symbols_elf64` function (in `linker_common`) searches
+library paths provided by the caller (typically `/lib/x86_64-linux-gnu/` and
+`/usr/lib/x86_64-linux-gnu/`) for a default set of system libraries.  This
+is pragmatic but not portable.  A production linker would use the `ldconfig`
+cache or search paths from `/etc/ld.so.conf`.
 
 ### 10. Section Headers in Output
 
