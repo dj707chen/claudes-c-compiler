@@ -367,9 +367,14 @@ xchg, cmpxchg, xadd, bswap, bsf, bsr
 
 When the base register is `%rip`, the encoder emits `mod=00, rm=101` in
 ModR/M and a 32-bit displacement.  Symbol references generate `R_X86_64_PC32`
-relocations with addend `-4` (to account for the displacement being relative
-to the end of the instruction).  Modifiers like `@GOTPCREL` and `@GOTTPOFF`
-produce the corresponding relocation types.
+relocations with an initial addend of `-4` (to account for the 4-byte
+displacement field).  For instructions that encode immediate bytes *after*
+the displacement (e.g. `addl $1, sym(%rip)` has an imm8 trailing byte),
+`adjust_rip_reloc_addend()` subtracts the trailing byte count from the
+addend (e.g. `-5` for imm8, `-6` for imm16, `-8` for imm32).  This is
+necessary because RIP-relative displacements are resolved relative to the
+end of the *entire* instruction, not just the displacement field.  Modifiers
+like `@GOTPCREL` and `@GOTTPOFF` produce the corresponding relocation types.
 
 **Relocation generation:**
 

@@ -2006,6 +2006,32 @@ impl InstructionEncoder {
         });
     }
 
+    /// Adjust a RIP-relative relocation's addend to account for immediate bytes
+    /// that follow the displacement field in the instruction encoding.
+    ///
+    /// In x86-64, RIP-relative addressing computes the effective address as
+    /// RIP + disp32, where RIP points to the byte *after* the current instruction.
+    /// The R_X86_64_PC32 relocation computes S + A - P, where P is the address of
+    /// the disp32 field. So the addend A must equal -(bytes from disp32 to end of
+    /// instruction). `encode_modrm_mem` always uses A = -4 (for the disp32 itself),
+    /// but instructions with trailing immediate bytes need A = -(4 + trailing_bytes).
+    ///
+    /// `reloc_count_before` is the length of `self.relocations` before
+    /// `encode_modrm_mem` was called. This ensures we only adjust the relocation
+    /// that was emitted by `encode_modrm_mem`, not any subsequent ones.
+    fn adjust_rip_reloc_addend(&mut self, reloc_count_before: usize, trailing_bytes: i64) {
+        // Only adjust if encode_modrm_mem added a relocation
+        if self.relocations.len() > reloc_count_before {
+            let reloc = &mut self.relocations[reloc_count_before];
+            match reloc.reloc_type {
+                R_X86_64_PC32 | R_X86_64_PLT32 | R_X86_64_GOTPCREL | R_X86_64_GOTTPOFF => {
+                    reloc.addend -= trailing_bytes;
+                }
+                _ => {}
+            }
+        }
+    }
+
     // ---- Instruction-specific encoders ----
 
     fn encode_mov(&mut self, ops: &[Operand], size: u8) -> Result<(), String> {
@@ -2191,8 +2217,10 @@ impl InstructionEncoder {
         } else {
             self.bytes.push(0xC7);
         }
+        let reloc_count = self.relocations.len();
         self.encode_modrm_mem(0, mem)?;
 
+        let trailing = match size { 1 => 1, 2 => 2, _ => 4 };
         match imm {
             ImmediateValue::Integer(val) => {
                 match size {
@@ -2204,6 +2232,7 @@ impl InstructionEncoder {
             }
             _ => return Err("unsupported immediate for mov to memory".to_string()),
         }
+        self.adjust_rip_reloc_addend(reloc_count, trailing);
         Ok(())
     }
 
@@ -2482,21 +2511,28 @@ impl InstructionEncoder {
                 self.emit_rex_rm(size, "", mem);
 
                 if size == 1 {
+                    let rc = self.relocations.len();
                     self.bytes.push(0x80);
                     self.encode_modrm_mem(alu_op, mem)?;
                     self.bytes.push(val as u8);
+                    self.adjust_rip_reloc_addend(rc, 1);
                 } else if (-128..=127).contains(&val) {
+                    let rc = self.relocations.len();
                     self.bytes.push(0x83);
                     self.encode_modrm_mem(alu_op, mem)?;
                     self.bytes.push(val as u8);
+                    self.adjust_rip_reloc_addend(rc, 1);
                 } else {
+                    let rc = self.relocations.len();
                     self.bytes.push(0x81);
                     self.encode_modrm_mem(alu_op, mem)?;
+                    let trailing: i64 = if size == 2 { 2 } else { 4 };
                     if size == 2 {
                         self.bytes.extend_from_slice(&(val as i16).to_le_bytes());
                     } else {
                         self.bytes.extend_from_slice(&(val as i32).to_le_bytes());
                     }
+                    self.adjust_rip_reloc_addend(rc, trailing);
                 }
                 Ok(())
             }
@@ -2504,6 +2540,7 @@ impl InstructionEncoder {
                 self.emit_segment_prefix(mem)?;
                 if size == 2 { self.bytes.push(0x66); }
                 self.emit_rex_rm(size, "", mem);
+                let rc = self.relocations.len();
                 self.bytes.push(0x81);
                 self.encode_modrm_mem(alu_op, mem)?;
                 // Emit 4-byte relocation for the symbol immediate
@@ -2515,6 +2552,7 @@ impl InstructionEncoder {
                     addend: 0,
                 });
                 self.bytes.extend_from_slice(&[0; 4]);
+                self.adjust_rip_reloc_addend(rc, 4);
                 Ok(())
             }
             (Operand::Immediate(ImmediateValue::Symbol(sym)), Operand::Register(dst)) => {
@@ -2599,7 +2637,9 @@ impl InstructionEncoder {
                 if size == 2 { self.bytes.push(0x66); }
                 self.emit_rex_rm(size, "", mem);
                 self.bytes.push(if size == 1 { 0xF6 } else { 0xF7 });
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(0, mem)?;
+                let trailing: i64 = if size == 1 { 1 } else if size == 2 { 2 } else { 4 };
                 if size == 1 {
                     self.bytes.push(val as u8);
                 } else if size == 2 {
@@ -2607,6 +2647,7 @@ impl InstructionEncoder {
                 } else {
                     self.bytes.extend_from_slice(&(val as i32).to_le_bytes());
                 }
+                self.adjust_rip_reloc_addend(rc, trailing);
                 Ok(())
             }
             _ => Err("unsupported test operands".to_string()),
@@ -2782,9 +2823,11 @@ impl InstructionEncoder {
                     self.bytes.push(if size == 1 { 0xD0 } else { 0xD1 });
                     self.encode_modrm_mem(shift_op, mem)
                 } else {
+                    let rc = self.relocations.len();
                     self.bytes.push(if size == 1 { 0xC0 } else { 0xC1 });
                     self.encode_modrm_mem(shift_op, mem)?;
                     self.bytes.push(count);
+                    self.adjust_rip_reloc_addend(rc, 1);
                     Ok(())
                 }
             }
@@ -3973,8 +4016,10 @@ impl InstructionEncoder {
                 let size = if rex_w { 8 } else { 0 };
                 self.emit_rex_rm(size, &dst.name, mem);
                 self.bytes.extend_from_slice(&opcode[prefix_len..]);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(dst_num, mem)?;
                 self.bytes.push(*imm as u8);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             _ => Err("unsupported pinsrX operands".to_string()),
@@ -4021,8 +4066,10 @@ impl InstructionEncoder {
                 let size = if rex_w { 8 } else { 0 };
                 self.emit_rex_rm(size, &src.name, mem);
                 self.bytes.extend_from_slice(&opcode[prefix_len..]);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(src_num, mem)?;
                 self.bytes.push(*imm as u8);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             _ => Err("unsupported pextrX operands".to_string()),
@@ -4251,9 +4298,11 @@ impl InstructionEncoder {
             (Operand::Immediate(ImmediateValue::Integer(imm)), Operand::Memory(mem)) => {
                 self.emit_segment_prefix(mem)?;
                 self.emit_rex_rm(size, "", mem);
+                let rc = self.relocations.len();
                 self.bytes.extend_from_slice(&[0x0F, 0xBA]);
                 self.encode_modrm_mem(imm_ext, mem)?;
                 self.bytes.push(*imm as u8);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             // bt %reg, reg/mem
@@ -4282,9 +4331,11 @@ impl InstructionEncoder {
                     scale: None,
                 };
                 self.emit_rex_rm(size, "", &mem);
+                let rc = self.relocations.len();
                 self.bytes.extend_from_slice(&[0x0F, 0xBA]);
                 self.encode_modrm_mem(imm_ext, &mem)?;
                 self.bytes.push(*imm as u8);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             _ => Err(format!("unsupported {} operands", mnemonic)),
@@ -4926,8 +4977,10 @@ impl InstructionEncoder {
                 let vvvv_enc = vvvv_num | (if needs_vex_ext(&vvvv.name) { 8 } else { 0 });
                 self.emit_vex(r, x, b_ext, 1, 0, vvvv_enc, l, pp);
                 self.bytes.push(opcode);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(dst_num, mem)?;
                 self.bytes.push(*imm as u8);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             _ => Err("unsupported AVX 3-op+imm8 operands".to_string()),
@@ -5023,8 +5076,10 @@ impl InstructionEncoder {
                 let vvvv_enc = vvvv_num | (if needs_vex_ext(&vvvv.name) { 8 } else { 0 });
                 self.emit_vex(r, x, b_ext, 1, 0, vvvv_enc, l, pp);
                 self.bytes.push(opcode);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(dst_num, mem)?;
                 self.bytes.push(*imm as u8);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             _ => Err("unsupported AVX scalar cmp operands".to_string()),
@@ -5138,8 +5193,10 @@ impl InstructionEncoder {
                 let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
                 self.emit_vex(r, x, b_ext, 3, 0, 0, l, pp);
                 self.bytes.push(opcode);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(dst_num, mem)?;
                 self.bytes.push(*imm as u8);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             _ => Err("unsupported AVX shuffle 3A operands".to_string()),
@@ -5211,8 +5268,10 @@ impl InstructionEncoder {
                 }
                 self.emit_rex_rm(0, &dst.name, mem);
                 self.bytes.extend_from_slice(&opcode[prefix_len..]);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(dst_num, mem)?;
                 self.bytes.push(pred);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(Some(()))
             }
             _ => Err(format!("unsupported {} operands", mnemonic)),
@@ -5316,8 +5375,10 @@ impl InstructionEncoder {
                 let vvvv_enc = vvvv_num | (if needs_vex_ext(&vvvv.name) { 8 } else { 0 });
                 self.emit_vex(r, x, b_ext, 1, 0, vvvv_enc, l, pp);
                 self.bytes.push(0xC2);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(dst_num, mem)?;
                 self.bytes.push(pred);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(Some(()))
             }
             _ => Err(format!("unsupported {} operands", mnemonic)),
@@ -5353,8 +5414,10 @@ impl InstructionEncoder {
                 let vvvv_enc = vvvv_num | (if needs_vex_ext(&vvvv.name) { 8 } else { 0 });
                 self.emit_vex(r, x, b_ext, 3, 0, vvvv_enc, l, pp);
                 self.bytes.push(opcode);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(dst_num, mem)?;
                 self.bytes.push(*imm as u8);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             _ => Err("unsupported AVX 3-op+imm8 operands".to_string()),
@@ -5416,8 +5479,10 @@ impl InstructionEncoder {
                 let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
                 self.emit_vex(r, x, b_ext, 1, 0, 0, l, pp);
                 self.bytes.push(opcode);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(dst_num, mem)?;
                 self.bytes.push(*imm as u8);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             _ => Err("unsupported AVX shuffle operands".to_string()),
@@ -5718,8 +5783,10 @@ impl InstructionEncoder {
                 let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
                 self.emit_vex(r, x, b_ext, 3, 0, 0, 1, pp);
                 self.bytes.push(opcode);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(src_num, mem)?;
                 self.bytes.push(*imm as u8);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             _ => Err("unsupported AVX extract operands".to_string()),
@@ -5752,8 +5819,10 @@ impl InstructionEncoder {
                 let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
                 self.emit_vex(r, x, b_ext, 3, 1, 0, l, pp);
                 self.bytes.push(opcode);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(dst_num, mem)?;
                 self.bytes.push(*imm as u8);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             _ => Err("unsupported AVX permq operands".to_string()),
@@ -5820,8 +5889,10 @@ impl InstructionEncoder {
                 let vvvv_enc = vvvv_num | (if needs_vex_ext(&vvvv.name) { 8 } else { 0 });
                 self.emit_vex(r, x, b_ext, 3, 0, vvvv_enc, 0, pp);
                 self.bytes.push(opcode);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(dst_num, mem)?;
                 self.bytes.push(*imm as u8);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             _ => Err("unsupported AVX insert operands".to_string()),
@@ -5898,8 +5969,10 @@ impl InstructionEncoder {
                 let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
                 self.emit_vex(r, x, b_ext, 3, 0, 0, 0, pp);
                 self.bytes.push(opcode);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(src_num, mem)?;
                 self.bytes.push(*imm as u8);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             _ => Err("unsupported AVX extract operands".to_string()),
@@ -6018,8 +6091,10 @@ impl InstructionEncoder {
                 let x = mem.index.as_ref().is_some_and(|i| needs_vex_ext(&i.name));
                 self.emit_vex(r, x, b_ext, 3, w, 0, 0, 3);
                 self.bytes.push(0xF0);
+                let rc = self.relocations.len();
                 self.encode_modrm_mem(dst_num, mem)?;
                 self.bytes.push(imm);
+                self.adjust_rip_reloc_addend(rc, 1);
                 Ok(())
             }
             _ => Err("rorx: unsupported operand combination".to_string()),
