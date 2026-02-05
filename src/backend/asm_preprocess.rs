@@ -405,7 +405,9 @@ pub(crate) fn expand_rept_blocks_with_insn_size(
             for val in &values {
                 let subst_body: Vec<String> = body.iter().map(|line| {
                     let pattern = format!("\\{}", var);
-                    line.replace(&pattern, val)
+                    let substituted = line.replace(&pattern, val);
+                    // Strip GAS macro argument delimiters: \() resolves to empty string
+                    substituted.replace("\\()", "")
                 }).collect();
                 let subst_refs: Vec<&str> = subst_body.iter().map(|s| s.as_str()).collect();
                 let expanded = expand_rept_blocks_with_insn_size(&subst_refs, comment_style, parse_int, default_insn_size)?;
@@ -807,6 +809,10 @@ pub fn expand_macros(
                         });
                         expanded = expanded.replace(&pattern, replacement);
                     }
+                    // Strip GAS macro argument delimiters: \() resolves to empty string.
+                    // Used to separate parameter names from adjacent text,
+                    // e.g., \op\()_safe_regs -> rdmsr_safe_regs
+                    expanded = expanded.replace("\\()", "");
                     expanded_lines.push(expanded);
                 }
                 let refs: Vec<&str> = expanded_lines.iter().map(|s| s.as_str()).collect();
@@ -855,6 +861,8 @@ fn expand_macros_with(
                     });
                     expanded = expanded.replace(&pattern, replacement);
                 }
+                // Strip GAS macro argument delimiters: \() resolves to empty string
+                expanded = expanded.replace("\\()", "");
                 expanded_lines.push(expanded);
             }
             let refs: Vec<&str> = expanded_lines.iter().map(|s| s.as_str()).collect();

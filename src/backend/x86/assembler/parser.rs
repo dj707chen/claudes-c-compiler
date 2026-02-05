@@ -1540,7 +1540,9 @@ fn expand_gas_macros_with_state(
             let mut all_expanded = Vec::new();
             for item in &items {
                 for bline in &body {
-                    let expanded = bline.replace(&format!("\\{}", var), item);
+                    let mut expanded = bline.replace(&format!("\\{}", var), item);
+                    // Strip GAS macro argument delimiters: \() resolves to empty string
+                    expanded = expanded.replace("\\()", "");
                     all_expanded.push(expanded);
                 }
             }
@@ -1700,6 +1702,10 @@ fn expand_gas_macros_with_state(
                 for (pname, pval) in &args {
                     l = l.replace(&format!("\\{}", pname), pval);
                 }
+                // Strip GAS macro argument delimiters: \() resolves to empty string.
+                // Used to separate parameter names from adjacent text,
+                // e.g., \op\()_safe_regs -> rdmsr_safe_regs
+                l = l.replace("\\()", "");
                 l
             }).collect();
             // Recursively expand the body (handles nested .irp, .set, .if, etc.)
