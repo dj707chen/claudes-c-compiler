@@ -1,0 +1,21 @@
+Fix ARM assembler: ldr Xn, =symbol must use literal pool, not adrp+add
+
+Bug: try_expand_ldr_literal() in parser.rs converts `ldr Xn, =symbol` to
+`adrp Xn, symbol; add Xn, Xn, :lo12:symbol`. This gives a PC-relative
+address, which is WRONG when code runs at a different address than its
+linked address (e.g., Linux kernel early boot code running at physical
+addresses before MMU is enabled, then jumping to virtual addresses).
+
+The correct behavior is to emit `ldr Xn, [PC, #offset]` referencing a
+literal pool entry containing the absolute 64-bit address of the symbol.
+
+This breaks the Linux kernel ARM64 tinyconfig standalone boot:
+  - arch/arm64/kernel/head.S uses `ldr x8, =__primary_switched` and
+    `ldr x8, =__secondary_switched` to load virtual addresses for
+    post-MMU jumps
+  - With adrp+add, the loaded address is wrong, causing a crash at boot
+
+Fix: Implement proper literal pool support in the ARM assembler with
+.ltorg directives and automatic pool emission at section boundaries.
+
+Started: 2026-02-05
