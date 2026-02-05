@@ -1,7 +1,7 @@
 //! ELF object file writer for RISC-V.
 //!
 //! Takes parsed assembly statements and produces an ELF .o (relocatable) file
-//! with proper sections, symbols, and relocations for RISC-V 64-bit ELF.
+//! with proper sections, symbols, and relocations for RISC-V ELF (32 or 64-bit).
 //!
 //! Uses `ElfWriterBase` from `elf.rs` for shared section/symbol/relocation
 //! management, directive processing, and ELF serialization. This file only
@@ -25,11 +25,11 @@ use crate::backend::elf::{
 };
 
 // ELF flags for RISC-V
-const EF_RISCV_RVC: u32 = 0x1;
+pub(super) const EF_RISCV_RVC: u32 = 0x1;
 const EF_RISCV_FLOAT_ABI_SOFT: u32 = 0x0;
-const EF_RISCV_FLOAT_ABI_SINGLE: u32 = 0x2;
-const EF_RISCV_FLOAT_ABI_DOUBLE: u32 = 0x4;
-const EF_RISCV_FLOAT_ABI_QUAD: u32 = 0x6;
+pub(super) const EF_RISCV_FLOAT_ABI_SINGLE: u32 = 0x2;
+pub(super) const EF_RISCV_FLOAT_ABI_DOUBLE: u32 = 0x4;
+pub(super) const EF_RISCV_FLOAT_ABI_QUAD: u32 = 0x6;
 
 /// RISC-V NOP instruction: `addi x0, x0, 0` = 0x00000013 in little-endian
 const RISCV_NOP: [u8; 4] = [0x13, 0x00, 0x00, 0x00];
@@ -52,6 +52,8 @@ pub struct ElfWriter {
     deferred_exprs: Vec<DeferredExpr>,
     /// ELF e_flags to use (default: RVC + double-float ABI)
     elf_flags: u32,
+    /// ELF class: ELFCLASS64 (default) or ELFCLASS32 for RV32 targets.
+    elf_class: u8,
     /// When true, don't emit R_RISCV_RELAX relocations (set by `.option norelax`).
     no_relax: bool,
 }
@@ -392,6 +394,7 @@ impl ElfWriter {
             numeric_labels: HashMap::new(),
             deferred_exprs: Vec::new(),
             elf_flags: EF_RISCV_FLOAT_ABI_DOUBLE | EF_RISCV_RVC,
+            elf_class: ELFCLASS64,
             no_relax: false,
         }
     }
@@ -399,6 +402,11 @@ impl ElfWriter {
     /// Set the ELF e_flags (e.g., to change float ABI from the default double-float).
     pub fn set_elf_flags(&mut self, flags: u32) {
         self.elf_flags = flags;
+    }
+
+    /// Set the ELF class (ELFCLASS32 or ELFCLASS64).
+    pub fn set_elf_class(&mut self, class: u8) {
+        self.elf_class = class;
     }
 
     // R_RISCV_RELAX relocations are emitted alongside CALL_PLT, BRANCH, and
@@ -1203,7 +1211,9 @@ impl ElfWriter {
         let config = elf::ElfConfig {
             e_machine: EM_RISCV,
             e_flags: self.elf_flags,
-            elf_class: ELFCLASS64,
+            elf_class: self.elf_class,
+            // RISC-V always uses RELA relocations, even in 32-bit mode
+            force_rela: true,
         };
         // RISC-V needs include_referenced_locals=true for pcrel_hi synthetic labels
         self.base.write_elf(output_path, &config, true)

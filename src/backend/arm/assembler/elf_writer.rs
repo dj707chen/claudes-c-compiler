@@ -565,6 +565,7 @@ impl ElfWriter {
             e_machine: EM_AARCH64,
             e_flags: 0,
             elf_class: ELFCLASS64,
+            force_rela: false,
         };
         self.base.write_elf(output_path, &config, false)
     }

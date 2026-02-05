@@ -189,6 +189,8 @@ pub const ELF32_SYM_SIZE: usize = 16;
 pub const ELF64_RELA_SIZE: usize = 24;
 /// Size of ELF32 REL relocation entry in bytes.
 pub const ELF32_REL_SIZE: usize = 8;
+/// Size of ELF32 RELA relocation entry in bytes.
+pub const ELF32_RELA_SIZE: usize = 12;
 /// Size of ELF64 program header in bytes.
 pub const ELF64_PHDR_SIZE: usize = 56;
 /// Size of ELF32 program header in bytes.
@@ -429,6 +431,15 @@ pub fn write_rel32(buf: &mut Vec<u8>, r_offset: u32, r_sym: u32, r_type: u8) {
     buf.extend_from_slice(&r_offset.to_le_bytes());
     let r_info: u32 = (r_sym << 8) | (r_type as u32);
     buf.extend_from_slice(&r_info.to_le_bytes());
+}
+
+/// Write an ELF32 RELA relocation entry to `buf`.
+/// Used by architectures that require RELA even in 32-bit mode (e.g., RISC-V).
+pub fn write_rela32(buf: &mut Vec<u8>, r_offset: u32, r_sym: u32, r_type: u8, r_addend: i32) {
+    buf.extend_from_slice(&r_offset.to_le_bytes());
+    let r_info: u32 = (r_sym << 8) | (r_type as u32);
+    buf.extend_from_slice(&r_info.to_le_bytes());
+    buf.extend_from_slice(&r_addend.to_le_bytes());
 }
 
 // ── Archive (.a) parsing ─────────────────────────────────────────────────────
@@ -822,7 +833,7 @@ pub fn default_section_flags(name: &str) -> u64 {
 //
 // This section provides a unified `write_relocatable_object` function that
 // serializes an ELF .o file from arch-independent section/symbol/reloc data.
-// It handles both ELF64+RELA (x86-64, AArch64, RISC-V) and ELF32+REL (i686)
+// It handles ELF64+RELA (x86-64, AArch64, RISC-V), ELF32+RELA (RISC-V RV32), and ELF32+REL (i686)
 // formats, eliminating ~1200 lines of duplicated serialization code across
 // the four backend assemblers.
 //
@@ -839,6 +850,9 @@ pub struct ElfConfig {
     pub e_flags: u32,
     /// ELF class: ELFCLASS64 or ELFCLASS32
     pub elf_class: u8,
+    /// Force RELA relocations even for ELF32 (needed by RISC-V which always uses RELA).
+    /// When false (default), ELF32 uses REL and ELF64 uses RELA.
+    pub force_rela: bool,
 }
 
 /// A section in a relocatable object file being built by the assembler.
@@ -911,12 +925,18 @@ pub fn write_relocatable_object(
     symbols: &[ObjSymbol],
 ) -> Result<Vec<u8>, String> {
     let is_32bit = config.elf_class == ELFCLASS32;
-    let use_rela = !is_32bit; // ELF64 uses RELA, ELF32 uses REL
+    // ELF64 always uses RELA; ELF32 defaults to REL but some architectures
+    // (e.g., RISC-V) always use RELA even in 32-bit mode.
+    let use_rela = !is_32bit || config.force_rela;
 
     let ehdr_size = if is_32bit { ELF32_EHDR_SIZE } else { ELF64_EHDR_SIZE };
     let shdr_size = if is_32bit { ELF32_SHDR_SIZE } else { ELF64_SHDR_SIZE };
     let sym_entry_size = if is_32bit { ELF32_SYM_SIZE } else { ELF64_SYM_SIZE };
-    let reloc_entry_size = if use_rela { ELF64_RELA_SIZE } else { ELF32_REL_SIZE };
+    let reloc_entry_size = if use_rela {
+        if is_32bit { ELF32_RELA_SIZE } else { ELF64_RELA_SIZE }
+    } else {
+        ELF32_REL_SIZE
+    };
     let reloc_prefix = if use_rela { ".rela" } else { ".rel" };
     let reloc_sh_type = if use_rela { SHT_RELA } else { SHT_REL };
     let alignment_mask = if is_32bit { 3usize } else { 7usize }; // 4 or 8 byte alignment
@@ -1192,8 +1212,13 @@ pub fn write_relocatable_object(
                     let sym_idx = find_symbol_index_shared(
                         &reloc.symbol_name, &sym_entries, &strtab, content_sections,
                     );
-                    if use_rela {
+                    if use_rela && !is_32bit {
                         write_rela64(&mut elf, reloc.offset, sym_idx, reloc.reloc_type, reloc.addend);
+                    } else if use_rela && is_32bit {
+                        debug_assert!(reloc.reloc_type <= 255, "ELF32 reloc type must fit in u8");
+                        debug_assert!(reloc.addend >= i32::MIN as i64 && reloc.addend <= i32::MAX as i64,
+                            "ELF32 RELA addend must fit in i32");
+                        write_rela32(&mut elf, reloc.offset as u32, sym_idx, reloc.reloc_type as u8, reloc.addend as i32);
                     } else {
                         debug_assert!(reloc.reloc_type <= 255, "ELF32 reloc type must fit in u8");
                         write_rel32(&mut elf, reloc.offset as u32, sym_idx, reloc.reloc_type as u8);

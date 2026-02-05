@@ -1180,6 +1180,7 @@ impl<A: X86Arch> ElfWriterCore<A> {
             e_machine: A::elf_machine(),
             e_flags: A::elf_flags(),
             elf_class: A::elf_class(),
+            force_rela: false,
         };
 
         elf_mod::write_relocatable_object(

@@ -16,7 +16,8 @@ pub mod compress;
 pub mod elf_writer;
 
 use parser::parse_asm;
-use elf_writer::ElfWriter;
+use elf_writer::{ElfWriter, EF_RISCV_RVC, EF_RISCV_FLOAT_ABI_SINGLE, EF_RISCV_FLOAT_ABI_DOUBLE, EF_RISCV_FLOAT_ABI_QUAD};
+use crate::backend::elf::{ELFCLASS32, ELFCLASS64};
 
 /// Assemble RISC-V assembly text into an ELF object file.
 ///
@@ -28,15 +29,50 @@ pub fn assemble(asm_text: &str, output_path: &str) -> Result<(), String> {
 
 /// Assemble RISC-V assembly text into an ELF object file, with extra args.
 ///
-/// Supports `-mabi=` to control ELF float ABI flags (lp64/lp64f/lp64d/lp64q).
+/// Supports `-mabi=` to control ELF float ABI flags and ELF class (32/64-bit),
+/// and `-march=` to control ELF class (rv32 vs rv64) and RVC flag.
 pub fn assemble_with_args(asm_text: &str, output_path: &str, extra_args: &[String]) -> Result<(), String> {
     let statements = parse_asm(asm_text)?;
     let mut writer = ElfWriter::new();
 
-    // Parse -mabi= from extra args to set correct ELF float ABI flags
+    // Collect ABI and arch info from extra args (last value wins, matching GCC behavior)
+    let mut abi_name: Option<String> = None;
+    let mut march_name: Option<String> = None;
     for arg in extra_args {
         if let Some(abi) = arg.strip_prefix("-mabi=") {
-            writer.set_elf_flags(elf_flags_for_abi(abi));
+            abi_name = Some(abi.to_string());
+        }
+        if let Some(march) = arg.strip_prefix("-march=") {
+            march_name = Some(march.to_string());
+        }
+    }
+
+    // Determine RVC from -march= (check for 'c' extension in the arch string)
+    let has_rvc = match &march_name {
+        Some(march) => march_has_c_extension(march),
+        None => true, // default: assume RVC (matches rv64gc default)
+    };
+
+    // Set ELF flags based on ABI + RVC
+    if let Some(ref abi) = abi_name {
+        writer.set_elf_flags(elf_flags_for_abi(abi, has_rvc));
+        if abi.starts_with("ilp32") {
+            writer.set_elf_class(ELFCLASS32);
+        } else {
+            writer.set_elf_class(ELFCLASS64);
+        }
+    } else if !has_rvc {
+        // No -mabi= but -march= without 'c': clear RVC from default flags
+        let default_flags = EF_RISCV_FLOAT_ABI_DOUBLE;
+        writer.set_elf_flags(default_flags);
+    }
+
+    // -march= overrides ELF class (takes precedence, processed after -mabi=)
+    if let Some(ref march) = march_name {
+        if march.starts_with("rv32") {
+            writer.set_elf_class(ELFCLASS32);
+        } else if march.starts_with("rv64") {
+            writer.set_elf_class(ELFCLASS64);
         }
     }
 
@@ -45,13 +81,8 @@ pub fn assemble_with_args(asm_text: &str, output_path: &str, extra_args: &[Strin
     Ok(())
 }
 
-/// Map an ABI name to ELF e_flags.
-fn elf_flags_for_abi(abi: &str) -> u32 {
-    const EF_RISCV_RVC: u32 = 0x1;
-    const EF_RISCV_FLOAT_ABI_DOUBLE: u32 = 0x4;
-    const EF_RISCV_FLOAT_ABI_SINGLE: u32 = 0x2;
-    const EF_RISCV_FLOAT_ABI_QUAD: u32 = 0x6;
-
+/// Map an ABI name to ELF e_flags, with optional RVC flag.
+fn elf_flags_for_abi(abi: &str, has_rvc: bool) -> u32 {
     let float_abi = match abi {
         "lp64" | "ilp32" => 0x0, // soft-float
         "lp64f" | "ilp32f" => EF_RISCV_FLOAT_ABI_SINGLE,
@@ -59,5 +90,20 @@ fn elf_flags_for_abi(abi: &str) -> u32 {
         "lp64q" | "ilp32q" => EF_RISCV_FLOAT_ABI_QUAD,
         _ => EF_RISCV_FLOAT_ABI_DOUBLE, // default
     };
-    float_abi | EF_RISCV_RVC
+    if has_rvc { float_abi | EF_RISCV_RVC } else { float_abi }
+}
+
+/// Check if a -march= string includes the 'c' (compressed) extension.
+/// Handles both shorthand (rv64gc) and explicit (rv64imafdc_zicsr) formats.
+fn march_has_c_extension(march: &str) -> bool {
+    // Strip the rv32/rv64 prefix
+    let rest = if march.starts_with("rv32") || march.starts_with("rv64") {
+        &march[4..]
+    } else {
+        march
+    };
+    // The base ISA letters come before the first '_' (extension separator)
+    let base = rest.split('_').next().unwrap_or(rest);
+    // 'g' expands to 'imafd' (no 'c'), so only check for explicit 'c'
+    base.contains('c')
 }
