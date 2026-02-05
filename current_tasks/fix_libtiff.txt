@@ -1,0 +1,2 @@
+Working on getting libtiff to compile and pass tests with ccc-x86.
+Will diagnose failures and fix compiler bugs as needed.
