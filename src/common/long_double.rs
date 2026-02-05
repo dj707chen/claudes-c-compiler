@@ -6,7 +6,7 @@
 //! This module provides:
 //! - Parsing decimal/hex strings to x87 80-bit or f128 128-bit format
 //! - Conversion between x87, f128, and f64 formats
-//! - Full-precision arithmetic on x87 (via inline asm on x86-64) and f128 (software)
+//! - Full-precision arithmetic on x87 and f128 (pure software, no inline asm)
 //! - Conversion from floating-point bytes to integer types
 //!
 //! # Architecture
@@ -1104,91 +1104,689 @@ pub fn f64_to_x87_bytes_simple(val: f64) -> [u8; 16] {
 //
 // These functions perform arithmetic on x87 80-bit extended precision values
 // stored as [u8; 16] byte arrays (10 bytes of x87 data + 6 padding bytes).
-// Since the compiler runs on x86-64, we use inline assembly to invoke the
-// actual x87 FPU instructions, giving us correct 80-bit precision results
-// that match what the generated code will produce at runtime.
-
-/// Emit an x87 binary operation via inline assembly.
-/// All four ops (faddp/fsubp/fmulp/fdivp) share the same load/store structure,
-/// differing only in the single arithmetic instruction.
-macro_rules! x87_asm_binop {
-    ($a:expr, $b:expr, $result:expr, $insn:literal) => {
-        // SAFETY: Loads two 80-bit x87 values via `fld tbyte ptr`, performs one
-        // arithmetic op, stores result via `fstp tbyte ptr`. Stack is balanced
-        // (2 loads, 1 fXXXp pop, 1 fstp). No memory aliasing. The `nostack` option
-        // is correct since x87 FPU operations don't touch the CPU stack.
-        // For sub/div: load a first → ST(0), then b → ST(0) pushes a to ST(1).
-        // fsubp: ST(1) - ST(0) = a - b. fdivp: ST(1) / ST(0) = a / b.
-        unsafe {
-            std::arch::asm!(
-                "fld tbyte ptr [{a}]",
-                "fld tbyte ptr [{b}]",
-                $insn,
-                "fstp tbyte ptr [{res}]",
-                a = in(reg) $a.as_ptr(),
-                b = in(reg) $b.as_ptr(),
-                res = in(reg) $result.as_mut_ptr(),
-                options(nostack),
-            );
-        }
-    };
-}
-
-/// Perform an x87 binary operation on two 80-bit extended precision values.
-/// `op` selects the operation: 0=add, 1=sub, 2=mul, 3=div.
-#[cfg(target_arch = "x86_64")]
-fn x87_binop(a: &[u8; 16], b: &[u8; 16], op: u8) -> [u8; 16] {
-    debug_assert!(op <= 3, "x87_binop: invalid op code {op}, expected 0..=3");
-    debug_assert!(a[10..16] == [0; 6], "x87_binop: padding bytes of `a` non-zero");
-    debug_assert!(b[10..16] == [0; 6], "x87_binop: padding bytes of `b` non-zero");
-
-    let mut result = [0u8; 16];
-    match op {
-        0 => x87_asm_binop!(a, b, result, "faddp"),
-        1 => x87_asm_binop!(a, b, result, "fsubp"),
-        2 => x87_asm_binop!(a, b, result, "fmulp"),
-        3 => x87_asm_binop!(a, b, result, "fdivp"),
-        _ => unreachable!("invalid x87 binop code"),
-    }
-    result
-}
-
-/// Fallback for non-x86 hosts: use f64 arithmetic (lossy).
-// TODO: Cross-compilation from non-x86 hosts will produce imprecise long double
-// constant folding results (53-bit instead of 64-bit mantissa). To fix this,
-// implement software 80-bit float arithmetic using the existing BigUint infrastructure.
-#[cfg(not(target_arch = "x86_64"))]
-fn x87_binop(a: &[u8; 16], b: &[u8; 16], op: u8) -> [u8; 16] {
-    let fa = x87_bytes_to_f64(a);
-    let fb = x87_bytes_to_f64(b);
-    let result = match op {
-        0 => fa + fb,
-        1 => fa - fb,
-        2 => fa * fb,
-        3 => fa / fb,
-        _ => unreachable!("invalid x87 binop code"),
-    };
-    f64_to_x87_bytes_simple(result)
-}
+// All operations use pure software implementations (no inline asm), producing
+// bit-identical results to the x87 FPU hardware.
 
 /// Add two x87 80-bit extended precision values with full precision.
 pub fn x87_add(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
-    x87_binop(a, b, 0)
+    x87_add_soft(a, b)
 }
 
 /// Subtract two x87 80-bit extended precision values with full precision.
 pub fn x87_sub(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
-    x87_binop(a, b, 1)
+    x87_sub_soft(a, b)
 }
 
 /// Multiply two x87 80-bit extended precision values with full precision.
 pub fn x87_mul(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
-    x87_binop(a, b, 2)
+    x87_mul_soft(a, b)
 }
 
 /// Divide two x87 80-bit extended precision values with full precision.
 pub fn x87_div(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
-    x87_binop(a, b, 3)
+    x87_div_soft(a, b)
+}
+
+/// Software multiply for x87 80-bit extended precision values.
+/// Produces bit-identical results to the x87 FPU fmulp instruction.
+///
+/// x87 extended format: 1 sign bit, 15-bit biased exponent (bias=16383),
+/// 64-bit mantissa with explicit integer bit at position 63.
+pub fn x87_mul_soft(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    let da = x87_decompose(a);
+    let db = x87_decompose(b);
+    let sign = da.sign ^ db.sign;
+
+    // x87 "indefinite" QNaN: negative, exp=0x7FFF, mantissa=0xC000_0000_0000_0000
+    let indefinite_nan = x87_encode(true, 0x7FFF, 0xC000_0000_0000_0000);
+
+    // Unnormals and pseudo-values: biased_exp > 0 but integer bit (bit 63) not set.
+    // x87 raises #IA and returns the indefinite NaN for these invalid encodings.
+    // This includes pseudo-NaN/pseudo-infinity (exp=0x7FFF, integer bit clear).
+    let a_is_unnormal = da.biased_exp > 0 && (da.mantissa >> 63) == 0;
+    let b_is_unnormal = db.biased_exp > 0 && (db.mantissa >> 63) == 0;
+    if a_is_unnormal || b_is_unnormal {
+        return indefinite_nan;
+    }
+
+    // At this point, all values with biased_exp > 0 have the integer bit set.
+    // Infinity: exp=0x7FFF, mantissa=exactly 0x8000_0000_0000_0000
+    let a_is_inf = da.biased_exp == 0x7FFF && da.mantissa == 0x8000_0000_0000_0000;
+    let b_is_inf = db.biased_exp == 0x7FFF && db.mantissa == 0x8000_0000_0000_0000;
+    // NaN: exp=0x7FFF with integer bit set but fraction bits nonzero
+    let a_is_nan = da.biased_exp == 0x7FFF && !a_is_inf;
+    let b_is_nan = db.biased_exp == 0x7FFF && !b_is_inf;
+
+    // NaN propagation: return the input NaN with quiet bit set
+    if a_is_nan {
+        let mut result = *a;
+        result[7] |= 0x40; // set quiet NaN bit
+        return result;
+    }
+    if b_is_nan {
+        let mut result = *b;
+        result[7] |= 0x40; // set quiet NaN bit
+        return result;
+    }
+
+    // Inf * 0 = indefinite NaN (invalid operation)
+    if a_is_inf && db.is_zero() {
+        return indefinite_nan;
+    }
+    if b_is_inf && da.is_zero() {
+        return indefinite_nan;
+    }
+
+    // Inf * anything (non-zero, non-NaN) = Inf
+    if a_is_inf || b_is_inf {
+        return make_x87_infinity(sign);
+    }
+
+    // Zero * anything = Zero
+    if da.is_zero() || db.is_zero() {
+        return make_x87_zero(sign);
+    }
+
+    // Both operands are finite and nonzero.
+    // Compute unbiased exponents. For denormals (biased_exp==0), the true
+    // exponent is 1-16383 = -16382 (not 0-16383).
+    let exp_a = if da.biased_exp == 0 { -16382i32 } else { da.biased_exp as i32 - 16383 };
+    let exp_b = if db.biased_exp == 0 { -16382i32 } else { db.biased_exp as i32 - 16383 };
+    let mut exp = exp_a + exp_b;
+
+    // Multiply the two 64-bit mantissas to get a 128-bit product.
+    let product = (da.mantissa as u128) * (db.mantissa as u128);
+
+    if product == 0 {
+        return make_x87_zero(sign);
+    }
+
+    // For two normal numbers (integer bit set), the product's MSB is at bit 126
+    // of the 128-bit product. We need to place the result so the integer bit
+    // is at bit 63 of a 64-bit mantissa, then do a single rounding step.
+    let msb = 127 - product.leading_zeros() as i32;
+    // Adjust exponent for where the MSB actually landed vs the expected bit 126.
+    exp += msb - 126;
+
+    // Now we need to extract a 64-bit mantissa from the product, with the MSB
+    // at bit 63. The total right-shift from the 128-bit product to get there:
+    let norm_shift = msb - 63; // bits to shift right for normalization
+
+    // Check if result will be denormal (biased_exp would be <= 0).
+    // If so, we need additional right-shift to force biased_exp = 0.
+    let biased_exp = exp + 16383;
+    let (total_shift, final_biased_exp) = if biased_exp <= 0 {
+        // Extra shift to denormalize
+        let extra = 1 - biased_exp;
+        (norm_shift as i64 + extra as i64, 0i32)
+    } else {
+        (norm_shift as i64, biased_exp)
+    };
+
+    // Check for overflow → infinity
+    if final_biased_exp >= 0x7FFF {
+        return make_x87_infinity(sign);
+    }
+
+    // Extract 64-bit mantissa with a single rounding step on the full 128-bit product.
+    if total_shift > 128 {
+        // Even the full 128-bit product is less than half the minimum denormal.
+        return make_x87_zero(sign);
+    }
+    if total_shift == 128 {
+        // The mantissa is 0; the entire product is the rounding tail.
+        // halfway = 1 << 127. Round up if product > halfway, or product == halfway
+        // and result bit 0 would be 1 (but result is 0, so round-to-even → no).
+        if product > (1u128 << 127) {
+            return x87_encode(sign, final_biased_exp as u16, 1);
+        }
+        return make_x87_zero(sign);
+    }
+
+    let (mut mantissa, round_up) = if total_shift > 0 {
+        let ts = total_shift as u32;
+        let m = if ts >= 128 { 0u64 } else { (product >> ts) as u64 };
+        // Rounding bits from the shifted-away portion
+        let halfway = if ts >= 128 { 0u128 } else { 1u128 << (ts - 1) };
+        let mask = if ts >= 128 { u128::MAX } else { (1u128 << ts) - 1 };
+        let tail = product & mask;
+        let round = tail > halfway || (tail == halfway && m & 1 != 0);
+        (m, round)
+    } else if total_shift == 0 {
+        (product as u64, false)
+    } else {
+        // total_shift < 0: shift left (very small denormal inputs)
+        let ls = (-total_shift) as u32;
+        if ls >= 128 { return make_x87_zero(sign); }
+        let m = (product << ls) as u64;
+        (m, false)
+    };
+
+    if round_up {
+        let old_mantissa = mantissa;
+        mantissa = mantissa.wrapping_add(1);
+        if mantissa == 0 {
+            // Overflow from 0xFFFF_FFFF_FFFF_FFFF → 0: result is 1 << 63 with exp+1
+            mantissa = 1u64 << 63;
+            if final_biased_exp > 0 {
+                let new_exp = final_biased_exp + 1;
+                if new_exp >= 0x7FFF {
+                    return make_x87_infinity(sign);
+                }
+                return x87_encode(sign, new_exp as u16, mantissa);
+            }
+            // Was denormal, rounding carried into normal range
+            return x87_encode(sign, 1, mantissa);
+        }
+        // Check if rounding a denormal caused carry into normal range:
+        // the integer bit (bit 63) was clear before but is now set.
+        if final_biased_exp == 0 && (old_mantissa >> 63) == 0 && (mantissa >> 63) == 1 {
+            return x87_encode(sign, 1, mantissa);
+        }
+    }
+
+    if mantissa == 0 {
+        return make_x87_zero(sign);
+    }
+
+    x87_encode(sign, final_biased_exp as u16, mantissa)
+}
+
+/// Classify an x87 value for arithmetic special-case handling.
+/// Returns (is_unnormal, is_inf, is_nan).
+/// For unnormals/pseudo-values, the caller should return indefinite NaN.
+fn x87_classify(d: &X87Decomposed) -> (bool, bool, bool) {
+    let unnormal = d.biased_exp > 0 && (d.mantissa >> 63) == 0;
+    let inf = d.biased_exp == 0x7FFF && d.mantissa == 0x8000_0000_0000_0000;
+    let nan = d.biased_exp == 0x7FFF && !inf && !unnormal;
+    (unnormal, inf, nan)
+}
+
+/// Get the true (unbiased) exponent for an x87 value.
+/// Denormals (biased_exp=0) have true exponent -16382.
+fn x87_true_exp(d: &X87Decomposed) -> i32 {
+    if d.biased_exp == 0 { -16382 } else { d.biased_exp as i32 - 16383 }
+}
+
+/// x87 indefinite QNaN constant.
+const X87_INDEFINITE_NAN: [u8; 16] = {
+    let mut b = [0u8; 16];
+    // mantissa = 0xC000_0000_0000_0000, exp_sign = 0xFFFF (sign=1, exp=0x7FFF)
+    b[7] = 0xC0;
+    b[8] = 0xFF;
+    b[9] = 0xFF;
+    b
+};
+
+/// Propagate a NaN operand: set the quiet bit and return it.
+fn x87_quiet_nan(a: &[u8; 16]) -> [u8; 16] {
+    let mut result = *a;
+    result[7] |= 0x40;
+    result
+}
+
+/// Software addition/subtraction for x87 80-bit extended precision.
+/// If `negate_b` is true, performs a - b; otherwise a + b.
+fn x87_addsub_soft(a: &[u8; 16], b: &[u8; 16], negate_b: bool) -> [u8; 16] {
+    let da = x87_decompose(a);
+    let db = x87_decompose(b);
+    let (a_unnorm, a_inf, a_nan) = x87_classify(&da);
+    let (b_unnorm, b_inf, b_nan) = x87_classify(&db);
+
+    // Effective sign of b after potential negation
+    let b_sign = db.sign ^ negate_b;
+
+    if a_unnorm || b_unnorm { return X87_INDEFINITE_NAN; }
+    if a_nan { return x87_quiet_nan(a); }
+    if b_nan { return x87_quiet_nan(b); }
+
+    if a_inf && b_inf {
+        // inf + inf = inf (same sign), inf - inf = NaN (different sign)
+        if da.sign == b_sign {
+            return make_x87_infinity(da.sign);
+        } else {
+            return X87_INDEFINITE_NAN;
+        }
+    }
+    if a_inf { return make_x87_infinity(da.sign); }
+    if b_inf { return make_x87_infinity(b_sign); }
+
+    if da.is_zero() && db.is_zero() {
+        // +0 + +0 = +0, -0 + -0 = -0, +0 + -0 = +0 (round to nearest)
+        return make_x87_zero(da.sign && b_sign);
+    }
+    if da.is_zero() { return x87_encode(b_sign, db.biased_exp, db.mantissa); }
+    if db.is_zero() { return *a; }
+
+    // Both finite, nonzero. Align mantissas and add/subtract.
+    let exp_a = x87_true_exp(&da);
+    let exp_b = x87_true_exp(&db);
+
+    // Use 128-bit mantissas for precision during alignment shift.
+    // Place the 64-bit mantissa in the upper 64 bits, leaving room for guard/round/sticky.
+    let mut ma = (da.mantissa as u128) << 64;
+    let mut mb = (db.mantissa as u128) << 64;
+    let mut exp = exp_a;
+
+    if exp_a > exp_b {
+        let shift = (exp_a - exp_b) as u32;
+        if shift < 128 {
+            let sticky = mb & ((1u128 << shift) - 1) != 0;
+            mb >>= shift;
+            if sticky { mb |= 1; }
+        } else {
+            mb = if mb != 0 { 1 } else { 0 };
+        }
+    } else if exp_b > exp_a {
+        let shift = (exp_b - exp_a) as u32;
+        if shift < 128 {
+            let sticky = ma & ((1u128 << shift) - 1) != 0;
+            ma >>= shift;
+            if sticky { ma |= 1; }
+        } else {
+            ma = if ma != 0 { 1 } else { 0 };
+        }
+        exp = exp_b;
+    }
+
+    // Perform addition or subtraction based on effective signs.
+    // For addition of same-sign values, the sum can overflow u128 (carry bit),
+    // so we track the carry separately.
+    let (result_sign, result_mag, carry) = if da.sign == b_sign {
+        // Same sign: add magnitudes
+        let (sum, overflow) = ma.overflowing_add(mb);
+        (da.sign, sum, overflow)
+    } else {
+        // Different signs: subtract magnitudes (no carry possible)
+        if ma >= mb {
+            (da.sign, ma - mb, false)
+        } else {
+            (b_sign, mb - ma, false)
+        }
+    };
+
+    if result_mag == 0 && !carry {
+        return make_x87_zero(false); // +0 in round-to-nearest mode
+    }
+
+    // Normalize the result. We have a 129-bit value: carry bit + 128-bit result_mag.
+    // We want to produce a 128-bit normalized value with bit 127 as the integer bit,
+    // then extract the top 64 bits with rounding.
+    if carry {
+        // The true value is 2^128 + result_mag. The MSB is at bit 128 (virtual).
+        // We need to shift right by 1 to fit in 128 bits, preserving sticky.
+        exp += 1; // carry means the result is one bit wider
+        let sticky = result_mag & 1 != 0;
+        let normalized = (result_mag >> 1) | (1u128 << 127); // restore the carry bit
+        let normalized = if sticky { normalized | 1 } else { normalized };
+
+        // Extract top 64 bits with rounding.
+        let mantissa_hi = (normalized >> 64) as u64;
+        let tail = normalized as u64;
+        let halfway = 1u64 << 63;
+        let mut mantissa = mantissa_hi;
+        let round_up = tail > halfway || (tail == halfway && mantissa & 1 != 0);
+
+        let biased_exp = exp + 16383;
+        if round_up {
+            mantissa = mantissa.wrapping_add(1);
+            if mantissa == 0 {
+                mantissa = 1u64 << 63;
+                let new_exp = biased_exp + 1;
+                if new_exp >= 0x7FFF { return make_x87_infinity(result_sign); }
+                return x87_encode(result_sign, new_exp as u16, mantissa);
+            }
+        }
+        if biased_exp >= 0x7FFF { return make_x87_infinity(result_sign); }
+        return x87_encode(result_sign, biased_exp as u16, mantissa);
+    }
+
+    // No carry — normalize by finding the MSB position
+    let msb = 127 - result_mag.leading_zeros() as i32;
+    let shift_to_normalize = msb - 127;
+    exp += shift_to_normalize;
+
+    let normalized = if shift_to_normalize > 0 {
+        // Result grew — shift right (shouldn't happen without carry, but handle it)
+        let s = shift_to_normalize as u32;
+        let sticky = result_mag & ((1u128 << s) - 1) != 0;
+        let shifted = result_mag >> s;
+        if sticky { shifted | 1 } else { shifted }
+    } else if shift_to_normalize < 0 {
+        // Result shrank (cancellation in subtraction) — shift left
+        let s = (-shift_to_normalize) as u32;
+        result_mag << s
+    } else {
+        result_mag
+    };
+
+    // Now the integer bit is at bit 127. Extract top 64 bits with rounding.
+    let mantissa_hi = (normalized >> 64) as u64;
+    let tail = normalized as u64;
+    let halfway = 1u64 << 63;
+    let mut mantissa = mantissa_hi;
+    let round_up = tail > halfway || (tail == halfway && mantissa & 1 != 0);
+
+    let biased_exp = exp + 16383;
+    if biased_exp <= 0 {
+        // Denormalize
+        let denorm_shift = 1 - biased_exp;
+        if denorm_shift > 128 {
+            return make_x87_zero(result_sign);
+        }
+        let total_shift = 64 + denorm_shift as i64;
+        if total_shift >= 128 {
+            if total_shift == 128 {
+                if normalized > (1u128 << 127) {
+                    return x87_encode(result_sign, 0, 1);
+                }
+            }
+            return make_x87_zero(result_sign);
+        }
+        let ts = total_shift as u32;
+        let m = (normalized >> ts) as u64;
+        let mask = (1u128 << ts) - 1;
+        let t = normalized & mask;
+        let hw = 1u128 << (ts - 1);
+        let mut dm = m;
+        if t > hw || (t == hw && dm & 1 != 0) {
+            dm += 1;
+            if dm >> 63 == 1 && m >> 63 == 0 {
+                return x87_encode(result_sign, 1, dm);
+            }
+        }
+        if dm == 0 { return make_x87_zero(result_sign); }
+        return x87_encode(result_sign, 0, dm);
+    }
+
+    if round_up {
+        mantissa = mantissa.wrapping_add(1);
+        if mantissa == 0 {
+            mantissa = 1u64 << 63;
+            let new_exp = biased_exp + 1;
+            if new_exp >= 0x7FFF { return make_x87_infinity(result_sign); }
+            return x87_encode(result_sign, new_exp as u16, mantissa);
+        }
+    }
+
+    if biased_exp >= 0x7FFF { return make_x87_infinity(result_sign); }
+
+    x87_encode(result_sign, biased_exp as u16, mantissa)
+}
+
+/// Software addition for x87 80-bit extended precision.
+pub fn x87_add_soft(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    x87_addsub_soft(a, b, false)
+}
+
+/// Software subtraction for x87 80-bit extended precision.
+pub fn x87_sub_soft(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    x87_addsub_soft(a, b, true)
+}
+
+/// Software division for x87 80-bit extended precision.
+pub fn x87_div_soft(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    let da = x87_decompose(a);
+    let db = x87_decompose(b);
+    let sign = da.sign ^ db.sign;
+    let (a_unnorm, a_inf, a_nan) = x87_classify(&da);
+    let (b_unnorm, b_inf, b_nan) = x87_classify(&db);
+
+    if a_unnorm || b_unnorm { return X87_INDEFINITE_NAN; }
+    if a_nan { return x87_quiet_nan(a); }
+    if b_nan { return x87_quiet_nan(b); }
+
+    // inf / inf = NaN
+    if a_inf && b_inf { return X87_INDEFINITE_NAN; }
+    // inf / finite = inf
+    if a_inf { return make_x87_infinity(sign); }
+    // finite / inf = 0
+    if b_inf { return make_x87_zero(sign); }
+    // 0 / 0 = NaN
+    if da.is_zero() && db.is_zero() { return X87_INDEFINITE_NAN; }
+    // 0 / finite = 0
+    if da.is_zero() { return make_x87_zero(sign); }
+    // finite / 0 = inf (division by zero)
+    if db.is_zero() { return make_x87_infinity(sign); }
+
+    // Both finite, nonzero
+    let exp_a = x87_true_exp(&da);
+    let exp_b = x87_true_exp(&db);
+    let mut exp = exp_a - exp_b;
+
+    // Divide mantissas: we need 64 bits of quotient plus guard bits for rounding.
+    // Compute (da.mantissa << 64) / db.mantissa to get a 64-bit quotient
+    // with the decimal point after bit 63.
+    let dividend = (da.mantissa as u128) << 64;
+    let divisor = db.mantissa as u128;
+    let quotient = dividend / divisor;
+    let remainder = dividend % divisor;
+
+    if quotient == 0 {
+        return make_x87_zero(sign);
+    }
+
+    // The quotient has the integer bit somewhere. For normal/normal where both
+    // have the integer bit at position 63, quotient ≈ 2^64 * (1.xxx / 1.yyy).
+    // If mantissa_a >= mantissa_b, quotient is in [2^64, 2^65).
+    // If mantissa_a < mantissa_b, quotient is in [2^63, 2^64).
+    let msb = 127 - quotient.leading_zeros() as i32;
+    // We want the integer bit at position 63 of a 64-bit result.
+    let shift = msb - 63;
+    exp += shift - 1; // quotient = (mantissa_a << 64) / mantissa_b, value = quotient * 2^(-64) * 2^(exp_a-exp_b); after shifting right by (msb-63), true_exp = exp + msb - 63 - 64 + 63 = exp + shift - 1
+
+    // When shift < 0, extend the quotient by computing more division bits.
+    let (quotient, remainder, shift) = if shift < 0 {
+        let s = (-shift) as u32;
+        // Compute (dividend << s) / divisor to get s more quotient bits.
+        // dividend << s = (quotient * divisor + remainder) << s
+        //               = quotient << s * divisor + remainder << s
+        // New quotient = quotient << s + (remainder << s) / divisor
+        let extra_dividend = remainder << s;
+        let extra_q = extra_dividend / divisor;
+        let extra_r = extra_dividend % divisor;
+        let new_q = (quotient << s) | extra_q;
+        (new_q, extra_r, 0i32)
+    } else {
+        (quotient, remainder, shift)
+    };
+
+    let (mut mantissa, round_up) = if shift > 0 {
+        let s = shift as u32;
+        let m = (quotient >> s) as u64;
+        let tail = quotient & ((1u128 << s) - 1);
+        let halfway = 1u128 << (s - 1);
+        // For exact halfway, also check remainder (sticky bit from division)
+        let round = tail > halfway || (tail == halfway && (m & 1 != 0 || remainder != 0));
+        (m, round)
+    } else {
+        // shift == 0 (shift < 0 was handled above)
+        let m = quotient as u64;
+        // remainder != 0 means the true value is quotient + remainder/divisor.
+        // Round up if remainder/divisor > 0.5 (i.e., 2*remainder > divisor),
+        // or at exactly 0.5 and m is odd (round-to-even).
+        let double_rem = remainder << 1;
+        let round = double_rem > divisor || (double_rem == divisor && m & 1 != 0);
+        (m, round)
+    };
+
+    let biased_exp = exp + 16383;
+
+    // Handle denormal
+    if biased_exp <= 0 {
+        let denorm_shift = 1 - biased_exp;
+        // Work on the full quotient to avoid double-rounding
+        let total_shift = shift as i64 + denorm_shift as i64;
+        if total_shift > 127 {
+            return make_x87_zero(sign);
+        }
+        if total_shift >= 0 {
+            let ts = total_shift as u32;
+            let m = if ts >= 128 { 0u64 } else { (quotient >> ts) as u64 };
+            let mask = if ts >= 128 { u128::MAX } else { (1u128 << ts) - 1 };
+            let tail = quotient & mask;
+            let hw = if ts == 0 { 0u128 } else { 1u128 << (ts - 1) };
+            let mut dm = m;
+            let round = tail > hw || (tail == hw && (dm & 1 != 0 || remainder != 0));
+            if round {
+                dm += 1;
+                if dm >> 63 == 1 && m >> 63 == 0 {
+                    return x87_encode(sign, 1, dm);
+                }
+            }
+            if dm == 0 { return make_x87_zero(sign); }
+            return x87_encode(sign, 0, dm);
+        }
+        // total_shift < 0: shift left
+        let s = (-total_shift) as u32;
+        let m = (quotient << s) as u64;
+        if m == 0 { return make_x87_zero(sign); }
+        return x87_encode(sign, 0, m);
+    }
+
+    if round_up {
+        mantissa = mantissa.wrapping_add(1);
+        if mantissa == 0 {
+            mantissa = 1u64 << 63;
+            let new_exp = biased_exp + 1;
+            if new_exp >= 0x7FFF { return make_x87_infinity(sign); }
+            return x87_encode(sign, new_exp as u16, mantissa);
+        }
+    }
+
+    if biased_exp >= 0x7FFF { return make_x87_infinity(sign); }
+    x87_encode(sign, biased_exp as u16, mantissa)
+}
+
+/// Software remainder for x87 80-bit extended precision (fprem semantics).
+/// Computes a - trunc(a/b) * b (truncation toward zero, like C fmod).
+pub fn x87_rem_soft(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    let da = x87_decompose(a);
+    let db = x87_decompose(b);
+    let (a_unnorm, a_inf, a_nan) = x87_classify(&da);
+    let (b_unnorm, b_inf, b_nan) = x87_classify(&db);
+
+    if a_unnorm || b_unnorm { return X87_INDEFINITE_NAN; }
+    if a_nan { return x87_quiet_nan(a); }
+    if b_nan { return x87_quiet_nan(b); }
+    // inf % anything = NaN
+    if a_inf { return X87_INDEFINITE_NAN; }
+    // finite % inf = finite (unchanged)
+    if b_inf { return *a; }
+    // anything % 0 = NaN
+    if db.is_zero() { return X87_INDEFINITE_NAN; }
+    // 0 % finite = 0
+    if da.is_zero() { return *a; }
+
+    // Both finite, nonzero. Compute a - trunc(a/b) * b (fprem semantics, like C fmod).
+    // Result sign = sign of dividend (a). The result is exact (no rounding needed).
+    let result_sign = da.sign;
+    let exp_a = x87_true_exp(&da);
+    let exp_b = x87_true_exp(&db);
+
+    // Compare |a| vs |b|. If |a| < |b|, result is a (possibly normalized).
+    // x87 fprem normalizes pseudo-denormals (biased_exp=0, integer bit set) → biased_exp=1.
+    if exp_a < exp_b || (exp_a == exp_b && da.mantissa < db.mantissa) {
+        if da.biased_exp == 0 && (da.mantissa >> 63) == 1 {
+            return x87_encode(result_sign, 1, da.mantissa);
+        }
+        return *a;
+    }
+
+    // Iterative bit-by-bit reduction (like hardware fprem).
+    // At each step, if rem >= div * 2^k, subtract div * 2^k.
+    // This avoids precision loss from integer division with truncation.
+    //
+    // Both mantissas have MSB at bit 63. The exponent difference tells us
+    // how many "extra" bits of magnitude |a| has over |b|.
+    let exp_diff = exp_a - exp_b;
+
+    // Work with the 64-bit mantissas directly (remainder is exact).
+    let mut rem = da.mantissa as u128;
+    let div = db.mantissa as u128;
+
+    // Compute (mantissa_a * 2^exp_diff) % mantissa_b, which gives the remainder
+    // in terms of the divisor's mantissa scale (at exponent exp_b).
+    // Since exp_diff can be large (up to ~32K), we shift-and-reduce in chunks.
+    let mut remaining_shift = exp_diff;
+    loop {
+        let chunk = if remaining_shift > 63 { 63 } else { remaining_shift };
+        if chunk > 0 {
+            rem <<= chunk as u32;
+        }
+        rem %= div;
+        remaining_shift -= chunk;
+        if remaining_shift == 0 { break; }
+    }
+
+    if rem == 0 {
+        return make_x87_zero(result_sign);
+    }
+
+    // rem now contains the integer remainder at exponent exp_b.
+    // Normalize: find MSB position and set the exponent accordingly.
+    let msb = 127 - rem.leading_zeros() as i32;
+    let target_msb = 63;
+    let shift = msb - target_msb;
+    let result_exp = exp_b + shift;
+    let mantissa = if shift > 0 {
+        (rem >> shift as u32) as u64
+    } else if shift < 0 {
+        (rem << (-shift) as u32) as u64
+    } else {
+        rem as u64
+    };
+
+    let biased = result_exp + 16383;
+    if biased <= 0 {
+        let ds = 1 - biased;
+        if ds >= 64 { return make_x87_zero(result_sign); }
+        let m = mantissa >> ds as u32;
+        if m == 0 { return make_x87_zero(result_sign); }
+        return x87_encode(result_sign, 0, m);
+    }
+
+    x87_encode(result_sign, biased as u16, mantissa)
+}
+
+/// Software comparison for x87 80-bit extended precision.
+/// Returns: -1 if a < b, 0 if a == b, 1 if a > b, i32::MIN if unordered (NaN).
+pub fn x87_cmp_soft(a: &[u8; 16], b: &[u8; 16]) -> i32 {
+    let da = x87_decompose(a);
+    let db = x87_decompose(b);
+    let (a_unnorm, _, a_nan) = x87_classify(&da);
+    let (b_unnorm, _, b_nan) = x87_classify(&db);
+
+    // Any NaN or unnormal → unordered
+    if a_nan || b_nan || a_unnorm || b_unnorm {
+        return i32::MIN;
+    }
+
+    // Handle zeros: +0 == -0
+    if da.is_zero() && db.is_zero() {
+        return 0;
+    }
+
+    // Different signs (and not both zero)
+    if da.sign != db.sign {
+        return if da.sign { -1 } else { 1 };
+    }
+
+    // Same sign: compare magnitude, flip result if negative
+    let neg = da.sign;
+
+    // Compare biased exponents first, then mantissa
+    let ord = if da.biased_exp != db.biased_exp {
+        da.biased_exp.cmp(&db.biased_exp)
+    } else {
+        da.mantissa.cmp(&db.mantissa)
+    };
+
+    match ord {
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => if neg { -1 } else { 1 },
+        std::cmp::Ordering::Less => if neg { 1 } else { -1 },
+    }
 }
 
 /// Negate an x87 80-bit extended precision value by flipping the sign bit.
@@ -1199,104 +1797,15 @@ pub fn x87_neg(a: &[u8; 16]) -> [u8; 16] {
     result
 }
 
-/// Compute the remainder of two x87 80-bit extended precision values.
-#[cfg(target_arch = "x86_64")]
+/// Compute the remainder of two x87 80-bit extended precision values (fprem semantics).
 pub fn x87_rem(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
-    debug_assert!(a[10..16] == [0; 6], "x87_rem: padding bytes of `a` non-zero");
-    debug_assert!(b[10..16] == [0; 6], "x87_rem: padding bytes of `b` non-zero");
-    let mut result = [0u8; 16];
-    // SAFETY: Same safety rationale as x87_binop. Additionally, fprem may require
-    // multiple iterations (checked via C2 status bit), but the loop always terminates
-    // because the quotient has finite magnitude. The extra `fstp st(0)` pops the
-    // divisor left on the stack, maintaining x87 stack balance.
-    unsafe {
-        // x87 fprem: ST(0) = ST(0) mod ST(1)
-        // We need to loop since fprem may produce partial results for large quotients.
-        std::arch::asm!(
-            "fld tbyte ptr [{b}]",
-            "fld tbyte ptr [{a}]",
-            "2:",
-            "fprem",
-            "fnstsw ax",
-            "test ax, 0x400",
-            "jnz 2b",
-            "fstp tbyte ptr [{res}]",
-            "fstp st(0)",
-            a = in(reg) a.as_ptr(),
-            b = in(reg) b.as_ptr(),
-            res = in(reg) result.as_mut_ptr(),
-            out("ax") _,
-            options(nostack),
-        );
-    }
-    result
-}
-
-// TODO: Lossy on non-x86 hosts (see x87_binop fallback comment above).
-#[cfg(not(target_arch = "x86_64"))]
-pub fn x87_rem(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
-    let fa = x87_bytes_to_f64(a);
-    let fb = x87_bytes_to_f64(b);
-    f64_to_x87_bytes_simple(fa % fb)
+    x87_rem_soft(a, b)
 }
 
 /// Compare two x87 80-bit extended precision values.
 /// Returns: -1 if a < b, 0 if a == b, 1 if a > b, i32::MIN if unordered (NaN).
-#[cfg(target_arch = "x86_64")]
 pub fn x87_cmp(a: &[u8; 16], b: &[u8; 16]) -> i32 {
-    debug_assert!(a[10..16] == [0; 6], "x87_cmp: padding bytes of `a` non-zero");
-    debug_assert!(b[10..16] == [0; 6], "x87_cmp: padding bytes of `b` non-zero");
-    let status: u16;
-    // SAFETY: Loads two 80-bit values, fucompp compares and pops both (stack balanced).
-    // fnstsw ax stores the FPU status word into the ax register for condition code inspection.
-    // No memory writes except to the `status` output variable.
-    unsafe {
-        // fucompp compares ST(0) and ST(1) and pops both
-        std::arch::asm!(
-            "fld tbyte ptr [{b}]",
-            "fld tbyte ptr [{a}]",
-            "fucompp",
-            "fnstsw ax",
-            a = in(reg) a.as_ptr(),
-            b = in(reg) b.as_ptr(),
-            out("ax") status,
-            options(nostack),
-        );
-    }
-    // x87 status word bits: C3=ZF(bit 14), C2=PF(bit 10), C0=CF(bit 8)
-    let c0 = (status >> 8) & 1;
-    let c2 = (status >> 10) & 1;
-    let c3 = (status >> 14) & 1;
-
-    if c2 == 1 {
-        // Unordered (NaN)
-        i32::MIN
-    } else if c3 == 1 && c0 == 0 {
-        // Equal: C3=1, C0=0
-        0
-    } else if c0 == 1 {
-        // a < b: C0=1, C3=0
-        -1
-    } else {
-        // a > b: C0=0, C3=0
-        1
-    }
-}
-
-// TODO: Lossy on non-x86 hosts (see x87_binop fallback comment above).
-#[cfg(not(target_arch = "x86_64"))]
-pub fn x87_cmp(a: &[u8; 16], b: &[u8; 16]) -> i32 {
-    let fa = x87_bytes_to_f64(a);
-    let fb = x87_bytes_to_f64(b);
-    if fa.is_nan() || fb.is_nan() {
-        i32::MIN
-    } else if fa < fb {
-        -1
-    } else if fa > fb {
-        1
-    } else {
-        0
-    }
+    x87_cmp_soft(a, b)
 }
 
 /// Get the f64 approximation from x87 bytes, for use when we still need f64.
@@ -1916,5 +2425,864 @@ mod f128_tests {
         let x87 = f128_bytes_to_x87_bytes(&f128);
         let f128_back = x87_bytes_to_f128_bytes(&x87);
         assert_eq!(f128, f128_back, "roundtrip should preserve value");
+    }
+}
+
+#[cfg(test)]
+mod soft_mul_tests {
+    use super::*;
+
+    fn assert_mul_matches(a: &[u8; 16], b: &[u8; 16], label: &str) {
+        let hw = x87_mul(a, b);
+        let sw = x87_mul_soft(a, b);
+        assert_eq!(
+            hw, sw,
+            "{}: x87_mul != x87_mul_soft\n  a = {:02x?}\n  b = {:02x?}\n  hw = {:02x?}\n  sw = {:02x?}",
+            label, &a[..10], &b[..10], &hw[..10], &sw[..10]
+        );
+    }
+
+    fn from_f64(v: f64) -> [u8; 16] {
+        f64_to_x87_bytes_simple(v)
+    }
+
+    #[test]
+    fn test_soft_mul_basic() {
+        // 1 * 1 = 1
+        assert_mul_matches(&from_f64(1.0), &from_f64(1.0), "1*1");
+        // 2 * 3 = 6
+        assert_mul_matches(&from_f64(2.0), &from_f64(3.0), "2*3");
+        // -2 * 3 = -6
+        assert_mul_matches(&from_f64(-2.0), &from_f64(3.0), "-2*3");
+        // -2 * -3 = 6
+        assert_mul_matches(&from_f64(-2.0), &from_f64(-3.0), "-2*-3");
+    }
+
+    #[test]
+    fn test_soft_mul_zero() {
+        assert_mul_matches(&from_f64(0.0), &from_f64(5.0), "0*5");
+        assert_mul_matches(&from_f64(5.0), &from_f64(0.0), "5*0");
+        assert_mul_matches(&from_f64(0.0), &from_f64(0.0), "0*0");
+        assert_mul_matches(&from_f64(-0.0), &from_f64(1.0), "-0*1");
+        assert_mul_matches(&from_f64(1.0), &from_f64(-0.0), "1*-0");
+        assert_mul_matches(&from_f64(-0.0), &from_f64(-0.0), "-0*-0");
+    }
+
+    #[test]
+    fn test_soft_mul_infinity() {
+        let inf = make_x87_infinity(false);
+        let neg_inf = make_x87_infinity(true);
+        assert_mul_matches(&inf, &from_f64(2.0), "inf*2");
+        assert_mul_matches(&from_f64(2.0), &inf, "2*inf");
+        assert_mul_matches(&inf, &inf, "inf*inf");
+        assert_mul_matches(&neg_inf, &from_f64(2.0), "-inf*2");
+        assert_mul_matches(&neg_inf, &neg_inf, "-inf*-inf");
+        assert_mul_matches(&inf, &neg_inf, "inf*-inf");
+    }
+
+    #[test]
+    fn test_soft_mul_nan() {
+        let nan = make_x87_nan(false);
+        assert_mul_matches(&nan, &from_f64(2.0), "nan*2");
+        assert_mul_matches(&from_f64(2.0), &nan, "2*nan");
+        assert_mul_matches(&nan, &nan, "nan*nan");
+    }
+
+    #[test]
+    fn test_soft_mul_inf_times_zero() {
+        // inf * 0 = indefinite NaN on x87
+        let inf = make_x87_infinity(false);
+        let hw = x87_mul(&inf, &from_f64(0.0));
+        let sw = x87_mul_soft(&inf, &from_f64(0.0));
+        // x87 returns the "indefinite" QNaN: compare byte patterns
+        assert_eq!(&hw[..10], &sw[..10],
+            "inf*0: hw={:02x?} sw={:02x?}", &hw[..10], &sw[..10]);
+    }
+
+    #[test]
+    fn test_soft_mul_powers_of_two() {
+        for i in -20i32..=20 {
+            for j in -20i32..=20 {
+                let a = from_f64(2.0f64.powi(i));
+                let b = from_f64(2.0f64.powi(j));
+                assert_mul_matches(&a, &b, &format!("2^{i} * 2^{j}"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_soft_mul_various_values() {
+        let values: Vec<f64> = vec![
+            1.0, -1.0, 0.5, -0.5, 1.5, -1.5,
+            3.14159265358979, -2.71828182845904,
+            1e10, 1e-10, 1e20, 1e-20,
+            1e100, 1e-100, 1e300, 1e-300,
+            f64::MIN_POSITIVE, // smallest normal f64
+            f64::MAX,
+            1.0 + f64::EPSILON,
+            0.1, 0.2, 0.3, 0.7, 0.9,
+            123456789.0, 987654321.0,
+            1.0 / 3.0, 1.0 / 7.0, 1.0 / 11.0,
+        ];
+        for (i, &a) in values.iter().enumerate() {
+            for (j, &b) in values.iter().enumerate() {
+                let xa = from_f64(a);
+                let xb = from_f64(b);
+                assert_mul_matches(&xa, &xb, &format!("values[{i}]*values[{j}] ({a}*{b})"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_soft_mul_near_overflow() {
+        // Large exponents that are near the x87 overflow boundary
+        let big = from_f64(f64::MAX); // ~1.8e308, exp in x87 ~= 1023+16383
+        assert_mul_matches(&big, &from_f64(0.5), "MAX*0.5");
+        assert_mul_matches(&big, &from_f64(1.0), "MAX*1.0");
+        assert_mul_matches(&big, &from_f64(2.0), "MAX*2.0"); // overflow → inf
+    }
+
+    #[test]
+    fn test_soft_mul_near_underflow() {
+        let tiny = from_f64(f64::MIN_POSITIVE);
+        assert_mul_matches(&tiny, &from_f64(1.0), "MIN_POS*1");
+        assert_mul_matches(&tiny, &from_f64(0.5), "MIN_POS*0.5");
+        assert_mul_matches(&tiny, &tiny, "MIN_POS*MIN_POS");
+    }
+
+    #[test]
+    fn test_soft_mul_x87_denormals() {
+        // x87 denormal: biased_exp=0, integer bit clear
+        // Smallest x87 denormal: mantissa=1 → 2^(-16382-63) = 2^-16445
+        let min_denorm = x87_encode(false, 0, 1);
+        let max_denorm = x87_encode(false, 0, (1u64 << 63) - 1);
+        let one = from_f64(1.0);
+        let two = from_f64(2.0);
+        let half = from_f64(0.5);
+
+        assert_mul_matches(&min_denorm, &one, "min_denorm*1");
+        assert_mul_matches(&min_denorm, &two, "min_denorm*2");
+        assert_mul_matches(&min_denorm, &half, "min_denorm*0.5");
+        assert_mul_matches(&max_denorm, &one, "max_denorm*1");
+        assert_mul_matches(&max_denorm, &two, "max_denorm*2");
+        assert_mul_matches(&max_denorm, &half, "max_denorm*0.5");
+        assert_mul_matches(&min_denorm, &min_denorm, "min_denorm*min_denorm");
+        assert_mul_matches(&max_denorm, &max_denorm, "max_denorm*max_denorm");
+        assert_mul_matches(&min_denorm, &max_denorm, "min_denorm*max_denorm");
+    }
+
+    #[test]
+    fn test_soft_mul_pseudo_denormal() {
+        // Pseudo-denormal: biased_exp=0 but integer bit set.
+        // x87 treats these as valid with effective exponent = -16382.
+        let pseudo_denorm = x87_encode(false, 0, 1u64 << 63);
+        let one = from_f64(1.0);
+        let two = from_f64(2.0);
+        assert_mul_matches(&pseudo_denorm, &one, "pseudo_denorm*1");
+        assert_mul_matches(&pseudo_denorm, &two, "pseudo_denorm*2");
+        assert_mul_matches(&pseudo_denorm, &pseudo_denorm, "pseudo_denorm*pseudo_denorm");
+    }
+
+    #[test]
+    fn test_soft_mul_unnormal() {
+        // Unnormal: biased_exp > 0 but integer bit clear → indefinite NaN
+        let unnormal = x87_encode(false, 100, 0x7FFF_FFFF_FFFF_FFFF);
+        let one = from_f64(1.0);
+        assert_mul_matches(&unnormal, &one, "unnormal*1");
+        assert_mul_matches(&one, &unnormal, "1*unnormal");
+    }
+
+    #[test]
+    fn test_soft_mul_signaling_nan() {
+        // Signaling NaN: exp=0x7FFF, integer bit set, quiet bit clear, fraction nonzero
+        let snan = x87_encode(false, 0x7FFF, 0x8000_0000_0000_0001);
+        let one = from_f64(1.0);
+        assert_mul_matches(&snan, &one, "sNaN*1");
+        assert_mul_matches(&one, &snan, "1*sNaN");
+        // sNaN with payload
+        let snan2 = x87_encode(false, 0x7FFF, 0x8000_0000_DEAD_BEEF);
+        assert_mul_matches(&snan2, &one, "sNaN_payload*1");
+    }
+
+    #[test]
+    fn test_soft_mul_max_normal() {
+        // Largest x87 normal: exp=0x7FFE, mantissa=0xFFFF_FFFF_FFFF_FFFF
+        let max_norm = x87_encode(false, 0x7FFE, u64::MAX);
+        let one = from_f64(1.0);
+        let two = from_f64(2.0);
+        let half = from_f64(0.5);
+        assert_mul_matches(&max_norm, &one, "max_norm*1");
+        assert_mul_matches(&max_norm, &two, "max_norm*2"); // overflow
+        assert_mul_matches(&max_norm, &half, "max_norm*0.5");
+        assert_mul_matches(&max_norm, &max_norm, "max_norm*max_norm"); // overflow
+    }
+
+    #[test]
+    fn test_soft_mul_min_normal() {
+        // Smallest x87 normal: exp=1, mantissa=0x8000_0000_0000_0000
+        let min_norm = x87_encode(false, 1, 1u64 << 63);
+        let one = from_f64(1.0);
+        let half = from_f64(0.5);
+        assert_mul_matches(&min_norm, &one, "min_norm*1");
+        assert_mul_matches(&min_norm, &half, "min_norm*0.5"); // → denormal
+        assert_mul_matches(&min_norm, &min_norm, "min_norm*min_norm"); // deep underflow
+    }
+
+    #[test]
+    fn test_soft_mul_rounding_carry() {
+        // Values where rounding causes a carry that bumps the exponent.
+        // mantissa=0xFFFF_FFFF_FFFF_FFFF with exp such that product rounds up
+        let almost_two = x87_encode(false, 16383, u64::MAX); // just below 2.0
+        let just_above_one = x87_encode(false, 16383, (1u64 << 63) | 1); // just above 1.0
+        assert_mul_matches(&almost_two, &just_above_one, "almost_2 * just_above_1");
+        assert_mul_matches(&almost_two, &almost_two, "almost_2 * almost_2");
+    }
+
+    #[test]
+    fn test_soft_mul_negative_combos() {
+        // Verify sign handling with various special values
+        let neg_inf = make_x87_infinity(true);
+        let pos_inf = make_x87_infinity(false);
+        let neg_one = from_f64(-1.0);
+        let neg_zero = from_f64(-0.0);
+        let pos_zero = from_f64(0.0);
+        assert_mul_matches(&neg_inf, &neg_inf, "-inf*-inf");
+        assert_mul_matches(&neg_inf, &neg_one, "-inf*-1");
+        assert_mul_matches(&pos_inf, &neg_one, "inf*-1");
+        assert_mul_matches(&neg_zero, &neg_zero, "-0*-0");
+        assert_mul_matches(&neg_zero, &pos_zero, "-0*0");
+        assert_mul_matches(&neg_one, &neg_zero, "-1*-0");
+        // inf * -0 = NaN
+        assert_mul_matches(&pos_inf, &neg_zero, "inf*-0");
+        assert_mul_matches(&neg_inf, &pos_zero, "-inf*0");
+        assert_mul_matches(&neg_inf, &neg_zero, "-inf*-0");
+    }
+
+    #[test]
+    fn test_soft_mul_exact_halfway_denormal() {
+        // Construct a case at the exact denormal boundary where rounding matters.
+        // min_normal * 0.5 should give the largest denormal (exact, no rounding).
+        let min_norm = x87_encode(false, 1, 1u64 << 63);
+        let half = from_f64(0.5);
+        assert_mul_matches(&min_norm, &half, "min_norm*0.5_exact");
+
+        // min_normal * value_just_below_0.5 should give a denormal
+        let just_below_half = x87_encode(false, 16382, u64::MAX); // largest value < 1.0
+        assert_mul_matches(&min_norm, &just_below_half, "min_norm*just_below_half");
+    }
+
+    #[test]
+    fn test_soft_mul_pseudo_inf_and_nan() {
+        // Pseudo-infinity: exp=0x7FFF, integer bit clear, fraction=0
+        let pseudo_inf = x87_encode(false, 0x7FFF, 0);
+        let one = from_f64(1.0);
+        assert_mul_matches(&pseudo_inf, &one, "pseudo_inf*1");
+
+        // Pseudo-NaN: exp=0x7FFF, integer bit clear, fraction nonzero
+        let pseudo_nan = x87_encode(false, 0x7FFF, 1);
+        assert_mul_matches(&pseudo_nan, &one, "pseudo_nan*1");
+
+        // Pseudo-NaN with more fraction bits
+        let pseudo_nan2 = x87_encode(false, 0x7FFF, 0x7FFF_FFFF_FFFF_FFFF);
+        assert_mul_matches(&pseudo_nan2, &one, "pseudo_nan2*1");
+    }
+}
+
+#[cfg(test)]
+mod soft_addsub_tests {
+    use super::*;
+
+    fn assert_add_matches(a: &[u8; 16], b: &[u8; 16], label: &str) {
+        let hw = x87_add(a, b);
+        let sw = x87_add_soft(a, b);
+        assert_eq!(hw, sw, "{label}: add mismatch\n  a={:02x?}\n  b={:02x?}\n  hw={:02x?}\n  sw={:02x?}",
+            &a[..10], &b[..10], &hw[..10], &sw[..10]);
+    }
+
+    fn assert_sub_matches(a: &[u8; 16], b: &[u8; 16], label: &str) {
+        let hw = x87_sub(a, b);
+        let sw = x87_sub_soft(a, b);
+        assert_eq!(hw, sw, "{label}: sub mismatch\n  a={:02x?}\n  b={:02x?}\n  hw={:02x?}\n  sw={:02x?}",
+            &a[..10], &b[..10], &hw[..10], &sw[..10]);
+    }
+
+    fn from_f64(v: f64) -> [u8; 16] { f64_to_x87_bytes_simple(v) }
+
+    #[test]
+    fn test_soft_add_basic() {
+        assert_add_matches(&from_f64(1.0), &from_f64(2.0), "1+2");
+        assert_add_matches(&from_f64(-1.0), &from_f64(2.0), "-1+2");
+        assert_add_matches(&from_f64(1.0), &from_f64(-2.0), "1+-2");
+        assert_add_matches(&from_f64(-1.0), &from_f64(-2.0), "-1+-2");
+    }
+
+    #[test]
+    fn test_soft_sub_basic() {
+        assert_sub_matches(&from_f64(3.0), &from_f64(1.0), "3-1");
+        assert_sub_matches(&from_f64(1.0), &from_f64(3.0), "1-3");
+        assert_sub_matches(&from_f64(-1.0), &from_f64(-3.0), "-1--3");
+    }
+
+    #[test]
+    fn test_soft_addsub_zero() {
+        assert_add_matches(&from_f64(0.0), &from_f64(0.0), "0+0");
+        assert_add_matches(&from_f64(-0.0), &from_f64(-0.0), "-0+-0");
+        assert_add_matches(&from_f64(0.0), &from_f64(-0.0), "0+-0");
+        assert_add_matches(&from_f64(-0.0), &from_f64(0.0), "-0+0");
+        assert_add_matches(&from_f64(0.0), &from_f64(5.0), "0+5");
+        assert_add_matches(&from_f64(5.0), &from_f64(0.0), "5+0");
+        assert_sub_matches(&from_f64(1.0), &from_f64(1.0), "1-1");
+        assert_sub_matches(&from_f64(-1.0), &from_f64(-1.0), "-1--1");
+    }
+
+    #[test]
+    fn test_soft_addsub_inf() {
+        let inf = make_x87_infinity(false);
+        let neg_inf = make_x87_infinity(true);
+        assert_add_matches(&inf, &from_f64(1.0), "inf+1");
+        assert_add_matches(&from_f64(1.0), &inf, "1+inf");
+        assert_add_matches(&inf, &inf, "inf+inf");
+        assert_add_matches(&neg_inf, &neg_inf, "-inf+-inf");
+        // inf + -inf = NaN
+        assert_add_matches(&inf, &neg_inf, "inf+-inf");
+        assert_sub_matches(&inf, &inf, "inf-inf");
+    }
+
+    #[test]
+    fn test_soft_addsub_various() {
+        let values: Vec<f64> = vec![
+            1.0, -1.0, 0.5, -0.5, 1.5, -1.5,
+            3.14159265358979, -2.71828182845904,
+            1e10, 1e-10, 1e20, 1e-20,
+            1e100, 1e-100, 1e300, 1e-300,
+            f64::MIN_POSITIVE, f64::MAX,
+            0.1, 0.2, 0.3, 0.7, 0.9,
+            1.0 / 3.0, 1.0 / 7.0,
+        ];
+        for (i, &a) in values.iter().enumerate() {
+            for (j, &b) in values.iter().enumerate() {
+                let xa = from_f64(a);
+                let xb = from_f64(b);
+                assert_add_matches(&xa, &xb, &format!("add[{i}][{j}]"));
+                assert_sub_matches(&xa, &xb, &format!("sub[{i}][{j}]"));
+            }
+        }
+    }
+
+}
+
+#[cfg(test)]
+mod soft_div_tests {
+    use super::*;
+
+    fn assert_div_matches(a: &[u8; 16], b: &[u8; 16], label: &str) {
+        let hw = x87_div(a, b);
+        let sw = x87_div_soft(a, b);
+        assert_eq!(hw, sw, "{label}: div mismatch\n  a={:02x?}\n  b={:02x?}\n  hw={:02x?}\n  sw={:02x?}",
+            &a[..10], &b[..10], &hw[..10], &sw[..10]);
+    }
+
+    fn from_f64(v: f64) -> [u8; 16] { f64_to_x87_bytes_simple(v) }
+
+    #[test]
+    fn test_soft_div_basic() {
+        assert_div_matches(&from_f64(6.0), &from_f64(2.0), "6/2");
+        assert_div_matches(&from_f64(1.0), &from_f64(3.0), "1/3");
+        assert_div_matches(&from_f64(-6.0), &from_f64(2.0), "-6/2");
+        assert_div_matches(&from_f64(6.0), &from_f64(-2.0), "6/-2");
+        assert_div_matches(&from_f64(-6.0), &from_f64(-2.0), "-6/-2");
+    }
+
+    #[test]
+    fn test_soft_div_special() {
+        let inf = make_x87_infinity(false);
+        let zero = from_f64(0.0);
+        let one = from_f64(1.0);
+        assert_div_matches(&inf, &one, "inf/1");
+        assert_div_matches(&one, &inf, "1/inf");
+        assert_div_matches(&inf, &inf, "inf/inf");
+        assert_div_matches(&zero, &zero, "0/0");
+        assert_div_matches(&zero, &one, "0/1");
+        assert_div_matches(&one, &zero, "1/0");
+    }
+
+    #[test]
+    fn test_soft_div_various() {
+        let values: Vec<f64> = vec![
+            1.0, -1.0, 0.5, -0.5, 2.0, 3.0, 7.0, 10.0,
+            3.14159265358979, 2.71828182845904,
+            1e10, 1e-10, 1e100, 1e-100,
+            f64::MIN_POSITIVE, f64::MAX,
+            0.1, 0.3, 1.0 / 3.0, 1.0 / 7.0,
+        ];
+        for (i, &a) in values.iter().enumerate() {
+            for (j, &b) in values.iter().enumerate() {
+                assert_div_matches(&from_f64(a), &from_f64(b), &format!("div[{i}][{j}]"));
+            }
+        }
+    }
+
+}
+
+#[cfg(test)]
+mod soft_rem_tests {
+    use super::*;
+
+    fn assert_rem_matches(a: &[u8; 16], b: &[u8; 16], label: &str) {
+        let hw = x87_rem(a, b);
+        let sw = x87_rem_soft(a, b);
+        assert_eq!(hw, sw, "{label}: rem mismatch\n  a={:02x?}\n  b={:02x?}\n  hw={:02x?}\n  sw={:02x?}",
+            &a[..10], &b[..10], &hw[..10], &sw[..10]);
+    }
+
+    fn from_f64(v: f64) -> [u8; 16] { f64_to_x87_bytes_simple(v) }
+
+    #[test]
+    fn test_soft_rem_basic() {
+        assert_rem_matches(&from_f64(7.0), &from_f64(3.0), "7%3");
+        assert_rem_matches(&from_f64(10.0), &from_f64(3.0), "10%3");
+        assert_rem_matches(&from_f64(-7.0), &from_f64(3.0), "-7%3");
+        assert_rem_matches(&from_f64(7.0), &from_f64(-3.0), "7%-3");
+        assert_rem_matches(&from_f64(1.5), &from_f64(1.0), "1.5%1");
+    }
+
+    #[test]
+    fn test_soft_rem_special() {
+        let inf = make_x87_infinity(false);
+        let zero = from_f64(0.0);
+        let one = from_f64(1.0);
+        assert_rem_matches(&inf, &one, "inf%1");
+        assert_rem_matches(&one, &inf, "1%inf");
+        assert_rem_matches(&zero, &one, "0%1");
+        assert_rem_matches(&one, &zero, "1%0");
+    }
+
+    #[test]
+    fn test_soft_rem_various() {
+        let values: Vec<f64> = vec![
+            1.0, -1.0, 0.5, 2.0, 3.0, 7.0, 10.0, 100.0,
+            3.14159265358979, 2.71828182845904,
+            0.1, 0.3, 1.0 / 3.0,
+        ];
+        for (i, &a) in values.iter().enumerate() {
+            for (j, &b) in values.iter().enumerate() {
+                assert_rem_matches(&from_f64(a), &from_f64(b), &format!("rem[{i}][{j}]"));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod soft_cmp_tests {
+    use super::*;
+
+    fn assert_cmp_matches(a: &[u8; 16], b: &[u8; 16], label: &str) {
+        let hw = x87_cmp(a, b);
+        let sw = x87_cmp_soft(a, b);
+        assert_eq!(hw, sw, "{label}: cmp mismatch (hw={hw}, sw={sw})\n  a={:02x?}\n  b={:02x?}",
+            &a[..10], &b[..10]);
+    }
+
+    fn from_f64(v: f64) -> [u8; 16] { f64_to_x87_bytes_simple(v) }
+
+    #[test]
+    fn test_soft_cmp_basic() {
+        assert_cmp_matches(&from_f64(1.0), &from_f64(2.0), "1<2");
+        assert_cmp_matches(&from_f64(2.0), &from_f64(1.0), "2>1");
+        assert_cmp_matches(&from_f64(1.0), &from_f64(1.0), "1==1");
+        assert_cmp_matches(&from_f64(-1.0), &from_f64(1.0), "-1<1");
+        assert_cmp_matches(&from_f64(1.0), &from_f64(-1.0), "1>-1");
+        assert_cmp_matches(&from_f64(-2.0), &from_f64(-1.0), "-2<-1");
+    }
+
+    #[test]
+    fn test_soft_cmp_special() {
+        let nan = make_x87_nan(false);
+        let inf = make_x87_infinity(false);
+        let neg_inf = make_x87_infinity(true);
+        let zero = from_f64(0.0);
+        let neg_zero = from_f64(-0.0);
+        assert_cmp_matches(&nan, &from_f64(1.0), "nan<>1");
+        assert_cmp_matches(&from_f64(1.0), &nan, "1<>nan");
+        assert_cmp_matches(&inf, &from_f64(1.0), "inf>1");
+        assert_cmp_matches(&neg_inf, &from_f64(1.0), "-inf<1");
+        assert_cmp_matches(&inf, &neg_inf, "inf>-inf");
+        assert_cmp_matches(&zero, &neg_zero, "0==-0");
+        assert_cmp_matches(&neg_zero, &zero, "-0==0");
+    }
+
+    #[test]
+    fn test_soft_cmp_various() {
+        let values: Vec<f64> = vec![
+            0.0, -0.0, 1.0, -1.0, 0.5, -0.5,
+            f64::MIN_POSITIVE, -f64::MIN_POSITIVE,
+            f64::MAX, -f64::MAX,
+            1e100, -1e100, 1e-100, -1e-100,
+        ];
+        for (i, &a) in values.iter().enumerate() {
+            for (j, &b) in values.iter().enumerate() {
+                assert_cmp_matches(&from_f64(a), &from_f64(b), &format!("cmp[{i}][{j}]"));
+            }
+        }
+    }
+}
+
+// ======== Known-value tests (platform-independent) ========
+
+#[cfg(test)]
+mod known_value_tests {
+    use super::*;
+
+    fn from_f64(v: f64) -> [u8; 16] { f64_to_x87_bytes_simple(v) }
+    fn enc(sign: bool, exp: u16, mant: u64) -> [u8; 16] { x87_encode(sign, exp, mant) }
+    fn one() -> [u8; 16] { from_f64(1.0) }
+
+    // ---- Multiply known values ----
+
+    #[test]
+    fn test_mul_identity() {
+        for &v in &[1.0, -1.0, 2.0, 0.5, 3.14159, 1e100, 1e-100] {
+            let x = from_f64(v);
+            assert_eq!(x87_mul(&one(), &x), x, "1*{v}");
+            assert_eq!(x87_mul(&x, &one()), x, "{v}*1");
+        }
+    }
+
+    #[test]
+    fn test_mul_known_exact() {
+        assert_eq!(x87_mul(&from_f64(2.0), &from_f64(3.0)), from_f64(6.0));
+        assert_eq!(x87_mul(&from_f64(0.5), &from_f64(4.0)), from_f64(2.0));
+        assert_eq!(x87_mul(&from_f64(-2.0), &from_f64(-3.0)), from_f64(6.0));
+        assert_eq!(x87_mul(&from_f64(-2.0), &from_f64(3.0)), from_f64(-6.0));
+    }
+
+    #[test]
+    fn test_mul_zero_sign() {
+        let pz = from_f64(0.0);
+        let nz = from_f64(-0.0);
+        assert_eq!(x87_mul(&pz, &from_f64(5.0)), pz);
+        assert_eq!(x87_mul(&nz, &from_f64(5.0)), nz);
+        assert_eq!(x87_mul(&nz, &nz), pz, "-0*-0=+0");
+        assert_eq!(x87_mul(&pz, &nz), nz, "+0*-0=-0");
+    }
+
+    #[test]
+    fn test_mul_inf_cases() {
+        let pi = make_x87_infinity(false);
+        let ni = make_x87_infinity(true);
+        assert_eq!(x87_mul(&pi, &from_f64(2.0)), pi);
+        assert_eq!(x87_mul(&ni, &ni), pi, "-inf*-inf=+inf");
+        assert_eq!(x87_mul(&pi, &ni), ni, "inf*-inf=-inf");
+        // inf * 0 = NaN
+        let r = x87_mul(&pi, &from_f64(0.0));
+        assert_eq!(x87_decompose(&r).biased_exp, 0x7FFF);
+    }
+
+    #[test]
+    fn test_mul_nan_propagation() {
+        let nan = make_x87_nan(false);
+        let r = x87_mul(&nan, &from_f64(2.0));
+        let d = x87_decompose(&r);
+        assert_eq!(d.biased_exp, 0x7FFF);
+        assert!(d.mantissa & (1u64 << 62) != 0, "should be quiet NaN");
+    }
+
+    #[test]
+    fn test_mul_overflow_to_inf() {
+        let max_norm = enc(false, 0x7FFE, u64::MAX);
+        assert_eq!(x87_mul(&max_norm, &from_f64(2.0)), make_x87_infinity(false));
+    }
+
+    #[test]
+    fn test_mul_underflow_to_denormal() {
+        let min_norm = enc(false, 1, 1u64 << 63);
+        let d = x87_decompose(&x87_mul(&min_norm, &from_f64(0.5)));
+        assert_eq!(d.biased_exp, 0, "min_norm*0.5 should be denormal");
+    }
+
+    #[test]
+    fn test_mul_powers_of_two() {
+        for i in -20i32..=20 {
+            for j in -20i32..=20 {
+                let a = from_f64(2.0f64.powi(i));
+                let b = from_f64(2.0f64.powi(j));
+                assert_eq!(x87_mul(&a, &b), from_f64(2.0f64.powi(i + j)), "2^{i}*2^{j}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_mul_commutativity() {
+        let vals = [from_f64(3.14), from_f64(-2.718), from_f64(1e50), from_f64(1e-50)];
+        for a in &vals { for b in &vals {
+            assert_eq!(x87_mul(a, b), x87_mul(b, a), "mul commutativity");
+        }}
+    }
+
+    #[test]
+    fn test_mul_denormal_identity() {
+        let min_d = enc(false, 0, 1);
+        assert_eq!(x87_mul(&min_d, &one()), min_d, "min_denorm*1");
+        assert_eq!(x87_mul(&min_d, &from_f64(2.0)), enc(false, 0, 2), "min_denorm*2");
+    }
+
+    #[test]
+    fn test_mul_unnormal_is_nan() {
+        let unnormal = enc(false, 100, 0x7FFF_FFFF_FFFF_FFFF);
+        let d = x87_decompose(&x87_mul(&unnormal, &one()));
+        assert_eq!(d.biased_exp, 0x7FFF);
+    }
+
+    // ---- Add/Sub known values ----
+
+    #[test]
+    fn test_add_known_exact() {
+        assert_eq!(x87_add(&from_f64(1.0), &from_f64(2.0)), from_f64(3.0));
+        assert_eq!(x87_add(&from_f64(0.5), &from_f64(0.5)), from_f64(1.0));
+        assert_eq!(x87_add(&from_f64(-1.0), &from_f64(1.0)), from_f64(0.0));
+        assert_eq!(x87_add(&from_f64(1.0), &from_f64(1.0)), from_f64(2.0));
+    }
+
+    #[test]
+    fn test_sub_known_exact() {
+        assert_eq!(x87_sub(&from_f64(3.0), &from_f64(1.0)), from_f64(2.0));
+        assert_eq!(x87_sub(&from_f64(1.0), &from_f64(1.0)), from_f64(0.0));
+        assert_eq!(x87_sub(&from_f64(1.0), &from_f64(3.0)), from_f64(-2.0));
+        assert_eq!(x87_sub(&from_f64(1.5), &from_f64(1.0)), from_f64(0.5));
+    }
+
+    #[test]
+    fn test_add_zero_identity() {
+        for &v in &[1.0, -1.0, 0.5, 3.14, 1e100, 1e-100] {
+            let x = from_f64(v);
+            let z = from_f64(0.0);
+            assert_eq!(x87_add(&x, &z), x, "{v}+0");
+            assert_eq!(x87_add(&z, &x), x, "0+{v}");
+        }
+    }
+
+    #[test]
+    fn test_sub_self_is_zero() {
+        for &v in &[1.0, -1.0, 0.5, 1e100, 1e-100, 3.14] {
+            let x = from_f64(v);
+            assert_eq!(x87_sub(&x, &x), from_f64(0.0), "{v}-{v}");
+        }
+    }
+
+    #[test]
+    fn test_add_commutativity() {
+        let vals = [1.0, -2.5, 0.5, 1e100, 1e-100, 3.14];
+        for &a in &vals { for &b in &vals {
+            assert_eq!(x87_add(&from_f64(a), &from_f64(b)), x87_add(&from_f64(b), &from_f64(a)),
+                "{a}+{b} commutativity");
+        }}
+    }
+
+    #[test]
+    fn test_add_neg_is_sub() {
+        let vals = [1.0, -2.5, 0.5, 100.0, 3.14];
+        for &a in &vals { for &b in &vals {
+            let xa = from_f64(a); let xb = from_f64(b);
+            assert_eq!(x87_add(&xa, &x87_neg(&xb)), x87_sub(&xa, &xb), "a+(-b)==a-b for {a},{b}");
+        }}
+    }
+
+    #[test]
+    fn test_add_carry_1_plus_1() {
+        assert_eq!(x87_add(&from_f64(1.0), &from_f64(1.0)), from_f64(2.0));
+    }
+
+    #[test]
+    fn test_add_max_overflow() {
+        let big = enc(false, 0x7FFE, u64::MAX);
+        assert_eq!(x87_add(&big, &big), make_x87_infinity(false), "max+max=inf");
+    }
+
+    #[test]
+    fn test_add_large_exp_diff() {
+        let big = from_f64(1e100);
+        let tiny = from_f64(1e-100);
+        assert_eq!(x87_add(&big, &tiny), big, "1e100+1e-100≈1e100");
+    }
+
+    #[test]
+    fn test_add_zero_signs() {
+        let pz = from_f64(0.0);
+        let nz = from_f64(-0.0);
+        assert_eq!(x87_add(&pz, &pz), pz, "+0+0=+0");
+        assert_eq!(x87_add(&nz, &nz), nz, "-0+-0=-0");
+        assert_eq!(x87_add(&pz, &nz), pz, "+0+-0=+0");
+        assert_eq!(x87_add(&nz, &pz), pz, "-0++0=+0");
+    }
+
+    #[test]
+    fn test_addsub_inf_nan() {
+        let pi = make_x87_infinity(false);
+        let ni = make_x87_infinity(true);
+        assert_eq!(x87_add(&pi, &from_f64(1.0)), pi);
+        assert_eq!(x87_add(&ni, &ni), ni);
+        let r = x87_sub(&pi, &pi);
+        assert_eq!(x87_decompose(&r).biased_exp, 0x7FFF, "inf-inf=NaN");
+    }
+
+    #[test]
+    fn test_add_denormals() {
+        let d1 = enc(false, 0, 100);
+        let d2 = enc(false, 0, 200);
+        assert_eq!(x87_add(&d1, &d2), enc(false, 0, 300), "denorm+denorm");
+        assert_eq!(x87_sub(&d1, &d1), from_f64(0.0), "denorm-denorm=0");
+    }
+
+    // ---- Division known values ----
+
+    #[test]
+    fn test_div_known_exact() {
+        assert_eq!(x87_div(&from_f64(6.0), &from_f64(2.0)), from_f64(3.0));
+        assert_eq!(x87_div(&from_f64(10.0), &from_f64(5.0)), from_f64(2.0));
+        assert_eq!(x87_div(&from_f64(-6.0), &from_f64(-2.0)), from_f64(3.0));
+        assert_eq!(x87_div(&from_f64(6.0), &from_f64(-2.0)), from_f64(-3.0));
+    }
+
+    #[test]
+    fn test_div_by_one() {
+        for &v in &[1.0, -1.0, 2.0, 0.5, 3.14, 1e100, 1e-100] {
+            let x = from_f64(v);
+            assert_eq!(x87_div(&x, &one()), x, "{v}/1");
+        }
+    }
+
+    #[test]
+    fn test_div_self_is_one() {
+        for &v in &[1.0, -1.0, 2.0, 0.5, 3.14, 1e100, 1e-100] {
+            assert_eq!(x87_div(&from_f64(v), &from_f64(v)), one(), "{v}/{v}=1");
+        }
+    }
+
+    #[test]
+    fn test_div_zero_inf_nan() {
+        let pz = from_f64(0.0);
+        let nz = from_f64(-0.0);
+        let pi = make_x87_infinity(false);
+        assert_eq!(x87_div(&pz, &one()), pz, "0/1=0");
+        assert_eq!(x87_div(&one(), &pz), pi, "1/0=inf");
+        assert_eq!(x87_div(&from_f64(-1.0), &pz), make_x87_infinity(true), "-1/0=-inf");
+        assert_eq!(x87_div(&nz, &one()), nz, "-0/1=-0");
+        assert_eq!(x87_decompose(&x87_div(&pz, &pz)).biased_exp, 0x7FFF, "0/0=NaN");
+        assert_eq!(x87_decompose(&x87_div(&pi, &pi)).biased_exp, 0x7FFF, "inf/inf=NaN");
+        assert_eq!(x87_div(&one(), &pi), pz, "1/inf=0");
+    }
+
+    #[test]
+    fn test_div_powers_of_two() {
+        for i in -20i32..=20 {
+            for j in 1i32..=20 {
+                let a = from_f64(2.0f64.powi(i));
+                let b = from_f64(2.0f64.powi(j));
+                assert_eq!(x87_div(&a, &b), from_f64(2.0f64.powi(i - j)), "2^{i}/2^{j}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_div_rounding_1_3() {
+        let third = x87_div(&one(), &from_f64(3.0));
+        let back = x87_mul(&third, &from_f64(3.0));
+        // Due to rounding, 1/3*3 might not be exactly 1.0 but should be very close
+        let d = x87_decompose(&back);
+        assert_eq!(d.biased_exp, 16383, "1/3*3 exponent should be 1.0's exponent");
+    }
+
+    // ---- Remainder known values ----
+
+    #[test]
+    fn test_rem_known_exact() {
+        assert_eq!(x87_rem(&from_f64(7.0), &from_f64(3.0)), from_f64(1.0));
+        assert_eq!(x87_rem(&from_f64(10.0), &from_f64(3.0)), from_f64(1.0));
+        assert_eq!(x87_rem(&from_f64(1.5), &from_f64(1.0)), from_f64(0.5));
+        assert_eq!(x87_rem(&from_f64(5.0), &from_f64(2.0)), from_f64(1.0));
+        assert_eq!(x87_rem(&from_f64(4.0), &from_f64(2.0)), from_f64(0.0));
+    }
+
+    #[test]
+    fn test_rem_sign_is_dividend() {
+        assert_eq!(x87_rem(&from_f64(-7.0), &from_f64(3.0)), from_f64(-1.0));
+        assert_eq!(x87_rem(&from_f64(7.0), &from_f64(-3.0)), from_f64(1.0));
+        assert_eq!(x87_rem(&from_f64(-7.0), &from_f64(-3.0)), from_f64(-1.0));
+    }
+
+    #[test]
+    fn test_rem_less_than_divisor() {
+        assert_eq!(x87_rem(&from_f64(1.0), &from_f64(3.0)), from_f64(1.0));
+        assert_eq!(x87_rem(&from_f64(0.5), &from_f64(1.0)), from_f64(0.5));
+    }
+
+    #[test]
+    fn test_rem_large_quotient() {
+        // 10^20 mod 3 = 1 (since 10 ≡ 1 mod 3)
+        assert_eq!(x87_rem(&from_f64(1e20), &from_f64(3.0)), from_f64(1.0));
+        // 10^20 mod 1 = 0
+        assert_eq!(x87_rem(&from_f64(1e20), &from_f64(1.0)), from_f64(0.0));
+    }
+
+    #[test]
+    fn test_rem_consistency() {
+        let pairs = [(7.0, 3.0), (10.0, 3.0), (100.0, 7.0), (256.0, 10.0)];
+        for (a, b) in pairs {
+            assert_eq!(x87_rem(&from_f64(a), &from_f64(b)), from_f64(a % b), "{a}%{b}");
+        }
+    }
+
+    // ---- Compare known values ----
+
+    #[test]
+    fn test_cmp_ordering() {
+        assert_eq!(x87_cmp(&from_f64(1.0), &from_f64(2.0)), -1);
+        assert_eq!(x87_cmp(&from_f64(2.0), &from_f64(1.0)), 1);
+        assert_eq!(x87_cmp(&from_f64(1.0), &from_f64(1.0)), 0);
+        assert_eq!(x87_cmp(&from_f64(-2.0), &from_f64(-1.0)), -1);
+        assert_eq!(x87_cmp(&from_f64(-1.0), &from_f64(-2.0)), 1);
+    }
+
+    #[test]
+    fn test_cmp_zero_equality() {
+        assert_eq!(x87_cmp(&from_f64(0.0), &from_f64(-0.0)), 0);
+        assert_eq!(x87_cmp(&from_f64(-0.0), &from_f64(0.0)), 0);
+    }
+
+    #[test]
+    fn test_cmp_nan() {
+        let nan = make_x87_nan(false);
+        assert_eq!(x87_cmp(&nan, &from_f64(1.0)), i32::MIN);
+        assert_eq!(x87_cmp(&from_f64(1.0), &nan), i32::MIN);
+        assert_eq!(x87_cmp(&nan, &nan), i32::MIN);
+    }
+
+    #[test]
+    fn test_cmp_inf() {
+        let pi = make_x87_infinity(false);
+        let ni = make_x87_infinity(true);
+        assert_eq!(x87_cmp(&pi, &from_f64(1e300)), 1);
+        assert_eq!(x87_cmp(&ni, &from_f64(-1e300)), -1);
+        assert_eq!(x87_cmp(&pi, &ni), 1);
+        assert_eq!(x87_cmp(&pi, &pi), 0);
+    }
+
+    #[test]
+    fn test_cmp_denormals() {
+        let d1 = enc(false, 0, 100);
+        let d2 = enc(false, 0, 200);
+        assert_eq!(x87_cmp(&d1, &d2), -1);
+        assert_eq!(x87_cmp(&d2, &d1), 1);
+        assert_eq!(x87_cmp(&d1, &d1), 0);
+    }
+
+    #[test]
+    fn test_cmp_antisymmetry() {
+        let vals = [1.0, -1.0, 0.5, 100.0, 1e-100, 0.0];
+        for &a in &vals { for &b in &vals {
+            let r1 = x87_cmp(&from_f64(a), &from_f64(b));
+            let r2 = x87_cmp(&from_f64(b), &from_f64(a));
+            assert_eq!(r1, -r2, "antisymmetry cmp({a},{b})");
+        }}
     }
 }

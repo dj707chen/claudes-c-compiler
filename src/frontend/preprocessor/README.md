@@ -537,7 +537,7 @@ enabling GCC-compatible `file:line:col: error:` / `warning:` output formatting.
 | `pragmas.rs` | `handle_pragma` dispatcher. Handlers for `once`, `pack`, `push_macro`/`pop_macro`, `weak`, `redefine_extname`, and `GCC visibility push`/`pop`. Synthetic token emission for pack and visibility pragmas. |
 | `builtin_macros.rs` | Macro definitions substituting for `<limits.h>`, `<stdint.h>`, `<stddef.h>`, `<stdbool.h>`, `<stdatomic.h>`, `<float.h>`, and `<inttypes.h>`. Includes both object-like and function-like (suffix-pasting) macros. |
 | `text_processing.rs` | Low-level text transformations: `strip_block_comments` (with `LineMap` for line number remapping), `join_continued_lines`, `has_unbalanced_parens`, `strip_line_comment` (strips `//` comments outside string literals, returns `Cow<str>`), and `split_first_word` (splits directive keyword from arguments, treating `(` as a word boundary). |
-| `utils.rs` | Shared character/byte classification (`is_ident_start`, `is_ident_cont`, byte variants), `bytes_to_str` (unsafe zero-copy `&[u8]` to `&str` for ASCII identifiers), string/char literal skipping and copying helpers. |
+| `utils.rs` | Shared character/byte classification (`is_ident_start`, `is_ident_cont`, byte variants), `bytes_to_str` (`&[u8]` to `&str` for ASCII identifiers), string/char literal skipping and copying helpers. |
 
 ---
 

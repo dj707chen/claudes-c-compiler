@@ -37,13 +37,7 @@ pub fn is_ident_cont_byte(b: u8) -> bool {
 /// which are all valid single-byte UTF-8 characters.
 #[inline(always)]
 pub fn bytes_to_str(bytes: &[u8], start: usize, end: usize) -> &str {
-    debug_assert!(
-        std::str::from_utf8(&bytes[start..end]).is_ok(),
-        "bytes_to_str: input is not valid UTF-8"
-    );
-    // SAFETY: C identifiers consist only of ASCII bytes, verified by debug_assert above.
-    // Using unchecked here because this is an extremely hot path in the preprocessor.
-    unsafe { std::str::from_utf8_unchecked(&bytes[start..end]) }
+    std::str::from_utf8(&bytes[start..end]).expect("bytes_to_str: input is not valid UTF-8")
 }
 
 /// Skip past a string or character literal in a byte slice, starting at position `i`.
