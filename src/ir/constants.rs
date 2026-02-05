@@ -585,12 +585,20 @@ impl IrConst {
             (IrConst::F32(_), IrType::F32) => self,
             (IrConst::F64(_), IrType::F64) => self,
             // Wide integer constant being stored to a narrower slot
-            (IrConst::I64(v), IrType::I8 | IrType::U8) => IrConst::I8(*v as i8),
-            (IrConst::I64(v), IrType::I16 | IrType::U16) => IrConst::I16(*v as i16),
+            (IrConst::I64(v), IrType::I8) => IrConst::I8(*v as i8),
+            (IrConst::I64(v), IrType::U8) => IrConst::I64(*v as u8 as i64),
+            (IrConst::I64(v), IrType::I16) => IrConst::I16(*v as i16),
+            (IrConst::I64(v), IrType::U16) => IrConst::I64(*v as u16 as i64),
             (IrConst::I64(v), IrType::I32) => IrConst::I32(*v as i32),
-            (IrConst::I64(v), IrType::U32) => IrConst::I32(*v as i32),
-            (IrConst::I32(v), IrType::I8 | IrType::U8) => IrConst::I8(*v as i8),
-            (IrConst::I32(v), IrType::I16 | IrType::U16) => IrConst::I16(*v as i16),
+            // U32 must use I64 with zero-extension to match from_i64() convention.
+            // Using I32 would sign-extend when to_i64() is called (e.g.,
+            // 0xFFFFFFFF stored as I32(-1) becomes -1 instead of 4294967295).
+            (IrConst::I64(v), IrType::U32) => IrConst::I64(*v as u32 as i64),
+            (IrConst::I32(v), IrType::I8) => IrConst::I8(*v as i8),
+            (IrConst::I32(v), IrType::U8) => IrConst::I64(*v as u8 as i64),
+            (IrConst::I32(v), IrType::I16) => IrConst::I16(*v as i16),
+            (IrConst::I32(v), IrType::U16) => IrConst::I64(*v as u16 as i64),
+            (IrConst::I32(v), IrType::U32) => IrConst::I64(*v as u32 as i64),
             // Pointer types on 32-bit: I64 -> I32
             (IrConst::I64(v), IrType::Ptr) => {
                 if crate::common::types::target_is_32bit() {
