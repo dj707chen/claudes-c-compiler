@@ -297,8 +297,26 @@ pub fn parse_asm(text: &str) -> Result<Vec<AsmItem>, String> {
 
     // Strip C-style /* */ comments (used in hand-written assembly like musl)
     let text = asm_preprocess::strip_c_comments(text);
-    let lines: Vec<&str> = text.lines().collect();
-    let expanded = expand_rept_blocks(&lines)?;
+    // Pre-split on ';' (GAS statement separator) so that .rept/.irp directives
+    // embedded in semicolon-separated lines (e.g., from C preprocessor macro
+    // expansion like PMDS) are properly detected by expand_rept_blocks.
+    let raw_lines: Vec<&str> = text.lines().collect();
+    let mut lines: Vec<String> = Vec::new();
+    for line in &raw_lines {
+        let parts = asm_preprocess::split_on_semicolons(line);
+        if parts.len() > 1 {
+            for part in parts {
+                let part = part.trim();
+                if !part.is_empty() {
+                    lines.push(part.to_string());
+                }
+            }
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+    let expanded = expand_rept_blocks(&line_refs)?;
     let expanded = expand_gas_macros(&expanded)?;
 
     for (line_num, line) in expanded.iter().enumerate() {
@@ -1431,6 +1449,40 @@ fn expand_gas_macros_with_state(
             continue;
         }
 
+        // GAS-style symbol = expr assignment (equivalent to .set symbol, expr)
+        // Used by kernel code like: i = 0 / i = i + 1 inside .rept blocks
+        if let Some(eq_pos) = trimmed.find('=') {
+            // Make sure it's not ==, !=, <=, >= (comparison operators)
+            let not_comparison = (eq_pos + 1 >= trimmed.len() || trimmed.as_bytes()[eq_pos + 1] != b'=')
+                && (eq_pos == 0 || (trimmed.as_bytes()[eq_pos - 1] != b'!'
+                    && trimmed.as_bytes()[eq_pos - 1] != b'<'
+                    && trimmed.as_bytes()[eq_pos - 1] != b'>'));
+            if not_comparison {
+                let before = trimmed[..eq_pos].trim();
+                // Check if before looks like a symbol name: starts with letter or _, no spaces
+                if !before.is_empty()
+                    && !before.contains(' ')
+                    && !before.contains('\t')
+                    && !before.contains(':')
+                    && !before.starts_with('$')
+                    && !before.starts_with('%')
+                    && !before.starts_with('.')
+                    && (before.as_bytes()[0].is_ascii_alphabetic() || before.as_bytes()[0] == b'_')
+                {
+                    let expr_str = trimmed[eq_pos + 1..].trim();
+                    let resolved = resolve_set_expr(expr_str, symbols);
+                    if let Ok(val) = parse_integer_expr(&resolved) {
+                        symbols.insert(before.to_string(), val);
+                        // Emit as .set so the parser can also handle it
+                        let resolved_line = format!(".set {}, {}", before, resolved);
+                        result.push(resolved_line);
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
         // .irp var, item1, item2, ...  /  .endr
         if trimmed.starts_with(".irp ") || trimmed.starts_with(".irp\t") {
             let rest = trimmed[".irp".len()..].trim();
@@ -1816,16 +1868,58 @@ fn eval_ifc(rest: &str) -> bool {
     }
 }
 
-/// Resolve symbols in a .set expression string
+/// Resolve symbols in a .set expression string.
+/// Uses whole-word matching to avoid replacing substrings inside identifiers,
+/// register names, or instruction mnemonics (e.g., replacing `i` inside `rip`).
 fn resolve_set_expr(expr: &str, symbols: &std::collections::HashMap<String, i64>) -> String {
     let mut result = expr.to_string();
     // Sort by length (longest first) to avoid partial replacements
     let mut sym_list: Vec<_> = symbols.iter().collect();
     sym_list.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
     for (name, val) in sym_list {
-        result = result.replace(name.as_str(), &val.to_string());
+        result = replace_whole_word(&result, name, &val.to_string());
     }
     result
+}
+
+/// Replace all whole-word occurrences of `word` with `replacement`.
+/// A word boundary is any position where the adjacent character is not
+/// alphanumeric or underscore (i.e., not an identifier character).
+fn replace_whole_word(text: &str, word: &str, replacement: &str) -> String {
+    if word.is_empty() || text.is_empty() || text.len() < word.len() {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    let word_bytes = word.as_bytes();
+    let mut result = String::with_capacity(text.len());
+    let mut i = 0;
+    while i + word_bytes.len() <= bytes.len() {
+        if &bytes[i..i + word_bytes.len()] == word_bytes {
+            // Check left boundary: either start of string or non-identifier char
+            let left_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            // Check right boundary: either end of string or non-identifier char
+            let right_ok = i + word_bytes.len() >= bytes.len()
+                || !is_ident_char(bytes[i + word_bytes.len()]);
+            if left_ok && right_ok {
+                result.push_str(replacement);
+                i += word_bytes.len();
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    // Append any remaining characters
+    while i < bytes.len() {
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Check if a byte is an identifier character (alphanumeric or underscore).
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Check if a line starts a new conditional assembly block (.if, .ifc, .ifdef, .ifndef).
