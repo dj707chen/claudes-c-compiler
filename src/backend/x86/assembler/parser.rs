@@ -1182,22 +1182,74 @@ fn is_label_like(s: &str) -> bool {
     s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
 }
 
+/// Strip balanced outer parentheses from an expression.
+/// E.g. "((1b) - .)" -> "(1b) - ." -> "1b - ." (recursive).
+fn strip_outer_parens(s: &str) -> &str {
+    let s = s.trim();
+    if !s.starts_with('(') || !s.ends_with(')') {
+        return s;
+    }
+    let inner = &s[1..s.len() - 1];
+    let mut depth = 0i32;
+    for ch in inner.bytes() {
+        match ch {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return s;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        strip_outer_parens(inner)
+    } else {
+        s
+    }
+}
+
+/// Strip outer parentheses from a symbol name. E.g. "(1b)" -> "1b".
+fn strip_sym_parens(s: &str) -> &str {
+    let s = s.trim();
+    if s.starts_with('(') && s.ends_with(')') {
+        let inner = &s[1..s.len() - 1];
+        let mut depth = 0i32;
+        for ch in inner.bytes() {
+            match ch {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return s;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth == 0 { strip_sym_parens(inner) } else { s }
+    } else {
+        s
+    }
+}
+
 /// Parse data values (integers or symbol references).
 fn parse_data_values(s: &str) -> Result<Vec<DataValue>, String> {
     let mut vals = Vec::new();
     for part in s.split(',') {
-        let trimmed = part.trim();
+        let trimmed = strip_outer_parens(part.trim());
         if trimmed.is_empty() {
             continue;
         }
 
         // Check for symbol difference: .LBB3 - .Ljt_0, or with addend: tr_gdt_end - tr_gdt - 1
         if let Some(minus_pos) = trimmed.find(" - ") {
-            let lhs = trimmed[..minus_pos].trim().to_string();
+            let lhs = strip_sym_parens(trimmed[..minus_pos].trim()).to_string();
             let rhs_full = trimmed[minus_pos + 3..].trim();
             // Check if rhs has an addend: "sym - N" or "sym + N"
             if let Some(rhs_minus) = rhs_full.rfind(" - ") {
-                let rhs_sym = rhs_full[..rhs_minus].trim();
+                let rhs_sym = strip_sym_parens(rhs_full[..rhs_minus].trim());
                 let rhs_add = rhs_full[rhs_minus + 3..].trim();
                 if is_label_like(rhs_sym) {
                     if let Ok(addend) = parse_integer_expr(rhs_add) {
@@ -1207,7 +1259,7 @@ fn parse_data_values(s: &str) -> Result<Vec<DataValue>, String> {
                 }
             }
             if let Some(rhs_plus) = rhs_full.rfind(" + ") {
-                let rhs_sym = rhs_full[..rhs_plus].trim();
+                let rhs_sym = strip_sym_parens(rhs_full[..rhs_plus].trim());
                 let rhs_add = rhs_full[rhs_plus + 3..].trim();
                 if is_label_like(rhs_sym) {
                     if let Ok(addend) = parse_integer_expr(rhs_add) {
@@ -1216,7 +1268,7 @@ fn parse_data_values(s: &str) -> Result<Vec<DataValue>, String> {
                     }
                 }
             }
-            vals.push(DataValue::SymbolDiff(lhs, rhs_full.to_string()));
+            vals.push(DataValue::SymbolDiff(lhs, strip_sym_parens(rhs_full).to_string()));
             continue;
         }
 
