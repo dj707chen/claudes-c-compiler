@@ -1008,10 +1008,13 @@ pub fn write_relocatable_object(
     });
 
     // Section symbols (one per content section)
+    // Per ELF convention, section symbols have st_name=0 (unnamed).
+    // Tools like the Linux kernel's modpost derive the name from the section
+    // header and expect st_name=0 so these don't appear in symbol searches.
     for (i, sec_name) in content_sections.iter().enumerate() {
         strtab.add(sec_name);
         sym_entries.push(SymEntry {
-            st_name: strtab.offset_of(sec_name),
+            st_name: 0,
             st_info: (STB_LOCAL << 4) | STT_SECTION,
             st_other: 0,
             st_shndx: content_shndx_offset + i as u16,

@@ -89,7 +89,17 @@ impl Lowerer {
                     continue;
                 }
             } else {
-                continue;
+                // Non-lvalue expression used as asm output (e.g., compound literal
+                // `(long){0}` used as throwaway output: `[tmp] "=&r"((long){0})`).
+                // Create a temporary alloca to preserve operand numbering -- without
+                // this, the operand is skipped and named references like %[tmp] in
+                // the template would not be substituted.
+                let tmp = self.fresh_value();
+                self.emit(Instruction::Alloca {
+                    dest: tmp, ty: out_ty, size: out_ty.size(),
+                    align: out_ty.align(), volatile: false,
+                });
+                tmp
             };
             if constraint.contains('+') {
                 // For global register variables (e.g., `register long x asm("rsp")`),
