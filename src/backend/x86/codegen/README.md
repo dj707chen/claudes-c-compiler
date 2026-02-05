@@ -69,11 +69,11 @@ The codegen is split into focused modules, all implementing or supporting `ArchC
 |------|---------------|
 | `emit.rs` | Core `X86Codegen` struct, `ArchCodegen` trait implementation, register constants, PhysReg-to-name mapping, operand loading (`operand_to_rax`, `operand_to_rcx`), result storage (`store_rax_to`), accumulator register cache integration, switch/jump-table emission, and codegen option setters. |
 | `prologue.rs` | Function prologue and epilogue. Stack space calculation, register allocation invocation, callee-saved save/restore, stack probing for large frames (>4096 bytes), variadic register save area, and parameter storage from ABI registers to stack slots. |
-| `calls.rs` | Function call emission. ABI configuration (`CallAbiConfig`), stack argument pushing (with 16-byte alignment padding), register argument loading (integer via `rdi`..`r9`, float via `xmm0`..`xmm7`), `%al` float count for variadic calls, direct/indirect call instruction emission (including retpoline thunks), call cleanup, and result extraction with per-eightbyte SSE/INTEGER classification. |
+| `calls.rs` | Function call emission. ABI configuration (`CallAbiConfig`), stack argument pushing (with 16-byte alignment padding), register argument loading (integer via `rdi`..`r9`, float via `xmm0`..`xmm7`), `%al` float count for variadic calls, direct/indirect call instruction emission (including retpoline thunks, `@PLT` in PIC mode), call cleanup, and result extraction with per-eightbyte SSE/INTEGER classification. |
 | `alu.rs` | Integer and float unary/binary arithmetic. Accumulator-based fallback path (load to `%rax`/`%rcx`, operate, store result) and register-direct fast path for values assigned to callee-saved registers. Covers add, sub, mul, imul, div, idiv, rem, and/or/xor, shl/shr/sar, neg, not, clz (`lzcnt`), ctz (`tzcnt`), bswap, and popcount (`popcnt`). |
 | `comparison.rs` | Integer and float comparisons, `SETcc`/`CMOVcc` emission, fused compare-and-branch for conditional jumps, conditional select via `cmovneq`, and F128 comparisons via x87 `fucomip`. |
 | `memory.rs` | Load and store operations. Type-specific move instruction selection (`movb`/`movw`/`movl`/`movq`), stack slot access via `rbp`-relative addressing, GEP constant-offset folding, over-aligned alloca handling, and indirect pointer slot dereferencing. |
-| `globals.rs` | Global symbol address computation. RIP-relative `leaq` for local symbols, `GOTPCREL` for GOT-indirected symbols, `@PLT` for function calls in PIC mode, TLS access via `GOTTPOFF`/`TPOFF`, absolute address loads for kernel code model, and label address (`&&label`) via RIP-relative `leaq`. |
+| `globals.rs` | Global symbol address computation. RIP-relative `leaq` for local symbols, `GOTPCREL` for GOT-indirected symbols, TLS access via `GOTTPOFF`/`TPOFF`, absolute address loads for kernel code model, and label address (`&&label`) via RIP-relative `leaq`. |
 | `f128.rs` | F128 (long double) support via the x87 FPU. `fldt`/`fstpt` for 80-bit extended precision load/store, f64-to-x87 promotion, x87-to-integer conversion via `fisttpq` (with unsigned 64-bit special case), raw 10-byte constant materialization, and SlotAddr resolution for Direct/OverAligned/Indirect memory. |
 | `float_ops.rs` | Floating-point binary operations (SSE `addss`/`addsd`/`subss`/`subsd`/`mulss`/`mulsd`/`divss`/`divsd`) and F128 binary operations via x87 (`faddp`/`fsubrp`/`fmulp`/`fdivrp`). Float negation for F32/F64 via SSE `xorps`/`xorpd` sign-bit flip, and F128 negation via x87 `fchs`. |
 | `cast_ops.rs` | Type cast operations. Intercepts casts to/from F128 for full x87 precision: int-to-F128 via `fildq`, float-to-F128 via `fldl`/`flds`, F128-to-float via `fstpl`/`fstps`, F128-to-int via `fisttpq`. Unsigned-to-F128 uses a 2^63 correction path. All other casts fall through to the shared default. |
@@ -82,7 +82,7 @@ The codegen is split into focused modules, all implementing or supporting `ArchC
 | `variadic.rs` | Variadic function support. `va_arg` implementation with register save area lookup (GP via `gp_offset < 48`, FP via `fp_offset < 176`) and overflow area fallback, `va_arg` for structs (qword-by-qword copy from overflow area), `va_start` initialization of the `va_list` struct, and `va_copy` as memory copy. |
 | `inline_asm.rs` | x86 inline assembly template substitution. AT&T syntax operand formatting with size modifiers (`%k0` = 32-bit, `%w0` = 16-bit, `%b0` = 8-bit, `%h0` = 8-bit high, `%q0` = 64-bit), `%a` for RIP-relative addressing, `%c`/`%P` for bare constants, `%n` for negated constants, `%l` for goto labels, and named operand `%[name]` references. |
 | `asm_emitter.rs` | `InlineAsmEmitter` trait implementation. Constraint classification (multi-alternative parsing of `r`, `m`, `i`, `x`, `a`/`b`/`c`/`d`/`S`/`D`, `g`, `Q`, `t`/`u` for x87, `{regname}` for explicit registers, `@cc` for condition codes, tied operands), GP and XMM scratch register allocation, memory operand resolution (rbp-relative, over-aligned, indirect, symbol-based RIP-relative), and operand load/store for input/output operands. |
-| `atomics.rs` | Atomic operations. `lock xadd` for atomic add, `xchg` for atomic exchange, `lock cmpxchg` for CAS (with `sete` for boolean result), cmpxchg-loop for sub/and/or/xor/nand, atomic load/store with `mfence` for SeqCst ordering. |
+| `atomics.rs` | Atomic operations. `lock xadd` for atomic add, `xchg` for atomic exchange, `xchgb`-based test-and-set, `lock cmpxchg` for CAS (with `sete` for boolean result), cmpxchg-loop for sub/and/or/xor/nand, atomic load/store with `mfence` for SeqCst stores, and `mfence`-based fences. |
 | `peephole/` | Post-codegen peephole optimizer. See [`peephole/README.md`](peephole/README.md) for full details. |
 
 ---
@@ -186,12 +186,12 @@ These are available for values whose live ranges do not span function calls:
 
 | PhysReg ID | Register | Notes |
 |------------|----------|-------|
-| 10 | `r11` | Excluded if function has indirect calls (used as call target scratch) |
-| 11 | `r10` | Primary indirect call trampoline register |
+| 10 | `r11` | General-purpose scratch |
+| 11 | `r10` | Excluded if function has indirect calls (used as `call *%r10` trampoline) |
 | 12 | `r8` | Excluded if function has i128 ops or atomic RMW |
 | 13 | `r9` | Excluded if function has i128 ops |
-| 14 | `rdi` | Free after prologue stores incoming params |
-| 15 | `rsi` | Free after prologue stores incoming params |
+| 14 | `rdi` | Free after prologue stores incoming params; excluded if function has i128 ops |
+| 15 | `rsi` | Free after prologue stores incoming params; excluded if function has i128 ops |
 
 The allocator dynamically filters caller-saved registers based on function
 characteristics: `r10` is excluded when indirect calls are present (it serves
@@ -331,8 +331,9 @@ Two modes depending on PIC:
 ### Kernel Code Model
 
 With `-mcmodel=kernel`, all symbols are assumed to reside in the negative 2GB
-of the virtual address space, enabling `movabs`-based absolute addressing with
-`R_X86_64_32S` relocations instead of RIP-relative or GOT-based access.
+of the virtual address space. Absolute addressing is used (`movq $symbol, %rax`
+with `R_X86_64_32S` sign-extended 32-bit relocations) instead of RIP-relative
+or GOT-based access.
 
 ---
 
@@ -553,7 +554,7 @@ The post-codegen peephole optimizer operates on the generated AT&T assembly
 text. It is a substantial subsystem with its own documentation at
 [`peephole/README.md`](peephole/README.md).
 
-In brief, the optimizer runs in three phases:
+In brief, the optimizer runs in eight phases:
 
 1. **Local passes** (iterative, up to 8 rounds): eliminates adjacent
    redundancies -- self-moves, store-then-load of the same slot, reverse
@@ -564,8 +565,23 @@ In brief, the optimizer runs in three phases:
    labels, register copy propagation, dead register move elimination, dead
    store elimination, compare-and-branch fusion, and memory operand folding.
 
-3. **Local cleanup** (up to 4 rounds): re-runs local passes to clean up
-   opportunities exposed by global passes.
+3. **Post-global cleanup** (up to 4 rounds): re-runs local passes to clean
+   up opportunities exposed by global passes.
+
+4. **Loop trampoline elimination** (single pass): coalesces SSA loop
+   back-edge trampoline blocks, followed by a cleanup round.
+
+5. **Tail call optimization** (single pass): converts `call` + epilogue +
+   `ret` sequences into epilogue + `jmp` when safe.
+
+6. **Never-read store elimination** (single pass): whole-function analysis
+   removing stores to stack slots that are never subsequently loaded.
+
+7. **Callee-save elimination** (single pass): removes save/restore of
+   callee-saved registers that are never referenced in the function body.
+
+8. **Frame compaction** (single pass): repacks surviving callee-saved saves
+   and shrinks the stack frame allocation after earlier phases create gaps.
 
 Assembly lines are pre-parsed into compact `LineInfo` structs with integer
 enum tags, so all pattern matching in the hot loop uses integer comparisons
@@ -585,7 +601,7 @@ code generation behaviors:
 | `indirect_branch_thunk` | `-mindirect-branch=thunk-extern` | Replace `call *%r10` / `jmp *%rax` with calls to `__x86_indirect_thunk_r10` / `__x86_indirect_thunk_rax` (retpoline) |
 | `patchable_function_entry` | `-fpatchable-function-entry=N,M` | Emit N NOPs at function entry (M before the label, N-M after), with `__patchable_function_entries` section pointer for ftrace |
 | `cf_protection_branch` | `-fcf-protection=branch` | Emit `endbr64` at function entry for Intel CET / Indirect Branch Tracking |
-| `code_model_kernel` | `-mcmodel=kernel` | Assume all symbols in negative 2GB; use absolute `movabs` addressing with `R_X86_64_32S` relocations |
+| `code_model_kernel` | `-mcmodel=kernel` | Assume all symbols in negative 2GB; use absolute `movq $symbol` addressing with `R_X86_64_32S` relocations |
 | `no_jump_tables` | `-fno-jump-tables` | Force all switch statements to use compare-and-branch chains instead of jump tables |
 | `no_sse` | `-mno-sse` | Disable all SSE/XMM instructions; variadic prologues skip XMM saves, `va_start` sets `fp_offset` to overflow immediately |
 
