@@ -316,6 +316,14 @@ fn implicit_reg_use(s: &str, reg: RegId) -> bool {
     if bytes.is_empty() { return false; }
     match bytes[0] {
         b'c' => {
+            // cmpxchg8b (without lock prefix): reads/writes eax, edx, ecx, ebx
+            if s.starts_with("cmpxchg8b") {
+                return reg == REG_EAX || reg == REG_EDX || reg == REG_ECX || reg == REG_EBX;
+            }
+            // cmpxchg{l,w,b} (without lock prefix): implicitly reads eax
+            if s.starts_with("cmpxchg") {
+                return reg == REG_EAX;
+            }
             // cltd/cdq: reads eax, writes edx
             if s == "cltd" || s == "cdq" {
                 return reg == REG_EAX || reg == REG_EDX;
@@ -366,6 +374,15 @@ fn implicit_reg_use(s: &str, reg: RegId) -> bool {
             }
         }
         b'l' => {
+            // lock cmpxchg8b: implicitly reads/writes eax, edx, ecx, ebx
+            // cmpxchg8b compares edx:eax with memory, stores ecx:ebx on match
+            if s.starts_with("lock cmpxchg8b") {
+                return reg == REG_EAX || reg == REG_EDX || reg == REG_ECX || reg == REG_EBX;
+            }
+            // lock cmpxchg{l,w,b}: implicitly reads eax (compared with memory)
+            if s.starts_with("lock cmpxchg") {
+                return reg == REG_EAX;
+            }
             // loop/loope/loopne: reads ecx
             if s.starts_with("loop") {
                 return reg == REG_ECX;
