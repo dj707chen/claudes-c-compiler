@@ -6,6 +6,8 @@ SSA-based IR, optimizer, code generator, peephole optimizers, assembler,
 linker, and DWARF debug info generation are all implemented from scratch.
 Claude's C Compiler produces ELF executables without any external toolchain.
 
+> Note: With the exception of this one paragraph that was written by a human, 100% of the code and documentation in this repository was written by Claude Opus 4.6. A human guided some of this process by writing test cases that Claude was told to pass, but never interactively pair-programmed with Claude to debug or to provide feedback on code quality. As a result, I do not recommend you use this code! None of it has been validated for correctness. Claude wrote this exclusively on a Linux host; it probably will not work on MacOS/Windows — neither I nor Claude have tried. The docs may be wrong and make claims that are false. See [our blog post](https://anthropic.com/engineering/building-c-compiler) for more detail.
+
 ## Prerequisites
 
 - **Rust** (stable, 2021 edition) — install via [rustup](https://rustup.rs/)
