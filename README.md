@@ -128,11 +128,13 @@ components use GCC (e.g., `Backend: gcc_assembler, gcc_linker`).
 ## Status
 
 The compiler can build real-world C codebases across all four architectures,
-including the Linux kernel. Other projects that build and pass tests include
-FFmpeg (all 7331 FATE checkasm tests on x86-64 and AArch64), PostgreSQL
-(all 237 regression tests), SQLite, GNU coreutils, Busybox, CPython, QEMU,
-LuaJIT, QuickJS, and more — all using the fully standalone assembler and
-linker with no external toolchain.
+including the Linux kernel. Projects that compile and pass their test suites
+include PostgreSQL (all 237 regression tests), SQLite, QuickJS, zlib, Lua,
+libsodium, libpng, jq, libjpeg-turbo, mbedTLS, libuv, Redis, libffi, musl,
+TCC, and DOOM — all using the fully standalone assembler and linker with no
+external toolchain. Over 150 additional projects have also been built
+successfully, including FFmpeg (all 7331 FATE checkasm tests on x86-64 and
+AArch64), GNU coreutils, Busybox, CPython, QEMU, and LuaJIT.
 
 ### Known Limitations
 
@@ -178,7 +180,7 @@ and comparing stdout and the exit code against the expected files.
 | Variable | Purpose |
 |----------|---------|
 | `CCC_TIME_PHASES` | Print per-phase compilation timing to stderr |
-| `CCC_TIME_PASSES` | Print per-pass optimization timing to stderr |
+| `CCC_TIME_PASSES` | Print per-pass optimization timing and change counts to stderr |
 | `CCC_DISABLE_PASSES` | Disable specific optimization passes (comma-separated, or `all`) |
 | `CCC_KEEP_ASM` | Preserve intermediate `.s` files next to output |
 | `CCC_ASM_DEBUG` | Dump preprocessed assembly to `/tmp/asm_debug_<name>.s` |
