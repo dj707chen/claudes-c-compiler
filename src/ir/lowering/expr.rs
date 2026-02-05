@@ -511,6 +511,10 @@ impl Lowerer {
         if src_ty == target_ty { return src; }
         if target_ty == IrType::Ptr || target_ty == IrType::Void { return src; }
         if src_ty == IrType::Ptr && target_ty.is_integer() { return src; }
+        // Pointer <-> float conversions are invalid in C; skip the cast
+        // (sema should have already emitted an error for this)
+        if src_ty == IrType::Ptr && target_ty.is_float() { return src; }
+        if src_ty.is_float() && target_ty == IrType::Ptr { return src; }
 
         let needs_cast = (target_ty.is_float() && !src_ty.is_float())
             || (!target_ty.is_float() && src_ty.is_float())

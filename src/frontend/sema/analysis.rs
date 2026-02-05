@@ -485,6 +485,24 @@ impl SemanticAnalyzer {
             // Analyze initializer expressions
             if let Some(init) = &init_decl.init {
                 self.analyze_initializer(init);
+                // Check for invalid pointer <-> float conversions in scalar initializers
+                if let Initializer::Expr(init_expr) = init {
+                    let var_ty = self.symbol_table.lookup(&init_decl.name)
+                        .map(|s| s.ty.clone());
+                    if let Some(var_ty) = var_ty {
+                        let checker = super::type_checker::ExprTypeChecker {
+                            symbols: &self.symbol_table,
+                            types: &self.result.type_context,
+                            functions: &self.result.functions,
+                            expr_types: Some(&self.result.expr_types),
+                        };
+                        if let Some(init_ty) = checker.infer_expr_ctype(init_expr) {
+                            self.check_pointer_float_conversion(
+                                &init_ty, &var_ty, init_expr.span(),
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -1318,6 +1336,29 @@ impl SemanticAnalyzer {
                 for arg in args {
                     self.analyze_expr(arg);
                 }
+                // Check for invalid pointer <-> float conversions in arguments
+                if let Expr::Identifier(name, _) = callee.as_ref() {
+                    if let Some(func_info) = self.result.functions.get(name) {
+                        // Clone to release borrow on self.result.functions before
+                        // creating ExprTypeChecker which also borrows it
+                        let params = func_info.params.clone();
+                        let checker = super::type_checker::ExprTypeChecker {
+                            symbols: &self.symbol_table,
+                            types: &self.result.type_context,
+                            functions: &self.result.functions,
+                            expr_types: Some(&self.result.expr_types),
+                        };
+                        for (i, arg) in args.iter().enumerate() {
+                            if i < params.len() {
+                                if let Some(arg_ty) = checker.infer_expr_ctype(arg) {
+                                    self.check_pointer_float_conversion(
+                                        &arg_ty, &params[i].0, arg.span(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Expr::BinaryOp(op, lhs, rhs, span) => {
                 self.analyze_expr(lhs);
@@ -1334,9 +1375,22 @@ impl SemanticAnalyzer {
             Expr::PostfixOp(_, operand, _) => {
                 self.analyze_expr(operand);
             }
-            Expr::Assign(lhs, rhs, _) => {
+            Expr::Assign(lhs, rhs, span) => {
                 self.analyze_expr(lhs);
                 self.analyze_expr(rhs);
+                // Check for invalid pointer <-> float conversions in assignment
+                let checker = super::type_checker::ExprTypeChecker {
+                    symbols: &self.symbol_table,
+                    types: &self.result.type_context,
+                    functions: &self.result.functions,
+                    expr_types: Some(&self.result.expr_types),
+                };
+                if let (Some(lhs_ty), Some(rhs_ty)) = (
+                    checker.infer_expr_ctype(lhs),
+                    checker.infer_expr_ctype(rhs),
+                ) {
+                    self.check_pointer_float_conversion(&rhs_ty, &lhs_ty, *span);
+                }
             }
             Expr::CompoundAssign(_, lhs, rhs, _) => {
                 self.analyze_expr(lhs);
@@ -1557,6 +1611,26 @@ impl SemanticAnalyzer {
                 format!(
                     "invalid operands to binary - (have '{}' and '{}')",
                     lct, rct
+                ),
+                span,
+            );
+        }
+    }
+
+    /// Check for invalid implicit conversions between pointer and floating-point types.
+    /// C11 6.5.16.1p1: pointer types cannot be implicitly converted to/from floating-point types.
+    /// This catches cases like `float f = ptr;`, `func_taking_float(ptr)`, etc.
+    fn check_pointer_float_conversion(&self, from_ty: &CType, to_ty: &CType, span: Span) {
+        let from_is_ptr = from_ty.is_pointer_like() || matches!(from_ty, CType::Function(_));
+        let to_is_ptr = to_ty.is_pointer_like() || matches!(to_ty, CType::Function(_));
+        let from_is_float = from_ty.is_floating() || from_ty.is_complex();
+        let to_is_float = to_ty.is_floating() || to_ty.is_complex();
+
+        if (from_is_ptr && to_is_float) || (from_is_float && to_is_ptr) {
+            self.diagnostics.borrow_mut().error(
+                format!(
+                    "incompatible types (have '{}' but expected '{}')",
+                    from_ty, to_ty
                 ),
                 span,
             );

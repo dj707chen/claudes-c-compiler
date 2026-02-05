@@ -615,9 +615,12 @@ own context-specific cases.
 
 ## Known Limitations
 
-- **No full type checking.** Sema does not validate type compatibility in
-  assignments, function call arguments, or return statements. Programs with type
-  errors will pass sema and may cause panics or incorrect codegen in the lowerer.
+- **Limited type checking.** Sema validates pointer<->float type incompatibility
+  in assignments, variable initializers, and function call arguments (C11 6.5.16.1p1),
+  but does not perform full type compatibility checking. Return statement types,
+  function pointer call arguments, and other implicit conversions are not validated.
+  Programs with non-pointer/float type errors may pass sema and cause panics or
+  incorrect codegen in the lowerer.
 
 - **Incomplete `typeof(expr)` support.** The `ExprTypeChecker` returns `None` for
   expressions it cannot type (complex expression chains through typeof, expressions
