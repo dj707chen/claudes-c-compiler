@@ -3299,8 +3299,70 @@ fn encode_mrs(operands: &[Operand]) -> Result<EncodeResult, String> {
     Ok(EncodeResult::Word(word))
 }
 
+/// Compute sysreg encoding from (op0, op1, CRn, CRm, op2) fields.
+fn sysreg_encoding(op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> u32 {
+    ((op0 & 3) << 14) | ((op1 & 7) << 11) | ((crn & 0xF) << 7) | ((crm & 0xF) << 3) | (op2 & 7)
+}
+
+/// Try to parse a numbered debug/performance register family name like
+/// `dbgbcr15_el1` or `dbgwvr0_el1` into its encoding. Returns None if not matched.
+fn parse_numbered_sysreg(name: &str) -> Option<u32> {
+    // Debug breakpoint/watchpoint registers: dbg{b,w}{c,v}r<n>_el1
+    // dbgbcr<n>_el1: op0=2, op1=0, CRn=0, CRm=n, op2=5
+    // dbgbvr<n>_el1: op0=2, op1=0, CRn=0, CRm=n, op2=4
+    // dbgwcr<n>_el1: op0=2, op1=0, CRn=0, CRm=n, op2=7
+    // dbgwvr<n>_el1: op0=2, op1=0, CRn=0, CRm=n, op2=6
+    let prefixes: &[(&str, &str, u32)] = &[
+        ("dbgbcr", "_el1", 5),
+        ("dbgbvr", "_el1", 4),
+        ("dbgwcr", "_el1", 7),
+        ("dbgwvr", "_el1", 6),
+    ];
+    for &(prefix, suffix, op2) in prefixes {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            if let Some(num_str) = rest.strip_suffix(suffix) {
+                if let Ok(n) = num_str.parse::<u32>() {
+                    if n <= 15 {
+                        return Some(sysreg_encoding(2, 0, 0, n, op2));
+                    }
+                }
+            }
+        }
+    }
+
+    // Performance monitor event count registers: pmevcntr<n>_el0, pmevtyper<n>_el0
+    // pmevcntr<n>_el0: op0=3, op1=3, CRn=14, CRm=8+n/8, op2=n%8
+    // pmevtyper<n>_el0: op0=3, op1=3, CRn=14, CRm=12+n/8, op2=n%8
+    if let Some(rest) = name.strip_prefix("pmevcntr") {
+        if let Some(num_str) = rest.strip_suffix("_el0") {
+            if let Ok(n) = num_str.parse::<u32>() {
+                if n <= 30 {
+                    return Some(sysreg_encoding(3, 3, 14, 8 + n / 8, n % 8));
+                }
+            }
+        }
+    }
+    if let Some(rest) = name.strip_prefix("pmevtyper") {
+        if let Some(num_str) = rest.strip_suffix("_el0") {
+            if let Ok(n) = num_str.parse::<u32>() {
+                if n <= 30 {
+                    return Some(sysreg_encoding(3, 3, 14, 12 + n / 8, n % 8));
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Parse generic system register name like `s3_0_c1_c0_1` into encoding bits.
+/// Also handles numbered register families like `dbgbcr15_el1`.
 fn parse_generic_sysreg(name: &str) -> Result<u32, String> {
+    // Try numbered register families first
+    if let Some(enc) = parse_numbered_sysreg(name) {
+        return Ok(enc);
+    }
+
     // Format: s<op0>_<op1>_c<CRn>_c<CRm>_<op2>
     let parts: Vec<&str> = name.split('_').collect();
     if parts.len() == 5 && parts[0].starts_with('s') && parts[2].starts_with('c') && parts[3].starts_with('c') {
@@ -3309,8 +3371,7 @@ fn parse_generic_sysreg(name: &str) -> Result<u32, String> {
         let crn: u32 = parts[2][1..].parse().map_err(|_| format!("unsupported system register: {}", name))?;
         let crm: u32 = parts[3][1..].parse().map_err(|_| format!("unsupported system register: {}", name))?;
         let op2: u32 = parts[4].parse().map_err(|_| format!("unsupported system register: {}", name))?;
-        // Encoding: op0[1:0] op1[2:0] CRn[3:0] CRm[3:0] op2[2:0]
-        let enc = ((op0 & 3) << 14) | ((op1 & 7) << 11) | ((crn & 0xF) << 7) | ((crm & 0xF) << 3) | (op2 & 7);
+        let enc = sysreg_encoding(op0, op1, crn, crm, op2);
         Ok(enc)
     } else {
         Err(format!("unsupported system register: {}", name))
@@ -3324,8 +3385,8 @@ fn encode_msr(operands: &[Operand]) -> Result<EncodeResult, String> {
     };
 
     // MSR (immediate): msr <pstatefield>, #imm
-    // Encoding: 1101_0101_0000_0 op1[18:16] 0100 CRm[11:8] 101 op2[7:5] 11111
-    // daifset: op1=011, op2=110; daifclr: op1=011, op2=111
+    // Encoding: 1101_0101_0000_0 op1[18:16] 0100 CRm[11:8] op2[7:5] 11111[4:0]
+    // daifset: op1=3, op2=6; daifclr: op1=3, op2=7; spsel: op1=0, op2=5
     match sysreg.as_str() {
         "daifset" => {
             let imm = get_imm(operands, 1)? as u32 & 0xF;
@@ -3335,6 +3396,12 @@ fn encode_msr(operands: &[Operand]) -> Result<EncodeResult, String> {
         "daifclr" => {
             let imm = get_imm(operands, 1)? as u32 & 0xF;
             let word = 0xd5034000 | (imm << 8) | (0b111 << 5) | 0x1F;
+            return Ok(EncodeResult::Word(word));
+        }
+        "spsel" => {
+            // SPSel: op1=0, op2=5
+            let imm = get_imm(operands, 1)? as u32 & 0xF;
+            let word = 0xd5004000 | (imm << 8) | (0b101 << 5) | 0x1F;
             return Ok(EncodeResult::Word(word));
         }
         _ => {}
@@ -3354,6 +3421,7 @@ fn encode_msr(operands: &[Operand]) -> Result<EncodeResult, String> {
         "sctlr_el1" => 0xc080,
         "mdscr_el1" => 0x8012,
         "cpacr_el1" => 0xc082,
+        "par_el1" => 0xc3a0,
         "osdlr_el1" => 0x809c,
         "oslar_el1" => 0x8084,
         "oslsr_el1" => 0x808c,
