@@ -1,0 +1,20 @@
+Fix x86 assembler: bare `symbol = expression` assignments not tracked during preprocessing.
+
+The x86 kernel uses `i = 0` and `i = i + 1` inside `.rept` loops (e.g., head_64.S
+early_idt_handler_array, entry_64.S irq_entries_start). These bare assignment forms
+are only recognized late in parse_line_items as raw aliases, not during the
+expand_gas_macros preprocessing phase where `.set` is handled.
+
+This means the variable value is never progressively updated across .rept iterations,
+causing `i` and `vector` to appear as undefined symbol references.
+
+Fix: Make expand_gas_macros_with_state recognize `symbol = expression` lines
+the same way it recognizes `.set symbol, expression` and track them in the
+symbols HashMap for progressive evaluation.
+
+This is the root cause of x86 kernel link errors:
+- undefined reference to `i` (head_64.S early_idt_handler_array)
+- undefined reference to `vector` (idtentry.h irq_entries_start)
+- undefined reference to `pgtno` (head_64.S)
+
+Started: 2026-02-05
