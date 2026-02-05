@@ -1,0 +1,11 @@
+Fix inline asm register aliasing for read-write (+) constraints.
+
+The +r constraint outputs were not excluded from the input register pool,
+causing input operands to share registers with +r outputs. This corrupted
+the pre-loaded +r values during input loading.
+
+Fix: treat '+' outputs the same as '&' (early-clobber) outputs in the
+input exclusion list of assign_scratch_registers().
+
+Fixed 25+ asm test failures across x86 involving add, sub, adc, xor,
+cmov, bsr, crc32, pclmulqdq, and other instructions.
