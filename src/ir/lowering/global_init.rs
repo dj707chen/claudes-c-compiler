@@ -129,11 +129,18 @@ impl Lowerer {
         }
 
         // Cast-wrapped compound literal: e.g., (char *)(unsigned char[]){ 0xFD }
+        // Also handles (void*) &(CompoundLiteral) pattern used in static initializers.
         {
             let stripped = Self::strip_casts(expr);
             if !std::ptr::eq(expr as *const _, stripped as *const _) {
                 if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = stripped {
                     return self.create_compound_literal_global(cl_type_spec, cl_init);
+                }
+                // (void*) &(CompoundLiteral) – cast wrapping address-of compound literal
+                if let Expr::AddressOf(inner, _) = stripped {
+                    if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = inner.as_ref() {
+                        return self.create_compound_literal_global(cl_type_spec, cl_init);
+                    }
                 }
             }
         }

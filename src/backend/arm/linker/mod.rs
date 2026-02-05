@@ -104,7 +104,7 @@ pub fn link_builtin(
         if arg == "-rdynamic" { export_dynamic = true; }
         if let Some(wl_arg) = arg.strip_prefix("-Wl,") {
             for part in wl_arg.split(',') {
-                if part == "--export-dynamic" || part == "-E" { export_dynamic = true; }
+                if part == "--export-dynamic" || part == "-export-dynamic" || part == "-E" { export_dynamic = true; }
             }
         }
     }

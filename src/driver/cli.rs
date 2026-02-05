@@ -292,6 +292,16 @@ impl Driver {
                     self.linker_ordered_items.push(arg.to_string());
                 }
 
+                // Linker pass-through: -Xlinker ARG
+                // Each -Xlinker passes exactly one argument to the linker.
+                // Convert to -Wl,ARG format for uniform downstream handling.
+                "-Xlinker" => {
+                    i += 1;
+                    if i < args.len() {
+                        self.linker_ordered_items.push(format!("-Wl,{}", args[i]));
+                    }
+                }
+
                 // Assembler pass-through: -Wa,flag1,flag2,...
                 arg if arg.starts_with("-Wa,") => {
                     for flag in arg[4..].split(',') {

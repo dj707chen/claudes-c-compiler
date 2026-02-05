@@ -781,6 +781,13 @@ impl Driver {
                 preprocessor.set_riscv_march(march);
             }
         }
+        // Define __STRICT_ANSI__ for strict ISO C modes (-std=c99, -std=c11, etc.).
+        // GCC defines this when non-GNU standard modes are used. Headers like
+        // glibc's <features.h> and CPython's pymacro.h check for it to gate
+        // GNU extensions like typeof.
+        if !self.gnu_extensions {
+            preprocessor.set_strict_ansi(true);
+        }
         // Set inline semantics mode: -fgnu89-inline or -std=gnu89 uses GNU89
         // inline semantics (__GNUC_GNU_INLINE__), while the default C99+ mode
         // uses __GNUC_STDC_INLINE__. Projects like mpack use these macros to

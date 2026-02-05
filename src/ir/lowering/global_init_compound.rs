@@ -386,6 +386,13 @@ impl Lowerer {
             if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = stripped {
                 return Some(self.create_compound_literal_global(cl_type_spec, cl_init));
             }
+            // (void*) &(CompoundLiteral) – cast wrapping address-of compound literal
+            // e.g., (void*) &(PyABIInfo) { .major = 1, ... } in static struct initializers
+            if let Expr::AddressOf(inner, _) = stripped {
+                if let Expr::CompoundLiteral(ref cl_type_spec, ref cl_init, _) = inner.as_ref() {
+                    return Some(self.create_compound_literal_global(cl_type_spec, cl_init));
+                }
+            }
         }
         // Try as a global address expression (&x, func name, array name, etc.)
         if let Some(addr) = self.eval_global_addr_expr(expr) {

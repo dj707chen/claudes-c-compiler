@@ -286,6 +286,18 @@ impl Preprocessor {
         paths
     }
 
+    /// Define `__STRICT_ANSI__` for strict ISO C modes (`-std=c99`, `-std=c11`, etc.).
+    /// GCC defines this macro when `-std=cXX` (non-GNU) modes are used, and many
+    /// headers (glibc's `<features.h>`, CPython's `pymacro.h`) check for it to
+    /// gate GNU extensions like `typeof`.
+    pub fn set_strict_ansi(&mut self, strict: bool) {
+        if strict {
+            self.define_simple_macro("__STRICT_ANSI__", "1");
+        } else {
+            self.macros.undefine("__STRICT_ANSI__");
+        }
+    }
+
     /// Set inline semantics mode: GNU89 vs C99.
     /// When `gnu89` is true, defines `__GNUC_GNU_INLINE__` and undefines `__GNUC_STDC_INLINE__`.
     /// When `gnu89` is false (default), `__GNUC_STDC_INLINE__` remains defined.

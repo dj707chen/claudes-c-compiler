@@ -143,7 +143,7 @@ pub fn link_builtin(
             let mut j = 0;
             while j < parts.len() {
                 let part = parts[j];
-                if part == "--export-dynamic" || part == "-E" {
+                if part == "--export-dynamic" || part == "-export-dynamic" || part == "-E" {
                     export_dynamic = true;
                 } else if let Some(rp) = part.strip_prefix("-rpath=") {
                     rpath_entries.push(rp.to_string());
@@ -1180,6 +1180,7 @@ fn emit_shared_library(
     let globals_snap: HashMap<String, GlobalSymbol> = globals.clone();
     let mut rela_dyn_entries: Vec<(u64, u64)> = Vec::new(); // (offset, value) for RELATIVE relocs
     let mut glob_dat_entries: Vec<(u64, String)> = Vec::new(); // (offset, sym_name) for GLOB_DAT relocs
+    let mut r64_entries: Vec<(u64, String, i64)> = Vec::new(); // (offset, sym_name, addend) for R_X86_64_64 relocs (external data refs)
 
     // Add RELATIVE entries for GOT entries that point to local symbols,
     // and GLOB_DAT entries for GOT entries that point to external symbols
@@ -1219,11 +1220,29 @@ fn emit_shared_library(
 
                 match rela.rela_type {
                     R_X86_64_64 => {
-                        let val = (s as i64 + a) as u64;
-                        w64(&mut out, fp, val);
-                        // Need R_X86_64_RELATIVE for this at load time
-                        if s != 0 {
-                            rela_dyn_entries.push((p, val));
+                        // Check if this is an external/undefined symbol that needs
+                        // a runtime R_X86_64_64 relocation (so the dynamic linker
+                        // can resolve it, e.g. function pointers in static data
+                        // referencing symbols from the host executable).
+                        let is_external = !sym.name.is_empty() && !sym.is_local() && {
+                            if let Some(g) = globals_snap.get(&sym.name) {
+                                g.section_idx == SHN_UNDEF || g.is_dynamic
+                            } else {
+                                true // unknown symbol = external
+                            }
+                        };
+                        if is_external && !sym.name.is_empty() {
+                            // External symbol: write 0 (or addend) and emit R_X86_64_64
+                            // dynamic relocation for the dynamic linker to resolve.
+                            w64(&mut out, fp, a as u64);
+                            r64_entries.push((p, sym.name.clone(), a));
+                        } else {
+                            let val = (s as i64 + a) as u64;
+                            w64(&mut out, fp, val);
+                            // Need R_X86_64_RELATIVE for this at load time
+                            if s != 0 {
+                                rela_dyn_entries.push((p, val));
+                            }
                         }
                     }
                     R_X86_64_PC32 | R_X86_64_PLT32 => {
@@ -1296,7 +1315,7 @@ fn emit_shared_library(
 
     // Write .rela.dyn entries
     let relative_count = rela_dyn_entries.len();
-    let total_rela_count = relative_count + glob_dat_entries.len();
+    let total_rela_count = relative_count + glob_dat_entries.len() + r64_entries.len();
     let rela_dyn_size = total_rela_count as u64 * 24;
     let mut rd = rela_dyn_offset as usize;
     // First: R_X86_64_RELATIVE entries (type 8, no symbol)
@@ -1315,6 +1334,18 @@ fn emit_shared_library(
             w64(&mut out, rd, *rel_offset);         // r_offset = GOT entry address
             w64(&mut out, rd+8, (si << 32) | R_X86_64_GLOB_DAT as u64);
             w64(&mut out, rd+16, 0);                 // r_addend = 0
+            rd += 24;
+        }
+    }
+    // Then: R_X86_64_64 entries (type 1, with symbol index + addend)
+    // These are for function/data pointers in static data that reference
+    // external symbols (resolved by the dynamic linker at load time).
+    for (rel_offset, sym_name, addend) in &r64_entries {
+        let si = dyn_sym_names.iter().position(|n| n == sym_name).map(|j| j + 1).unwrap_or(0) as u64;
+        if rd + 24 <= out.len() {
+            w64(&mut out, rd, *rel_offset);         // r_offset = data location
+            w64(&mut out, rd+8, (si << 32) | R_X86_64_64 as u64); // r_info = sym_idx << 32 | type
+            w64(&mut out, rd+16, *addend as u64);   // r_addend
             rd += 24;
         }
     }
