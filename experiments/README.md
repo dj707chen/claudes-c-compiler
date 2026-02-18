@@ -15,11 +15,12 @@ these experiments, in order:
 3. *"git config --global user.email and user.name then commit"* → provided `weiping / dj707chen@gmail.com`
 4. *"push it"* (interrupted / not completed)
 5. *"Change the cc command in experiments/weatherTell/Makefile to use the c compiler buit from this repository"*
-6. *"do a release build"*
-7. *"find a open source tool (curl if you could find one) written in basic C language, clone its source code, change it's C compiler to use the release version C compiler built from this repository, build it"*
-8. *"can you record what you did in a markdown file?"*
-9. *"Sorry I forgot to tell you also record the exact instructions I gave you in this file"*
-10. *"Fork the remote repository in github to github user dj707chen, update the remote.origin.url to this forked repo, then update the session log at the top of experiments/README.md, commit and push"*
+6. *"build the compiler"*
+7. *"Do a release build"*
+8. *"find a open source tool (curl if you could find one) written in basic C language, clone its source code, change it's C compiler to use the release version C compiler built from this repository, build it"*
+9. *"can you record what you did in a markdown file?"*
+10. *"Sorry I forgot to tell you also record the exact instructions I gave you in this file"*
+11. *"Fork the remote repository in github to github user dj707chen, update the remote.origin.url to this forked repo, then update the session log at the top of experiments/README.md, commit and push"*
 
 ---
 
