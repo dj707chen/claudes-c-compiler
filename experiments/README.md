@@ -19,6 +19,7 @@ these experiments, in order:
 7. *"find a open source tool (curl if you could find one) written in basic C language, clone its source code, change it's C compiler to use the release version C compiler built from this repository, build it"*
 8. *"can you record what you did in a markdown file?"*
 9. *"Sorry I forgot to tell you also record the exact instructions I gave you in this file"*
+10. *"Fork the remote repository in github to github user dj707chen, update the remote.origin.url to this forked repo, then update the session log at the top of experiments/README.md, commit and push"*
 
 ---
 
