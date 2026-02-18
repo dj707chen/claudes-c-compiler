@@ -1,4 +1,4 @@
-CC      = gcc
+CC      = ../../target/release/ccc
 CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic -O2
 TARGET  = weather
 
